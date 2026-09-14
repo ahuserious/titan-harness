@@ -1,5 +1,5 @@
 - name: fable
-  model: anthropic/claude-fable-5
+  model: anthropic/claude-fable-5-1
   thinking: medium
   architect: true
   color: "#A78BFA"

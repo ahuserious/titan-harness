@@ -84,13 +84,13 @@ import {
 	type Role,
 	type SpawnIdentity,
 } from "./modules/runtime.ts";
-import { isStackChild, readStackSettings, STACK_MODEL_BAR_HOOK, writeStackSettings } from "./modules/stack-config.ts";
-import { cellStr, fanOutCellStr } from "./modules/tui.ts";
+import { EXA_TOOL_NAMES, isStackChild, readStackSettings, STACK_MODEL_BAR_HOOK, writeStackSettings } from "./modules/stack-config.ts";
+import { cellStr, exaCellStr, fanOutCellStr, subagentCellStr } from "./modules/tui.ts";
 import { acquireWriterLease, type WriterLease } from "./modules/writer-lease.ts";
 
 // ═══ 1. Defaults ═════════════════════════════════════════════════════════════
 
-const DEFAULT_ARCHITECT = "anthropic/claude-fable-5"; // plans, fuses, validates
+const DEFAULT_ARCHITECT = "anthropic/claude-fable-5-1"; // plans, fuses, validates
 const DEFAULT_BUILDER = "openai-codex/gpt-6-astra"; // last-resort builder — an unset --builder normally follows the HOST session's model
 
 const CHILD_TIMEOUT_S_DEFAULT = 28_800; // 8h — every spawned child; real work runs for hours (--child-timeout overrides)
@@ -660,6 +660,10 @@ export default function (pi: ExtensionAPI) {
 						// FAN-OUT row: how many children are running right now, out of how many this
 						// command spawned, against the configured stack size.
 						rows.push(truncateToWidth(fanOutCellStr(theme, fanOutSnapshot()), width));
+						// SUBAGENT row: the model pi-subagents will use for delegated workers, and
+						// whether its provider is authed. EXA row: is web search live in this session.
+						rows.push(truncateToWidth(subagentCellStr(theme, subagentSnapshot(ctx)), width));
+						rows.push(truncateToWidth(exaCellStr(theme, exaSnapshot()), width));
 						return rows;
 					},
 				}),
@@ -766,6 +770,35 @@ export default function (pi: ExtensionAPI) {
 		command: currentCommand,
 		elapsedMs: currentCommand ? Date.now() - currentStartedAt : 0,
 	});
+	const subagentSnapshot = (ctx: any) => {
+		const s = readStackSettings();
+		const slash = s.subagentModel.indexOf("/");
+		let registered = false;
+		let authed: boolean | undefined;
+		try {
+			const model = slash > 0 ? ctx.modelRegistry.find(s.subagentModel.slice(0, slash), s.subagentModel.slice(slash + 1)) : undefined;
+			registered = !!model;
+			if (model) authed = ctx.modelRegistry.hasConfiguredAuth(model);
+		} catch {
+			/* registry not bound yet */
+		}
+		return { model: s.subagentModel, thinking: s.subagentThinking, registered, authed, childMode: s.childSubagents };
+	};
+	const exaSnapshot = () => {
+		const s = readStackSettings();
+		let all: string[] = [];
+		let active: string[] = [];
+		try {
+			// getAllTools() returns definitions; getActiveTools() returns NAMES (pi-exa relies on that too).
+			const toolName = (tool: any) => (typeof tool === "string" ? tool : String(tool?.name ?? ""));
+			all = ((pi as any).getAllTools?.() ?? []).map(toolName);
+			active = ((pi as any).getActiveTools?.() ?? []).map(toolName);
+		} catch {
+			/* runtime not bound yet */
+		}
+		const total = EXA_TOOL_NAMES.filter((name) => all.includes(name)).length;
+		return { installed: total > 0, total, active: EXA_TOOL_NAMES.filter((name) => active.includes(name)).length, children: s.childExa };
+	};
 	const activitySummary = (command: string, runs: AgentRun[], startedAt: number): string => {
 		const working = runs.filter((run) => run.status === "working");
 		const done = runs.filter((run) => run.status === "done").length;

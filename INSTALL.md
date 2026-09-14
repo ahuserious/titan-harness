@@ -163,3 +163,28 @@ subagent-tools and fan-out toggles).
 - One documented patch to pi-dynamic-workflows' `dist/workflow-commands.js`
   (bare `/workflows` menu hook). Without it the stock navigator opens; the
   toggles remain reachable through `/stack`.
+
+## 7. Subagent model (pi-subagents) and Cerebras
+
+`/stack` writes the subagent model into Pi's `settings.json` under `subagents`
+(`defaultModel`, `defaultProvider`, `defaultThinking`). The shipped default is
+`cerebras/qwen-3.8-27b` at `high`; the `⇢ SUBAGENT` row in the model bar stays amber
+until Cerebras is authed:
+
+```bash
+export CEREBRAS_API_KEY=...      # or, in Pi: /login cerebras
+```
+
+`qwen-3.8-27b` is a custom entry on Pi's built-in Cerebras provider; if a fresh
+machine lacks it, add to `~/.pi/agent/models.json`:
+
+```json
+{ "providers": { "cerebras": { "models": [ { "id": "qwen-3.8-27b", "name": "Qwen 3.8 27B",
+  "reasoning": true, "input": ["text", "image"], "contextWindow": 131072, "maxTokens": 40960,
+  "cost": { "input": 0.99, "output": 1.49, "cacheRead": 0, "cacheWrite": 0 } } ] } } }
+```
+
+`/stack subagent-model <provider/id> [thinking]` accepts any catalog model, authed or
+not; the interactive picker lists ★ favorites, Cerebras, the full OpenRouter catalog,
+then every provider. OpenRouter and Cerebras models appear once those providers are
+authed (`/login openrouter`, `/login cerebras`).

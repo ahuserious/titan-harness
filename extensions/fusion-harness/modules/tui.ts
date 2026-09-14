@@ -56,3 +56,42 @@ export const fanOutCellStr = (theme: any, snap: FanOutSnapshot): string => {
 	if (snap.command) bits.push(theme.fg(color, `/${snap.command} ${fmtSecs(snap.elapsedMs)}`));
 	return head + sep + bits.join(sep);
 };
+
+export interface SubagentSnapshot {
+	model: string; // provider/id pi-subagents uses by default
+	thinking: string;
+	registered: boolean; // model id exists in Pi's catalog
+	authed: boolean | undefined; // provider has configured auth (undefined when unknown)
+	childMode: string; // all | builders | off — which harness children carry the subagent tool
+}
+
+/**
+ * The SUBAGENT row: `⇢ SUBAGENT | qwen-3.8-27b (hi) | cerebras ✓ | children: all`.
+ * Warning-colored when the provider is not authed (the default is Cerebras, which
+ * needs /login cerebras), dim when the model id is not even in the catalog.
+ */
+export const subagentCellStr = (theme: any, s: SubagentSnapshot): string => {
+	const sep = theme.fg("dim", " | ");
+	const slash = s.model.indexOf("/");
+	const provider = slash > 0 ? s.model.slice(0, slash) : "?";
+	const id = slash > 0 ? s.model.slice(slash + 1) : s.model;
+	const color = !s.registered ? "dim" : s.authed === false ? "warning" : "success";
+	const auth = !s.registered ? "not in catalog" : s.authed === false ? `${provider} ✗ /login ${provider}` : `${provider} ✓`;
+	return theme.fg(color, theme.bold("⇢ SUBAGENT")) + sep + theme.fg(color, `${id}${thinkingTag(s.thinking)}`) + sep + theme.fg(color, auth) + sep + theme.fg(color, `children: ${s.childMode}`);
+};
+
+export interface ExaSnapshot {
+	installed: boolean; // pi-exa registered at least one tool
+	active: number; // exa tools active in the host session
+	total: number; // exa tools registered
+	children: boolean; // harness children get the exa tools
+}
+
+/** The EXA row: `⌕ EXA | live · 4/4 tools | children: on` (success), or a dim "not installed". */
+export const exaCellStr = (theme: any, e: ExaSnapshot): string => {
+	const sep = theme.fg("dim", " | ");
+	if (!e.installed) return theme.fg("dim", theme.bold("⌕ EXA")) + sep + theme.fg("dim", "not installed (pi install npm:pi-exa)");
+	const color = e.active > 0 ? "success" : "warning";
+	const state = e.active > 0 ? `live · ${e.active}/${e.total} tools` : `registered, inactive (${e.total} tools) · /exa-enable`;
+	return theme.fg(color, theme.bold("⌕ EXA")) + sep + theme.fg(color, state) + sep + theme.fg(color, `children: ${e.children ? "on" : "off"}`);
+};

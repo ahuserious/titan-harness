@@ -7,7 +7,7 @@ default:
 # fusion-harness — 2-5 configured agents, AND not OR.
 WORKHORSE_ARCHITECT := "anthropic/claude-sonnet-5"
 WORKHORSE_BUILDER := "openai/gpt-5.6-terra"
-SOTA_ARCHITECT := "anthropic/claude-fable-5"
+SOTA_ARCHITECT := "anthropic/claude-fable-5-1"
 SOTA_BUILDER := "openai-codex/gpt-6-astra"
 
 # Cheap legacy two-slot pair. Raw chat is the builder.

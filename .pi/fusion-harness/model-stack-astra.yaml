@@ -3,7 +3,7 @@
 # Context window is NOT in this file — use Pi /ctx:
 #   subscription 272k · extended 828k compact · OpenRouter/provider 1M
 - name: fable
-  model: anthropic/claude-fable-5
+  model: anthropic/claude-fable-5-1
   thinking: medium
   architect: true
   color: "#A78BFA"

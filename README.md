@@ -60,3 +60,26 @@ that shape). `skills/` is the curated pack: one skill per server, three combo
 workflows (`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), and
 `mcp-cli-bridges` for calling servers from bash with mcp2cli or mcporter. See
 `INSTALL.md` for the agent-facing install steps and `mcp/README.md` for per-server notes.
+
+## Architect / builder / subagents
+
+A stack is one **ARCHITECT** slot (plans, fuses, validates), one **primary BUILDER**
+(the live host chat: raw prompts *are* the builder), and up to three more builders.
+Every `/fh-*` command spawns the slots as child `pi --mode json -p` processes with a
+role-specific tool contract: research roles (opinion, debate, proposals, the
+collaboration coordinator's planning turn) run read-only; builders, the FUSION
+merger, and the validator get write tools. Children keep a persistent per-slot
+session for the whole Pi launch, so the architect remembers earlier rounds.
+
+Both roles can now **spawn subagents**: children load pi-subagents, and `/stack`'s
+"Child subagents" switch adds its `subagent` tool to every child (`all`), to
+write-capable children only (`builders`), or to none (`off`). Those workers use the
+**subagent model** shown in the model bar (`⇢ SUBAGENT` row), which `/stack` writes
+into Pi's `settings.json` as `subagents.defaultModel` / `defaultThinking`. The
+default is `cerebras/qwen-3.8-27b` at `high`; the row turns amber with
+`/login cerebras` until the provider is authed. The `⌕ EXA` row shows whether
+pi-exa's web search is live in the host and whether children get it too.
+
+Picking the subagent model in `/stack` starts from your ★ favorites (Pi's
+`enabledModels`), then Cerebras, then the whole OpenRouter catalog, then every
+provider Pi knows, authed or not; unauthed picks are allowed and flagged.
