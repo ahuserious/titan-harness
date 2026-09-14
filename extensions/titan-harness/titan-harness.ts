@@ -86,7 +86,7 @@ import {
 	type Role,
 	type SpawnIdentity,
 } from "./modules/runtime.ts";
-import { auditBuilderRun as runAuditGate } from "./modules/audit.ts";
+import { auditBuilderRun as runAuditGate, hasWorkingTreeChanges } from "./modules/audit.ts";
 import {
 	BUILDER_FANOUT_CYCLE,
 	EXA_TOOL_NAMES,
@@ -359,14 +359,23 @@ export default function (pi: ExtensionAPI) {
 		const builders: ModelSlot[] = [stack.primaryBuilder, ...extras.slice(0, Math.max(0, n - 1))];
 		if (builders.length < n) {
 			const used = new Set(stack.slots.map((slot) => slot.model));
+			const takenNames = new Set(stack.slots.map((slot) => slot.name.toLowerCase()));
+			const takenIds = new Set(stack.slots.map((slot) => slot.id));
 			let index = extras.length;
 			for (const model of BUILDER_POOL) {
 				if (builders.length >= n) break;
 				if (used.has(model) || !modelUsable(model)) continue;
 				used.add(model);
+				// First pool callsign the YAML did not already use (a YAML "anvil" must not
+				// be duplicated by a pool "anvil"); ids stay unique too.
+				const name = BUILDER_NAMES.find((candidate) => !takenNames.has(candidate)) ?? `builder-${index + 1}`;
+				takenNames.add(name);
+				let id = `builder-${index + 1}`;
+				while (takenIds.has(id)) id = `${id}x`;
+				takenIds.add(id);
 				builders.push({
-					id: `builder-${index + 1}`,
-					name: BUILDER_NAMES[index] ?? `builder-${index + 1}`,
+					id,
+					name,
 					model,
 					thinking: "high",
 					color: BUILDER_COLORS[index % BUILDER_COLORS.length],
@@ -1304,7 +1313,8 @@ export default function (pi: ExtensionAPI) {
 			// architect's own answers are not.
 			let report = runOk(run) ? run.text : `FAILED: ${runError(run)}`;
 			let blocked = false;
-			if (!slot.architect && runOk(run)) {
+			// A chat-only answer (no working-tree change) is not a write task: no audit.
+			if (!slot.architect && runOk(run) && hasWorkingTreeChanges(ctx.cwd)) {
 				ctx.ui.setStatus(CUSTOM_TYPE, `titan-only: auditing ${slot.name}…`);
 				const outcome = await auditGate(ctx, { builder: slot, run, task: { id: "only", description: prompt, outputs: [] }, report, artifactsDir, prompt, tools: FULL_TOOLS, spawn, signal: stopper.signal });
 				report = outcome.report;

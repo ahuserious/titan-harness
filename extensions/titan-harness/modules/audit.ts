@@ -50,6 +50,14 @@ export function workingTreeDiff(cwd: string): string {
 	return parts.join("\n\n");
 }
 
+/** True when the working tree has tracked changes or untracked files (a chat-only answer has neither). */
+export function hasWorkingTreeChanges(cwd: string): boolean {
+	const inside = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd, encoding: "utf8", timeout: 5_000 });
+	if (inside.status !== 0) return true; // not a repo: cannot tell, so audit
+	const stat = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8", timeout: 20_000, maxBuffer: 8 * 1024 * 1024 });
+	return stat.status !== 0 || (stat.stdout ?? "").trim().length > 0;
+}
+
 /** Pull the verdict word out of the auditor's YAML block. */
 export function parseVerdict(text: string): { verdict: AuditStatus | "FAIL"; yaml: string } {
 	const fenced = text.match(/```ya?ml\s*([\s\S]*?)```/i);
