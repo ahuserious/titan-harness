@@ -1,0 +1,58 @@
+{
+  "mcpServers": {
+    "figma": {
+      "url": "https://mcp.figma.com/mcp",
+      "auth": "oauth"
+    },
+    "figma-desktop": {
+      "url": "http://127.0.0.1:3845/mcp",
+      "disabled": true
+    },
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "shadcn@latest",
+        "mcp"
+      ]
+    },
+    "relume": {
+      "url": "https://relume-library-mcp.relume.io/mcp",
+      "auth": "oauth"
+    },
+    "brandfetch": {
+      "url": "https://mcp.brandfetch.io/mcp",
+      "auth": "oauth"
+    },
+    "higgsfield": {
+      "url": "https://mcp.higgsfield.ai/mcp",
+      "auth": "oauth"
+    },
+    "macro": {
+      "url": "https://mcp-server.macro.com/mcp",
+      "auth": "oauth"
+    },
+    "testmu": {
+      "url": "https://mcp.lambdatest.com/mcp",
+      "auth": "oauth"
+    },
+    "momentic": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "momentic",
+        "mcp",
+        "--config",
+        "${MOMENTIC_CONFIG}"
+      ],
+      "env": {
+        "MOMENTIC_API_KEY": "${MOMENTIC_API_KEY}"
+      },
+      "disabled": true
+    },
+    "framer-mcp-plugin": {
+      "url": "${FRAMER_MCP_URL}",
+      "disabled": true
+    }
+  }
+}
