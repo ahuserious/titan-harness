@@ -1,4 +1,4 @@
-# INSTALL.md — for an LLM agent setting up pi-fusion-stack
+# INSTALL.md — for an LLM agent setting up titan-harness
 
 You are an agent (Claude Code, Codex, Pi, Cursor, or similar) installing this
 package for a human. Follow the numbered steps in order. Every command is
@@ -16,8 +16,8 @@ store.
 ## 1. Install the Pi package
 
 ```bash
-pi install git:github.com/ahuserious/pi-fusion-stack
-pi list                    # must show pi-fusion-stack and print its install directory
+pi install git:github.com/ahuserious/titan-harness
+pi list                    # must show titan-harness and print its install directory
 ```
 
 Pi clones git packages but does not run npm for them, so install the one
@@ -27,7 +27,7 @@ runtime dependency (`yaml`) inside the cloned directory printed by `pi list`:
 cd "<install directory from pi list>" && npm install --omit=dev
 ```
 
-This registers the extensions (`/fh-*`, `/ctx`, `/stack`) and the skill pack
+This registers the extensions (`/titan-*`, `/ctx`, `/stack`) and the skill pack
 (`skills/`). Companion packages the stack expects, install if absent:
 
 ```bash
@@ -52,7 +52,7 @@ Expect a JSON stream whose `turn_end` carries `pong` and no line containing
 ## 2. Install the MCP catalog
 
 ```bash
-cd "$(pi list | grep -A1 pi-fusion-stack | tail -1 | tr -d ' ')"   # the installed package dir
+cd "$(pi list | grep -A1 titan-harness | tail -1 | tr -d ' ')"   # the installed package dir
 node scripts/install-mcp.mjs            # → ~/.config/mcp/mcp.json (user-global)
 # or: node scripts/install-mcp.mjs --project   → ./.mcp.json for one repo
 ```
@@ -149,14 +149,14 @@ node scripts/install-mcp.mjs --dry-run | tail -5
 PI_OFFLINE=1 pi -p "reply with the single word pong" --no-session --mode json < /dev/null | grep -c pong
 ```
 
-In a TUI session: `/stack status` (settings), `/fh` (command index + model bar),
+In a TUI session: `/stack status` (settings), `/titan` (command index + model bar),
 `/mcp` (server status), `/workflows` (dynamic-workflows menu with the stack's
 subagent-tools and fan-out toggles).
 
 ## 6. What this package changes on the machine
 
 - `~/.pi/agent/settings.json` packages entry (via `pi install`).
-- `~/.pi/agent/pi-fusion-stack.json` (created on first `/stack` change).
+- `~/.pi/agent/titan-harness.json` (created on first `/stack` change).
 - `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs`).
 - `~/.pi/workflows/settings.json` `excludeSubagentTools` / `defaultConcurrency`
   (only when `/stack tools off` or `/stack fanout N` is used).

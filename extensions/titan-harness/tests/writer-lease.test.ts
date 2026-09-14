@@ -9,7 +9,7 @@ afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, for
 
 describe("CWD writer lease", () => {
   test("allows one writer and rejects a concurrent lease", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "fh-writer-lease-")); dirs.push(cwd);
+    const cwd = mkdtempSync(join(tmpdir(), "titan-writer-lease-")); dirs.push(cwd);
     const first = acquireWriterLease(cwd, "first");
     expect(() => acquireWriterLease(cwd, "second")).toThrow("already allowed to mutate");
     first.release();

@@ -55,7 +55,7 @@ export function runChild(opts: {
 	run.thinking = opts.thinking;
 	// Children load the host's extensions so extension-registered providers (for
 	// example antigravity/*) resolve inside them. Recursion is guarded by the
-	// STACK_CHILD_ENV marker: every pi-fusion-stack extension returns early in a
+	// STACK_CHILD_ENV marker: every titan-harness extension returns early in a
 	// child, so no harness commands, pickers, or status bars run there. Skills and
 	// context files stay off — the child's contract comes from the prompt files.
 	const args: string[] = [

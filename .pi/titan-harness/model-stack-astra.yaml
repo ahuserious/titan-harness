@@ -1,4 +1,4 @@
-# Local default stack (ahuserious Astra edit of fusion-harness v2).
+# Local default stack (ahuserious Astra edit of titan-harness v2).
 # Architect stays Fable 5 when Anthropic is authed; Main host is Codex GPT-6 Astra.
 # Context window is NOT in this file — use Pi /ctx:
 #   subscription 272k · extended 828k compact · OpenRouter/provider 1M

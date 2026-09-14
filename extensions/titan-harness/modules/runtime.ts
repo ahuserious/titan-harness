@@ -28,8 +28,8 @@ export const ANSWER_MAX_BYTES = 100_000; // cap any rendered agent answer
 export const DETAIL_SNIPPET_MAX = 4_000; // chars of script/output kept in message details
 export const GATE_TIMEOUT_MS = 120_000; // `uv run` of the validation gate
 
-export const CUSTOM_TYPE = "fusion-harness"; // customType tag on every panel/widget/status this extension emits
-export const BOOT_TYPE = "fusion-harness-boot"; // the boot banner's own tag — a session ENTRY, never an LLM-context message
+export const CUSTOM_TYPE = "titan-harness"; // customType tag on every panel/widget/status this extension emits
+export const BOOT_TYPE = "titan-harness-boot"; // the boot banner's own tag — a session ENTRY, never an LLM-context message
 
 // ═══ Roles ═══════════════════════════════════════════════════════════════════
 
@@ -141,10 +141,10 @@ export interface FhDetails {
 		| "triage"
 		| "error"
 		| "system-prompt"
-		| "solo" // /fh-only — one selected agent, one full-width answer
-		| "closing" // /fh-debate — the final round: two closing statements, side by side
-		| "collab"; // /fh-collaborate — the shared deliverable after the last turn
-	command?: string; // the slash command that produced this panel ("fh-fusion", …)
+		| "solo" // /titan-only — one selected agent, one full-width answer
+		| "closing" // /titan-debate — the final round: two closing statements, side by side
+		| "collab"; // /titan-collaborate — the shared deliverable after the last turn
+	command?: string; // the slash command that produced this panel ("titan-fusion", …)
 	title?: string; // duo panels: what THIS pair of columns is (e.g. "round 2 — rebuttals")
 	ok: boolean;
 	round?: number; // auto-validate: which build→validate round this panel reports

@@ -33,7 +33,7 @@ export function promptTemplate(file: string): string {
 		try {
 			tpl = fs.readFileSync(path.join(PROMPT_DIR, file), "utf-8").trim();
 		} catch (err) {
-			throw new Error(`fusion-harness: missing prompt file prompts/${file}: ${String(err)}`);
+			throw new Error(`titan-harness: missing prompt file prompts/${file}: ${String(err)}`);
 		}
 		promptCache.set(file, tpl);
 	}
@@ -58,18 +58,18 @@ export function rosterText(stack: ModelStack): string {
 
 // ═══ Fusion ══════════════════════════════════════════════════════════════════
 
-/** /fh-fusion parallel workers are strictly read-only researchers; the fuser is the sole writer. */
+/** /titan-fusion parallel workers are strictly read-only researchers; the fuser is the sole writer. */
 export function workerPrompt(slot: ModelSlot, stack: ModelStack, prompt: string): string {
 	return fill("USER_PROMPT_FUSION_WORKER.md", { SLOT_NAME: slot.name, MODEL: slot.model, ROSTER: rosterText(stack), PROMPT: prompt });
 }
 
-/** The built-in critical-merge instruction, used when /fh-fusion gets no explicit fusion prompt. */
+/** The built-in critical-merge instruction, used when /titan-fusion gets no explicit fusion prompt. */
 export const defaultFusionPrompt = (): string => promptTemplate("USER_PROMPT_FUSION_DEFAULT_INSTRUCTION.md");
 
 /**
- * /fh-fusion argument parsing — two forms:
- *   Quoted:    /fh-fusion "prompt to all agents" "fusion instruction"
- *   Separator: /fh-fusion prompt to all agents :: fusion instruction
+ * /titan-fusion argument parsing — two forms:
+ *   Quoted:    /titan-fusion "prompt to all agents" "fusion instruction"
+ *   Separator: /titan-fusion prompt to all agents :: fusion instruction
  */
 export function parseFusionArgs(input: string): { prompt: string; fusion?: string } {
 	const quoted = input.match(/^\s*(["'])([\s\S]*?)\1\s*([\s\S]*)$/);
@@ -126,7 +126,7 @@ export function fusionContextAckPrompt(runId: string, fusedResult: string): { pr
 
 // ═══ Auto-validate (gate-first) ══════════════════════════════════════════════
 
-/** Round 1 of /fh-auto-validate: the user's request plus the full (immutable) gate script. */
+/** Round 1 of /titan-auto-validate: the user's request plus the full (immutable) gate script. */
 export function builderPrompt(prompt: string, gateScript: string): string {
 	return fill("USER_PROMPT_BUILDER.md", { PROMPT: prompt, GATE_SCRIPT: gateScript });
 }
@@ -205,7 +205,7 @@ export function validatorPrompt(prompt: string, cwd: string, gatePath: string): 
 
 // ═══ Opinion + debate ════════════════════════════════════════════════════════
 
-/** /fh-opinion: every slot gives one independent, strictly read-only opinion. */
+/** /titan-opinion: every slot gives one independent, strictly read-only opinion. */
 export function opinionPrompt(slot: ModelSlot, stack: ModelStack, prompt: string): string {
 	return fill("USER_PROMPT_OPINION.md", { SLOT_NAME: slot.name, MODEL: slot.model, ROSTER: rosterText(stack), PROMPT: prompt });
 }

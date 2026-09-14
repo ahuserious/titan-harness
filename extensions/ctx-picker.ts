@@ -253,8 +253,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Pick Codex 272k, 828k compact, or OpenRouter/provider 1M context (/ctx [272k|828k|1m])",
 		handler,
 	});
-	pi.registerCommand("fh-ctx", {
-		description: "Alias for /ctx (fusion-harness context picker)",
+	pi.registerCommand("titan-ctx", {
+		description: "Alias for /ctx (titan-harness context picker)",
 		handler,
 	});
 

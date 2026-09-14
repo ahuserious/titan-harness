@@ -1,5 +1,5 @@
 /**
- * tui.ts — the little the harness still draws (pi-fusion-stack edit).
+ * tui.ts — the little the harness still draws (titan-harness edit).
  *
  * The layout primitives (TwoCol, AgentGrid, FullWidth), the live streaming columns,
  * and the transcript panel renderer are gone: results are plain markdown messages and
@@ -39,12 +39,12 @@ export interface FanOutSnapshot {
 	running: number; // children streaming right now
 	total: number; // children the current command spawned
 	stackSize: number; // configured slots
-	command?: string; // the /fh-* command in flight, if any
+	command?: string; // the /titan-* command in flight, if any
 	elapsedMs: number;
 }
 
 /**
- * The FAN-OUT row: `⇶ FAN-OUT | 2 running / 3 spawned | stack 3 | /fh-opinion 14s`.
+ * The FAN-OUT row: `⇶ FAN-OUT | 2 running / 3 spawned | stack 3 | /titan-opinion 14s`.
  * Idle: `⇶ FAN-OUT | idle | stack 3`. Accent-colored while something runs, dim when idle.
  */
 export const fanOutCellStr = (theme: any, snap: FanOutSnapshot): string => {

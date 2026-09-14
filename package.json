@@ -1,19 +1,19 @@
 {
-  "name": "pi-fusion-stack",
+  "name": "titan-harness",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dan's Pi stack: fusion-harness (children load extensions, plain-text results), /ctx context picker, /stack settings (subagent tools, fan-out, workflows menu hook), the tps + fan-out status bar, an MCP catalog (Figma, shadcn, Relume, Brandfetch, Higgsfield, Macro, TestMu, Momentic, Framer) and a curated skill pack.",
+  "description": "Dan's Pi stack: titan-harness (children load extensions, plain-text results), /ctx context picker, /stack settings (subagent tools, fan-out, workflows menu hook), the tps + fan-out status bar, an MCP catalog (Figma, shadcn, Relume, Brandfetch, Higgsfield, Macro, TestMu, Momentic, Framer) and a curated skill pack.",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "fusion-harness",
-    "fusion-stack"
+    "titan-harness",
+    "fusion-harness"
   ],
   "license": "MIT",
   "pi": {
     "extensions": [
-      "./extensions/fusion-harness/fusion-harness.ts",
+      "./extensions/titan-harness/titan-harness.ts",
       "./extensions/ctx-picker.ts",
       "./extensions/stack-settings.ts"
     ],
@@ -22,13 +22,13 @@
     ]
   },
   "scripts": {
-    "test": "bun test extensions/fusion-harness/tests"
+    "test": "bun test extensions/titan-harness/tests"
   },
   "dependencies": {
     "yaml": "^2.9.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/ahuserious/pi-fusion-stack.git"
+    "url": "https://github.com/ahuserious/titan-harness.git"
   }
 }

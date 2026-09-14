@@ -3,10 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-// The implementation spans the factory (fusion-harness.ts) plus modules/ — the
+// The implementation spans the factory (titan-harness.ts) plus modules/ — the
 // contracts below are about the WHOLE extension, so assert against the concatenation.
 const sourceFiles = [
-  join(root, "fusion-harness.ts"),
+  join(root, "titan-harness.ts"),
   ...readdirSync(join(root, "modules"))
     .filter((file) => file.endsWith(".ts"))
     .map((file) => join(root, "modules", file)),
@@ -25,12 +25,12 @@ describe("orchestration contracts", () => {
   });
 
   test("registers target commands and deletes unsafe/obsolete commands", () => {
-    for (const command of ["fh", "fh-model", "fh-only", "fh-opinion", "fh-fusion", "fh-debate", "fh-collaborate", "fh-auto-validate", "fh-system-prompt", "fh-reset"]) {
+    for (const command of ["titan", "titan-model", "titan-only", "titan-opinion", "titan-fusion", "titan-debate", "titan-collaborate", "titan-auto-validate", "titan-system-prompt", "titan-reset"]) {
       expect(source).toContain(`registerCommand("${command}"`);
     }
-    expect(source).not.toContain('registerCommand("fh-both"');
-    expect(source).not.toContain('registerCommand("fh-thinking"');
-    expect(source).not.toContain('registerCommand("fh-fusion-only"');
+    expect(source).not.toContain('registerCommand("titan-both"');
+    expect(source).not.toContain('registerCommand("titan-thinking"');
+    expect(source).not.toContain('registerCommand("titan-fusion-only"');
   });
 
   test("fusion has read-only sources, one full-tool fuser, and no-tools ACKs", () => {
@@ -61,7 +61,7 @@ describe("orchestration contracts", () => {
   test("collaborate serializes write-enabled children", () => {
     expect(source).toContain("activeWriters++");
     expect(source).toContain("maxConcurrentWriteEnabledChildren");
-    expect(source).toContain("acquireWriterLease(ctx.cwd, `/fh-collaborate");
+    expect(source).toContain("acquireWriterLease(ctx.cwd, `/titan-collaborate");
     expect(source).toContain("parseStrictJsonObject(architectRun.text");
     expect(source).toContain("tools: READONLY_TOOLS");
     expect(source).toContain("worktreeCommandsObserved");

@@ -1,10 +1,10 @@
 /**
  * cmd-build.ts — the commands that hold the writer lease and build things.
  *
- * /fh-collaborate: every agent plans → the architect merges ONE delegation DAG →
+ * /titan-collaborate: every agent plans → the architect merges ONE delegation DAG →
  *   dependency-driven execution (parallel where the DAG allows, one write-enabled
  *   child at a time) → final architect integration.
- * /fh-auto-validate: gate-first loop — the VALIDATOR writes a uv acceptance gate
+ * /titan-auto-validate: gate-first loop — the VALIDATOR writes a uv acceptance gate
  *   BEFORE any build, the BUILDER builds against it, failures feed back verbatim,
  *   with validator triage/repair escalation.
  */
@@ -51,7 +51,7 @@ import {
 } from "./runtime.ts";
 import { acquireWriterLease, type WriterLease } from "./writer-lease.ts";
 
-// ═══ /fh-collaborate ═════════════════════════════════════════════════════════
+// ═══ /titan-collaborate ═════════════════════════════════════════════════════════
 
 export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): void {
 	// No fixed deliberation choreography: each slot proposes how the work should be done,
@@ -64,14 +64,14 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 	// task as its own report panel. The live N-column grid streams for the whole command;
 	// the task board is a separate belowEditor sub-widget.
 	const TASKBOARD_WIDGET = `${CUSTOM_TYPE}-taskboard`;
-	pi.registerCommand("fh-collaborate", {
+	pi.registerCommand("titan-collaborate", {
 		description:
 			"Every agent plans read-only, the architect merges one delegation DAG, then tasks execute as dependencies clear — parallel where possible, exactly one shared-CWD writer at a time.",
 		handler: async (raw, ctx) => {
 			h.noteHost(ctx);
 			const prompt = (raw ?? "").trim();
 			if (!prompt) {
-				ctx.ui.notify("Usage: /fh-collaborate <prompt>", "warning");
+				ctx.ui.notify("Usage: /titan-collaborate <prompt>", "warning");
 				return;
 			}
 			const stack = h.modelStack();
@@ -85,12 +85,12 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 			await h.save(artifactsDir, "prompt.md", prompt);
 			await h.save(artifactsDir, "stack.json", JSON.stringify(stack, null, 2));
 			const initialSpawns = new Map(slots.map((slot) => [slot.id, h.slotInitialSpawn(slot, ctx, path.join(collabDir, "sessions", slot.id))]));
-			h.panel({ kind: "prompt", command: "fh-collaborate", ok: true }, `/fh-collaborate ${prompt}`);
-			h.panel({ kind: "banner", command: "fh-collaborate", ok: true, prompt, roles: slots.map((slot) => ({ role: (slot.architect ? "ARCHITECT" : "BUILDER") as Role, model: slot.model, slotId: slot.id, slotName: slot.name, color: slot.color, primary: slot.primary, architect: slot.architect })), artifactsDir }, "");
-			const stopper = h.startStoppable(ctx, "fh-collaborate");
+			h.panel({ kind: "prompt", command: "titan-collaborate", ok: true }, `/titan-collaborate ${prompt}`);
+			h.panel({ kind: "banner", command: "titan-collaborate", ok: true, prompt, roles: slots.map((slot) => ({ role: (slot.architect ? "ARCHITECT" : "BUILDER") as Role, model: slot.model, slotId: slot.id, slotName: slot.name, color: slot.color, primary: slot.primary, architect: slot.architect })), artifactsDir }, "");
+			const stopper = h.startStoppable(ctx, "titan-collaborate");
 			// The streaming grid stays alive for the WHOLE command — planning, delegation,
 			// and execution all show each model's live flow, exactly like the other commands.
-			const stopWidget = h.startGridWidget(ctx, "fh-collaborate", runs, undefined, startedAt);
+			const stopWidget = h.startGridWidget(ctx, "titan-collaborate", runs, undefined, startedAt);
 			let writerLease: WriterLease | undefined;
 			let maxConcurrentWriteEnabledChildren = 0;
 			let activeWriters = 0;
@@ -107,13 +107,13 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 					await h.save(proposalsDir, `${slot.id}.md`, runOk(run) ? run.text : `FAILED: ${runError(run)}`);
 				}));
 				if (stopper.stopped()) {
-					h.stoppedPanel("fh-collaborate", runs, artifactsDir, startedAt, "Stopped during planning; completed proposals remain on disk.");
+					h.stoppedPanel("titan-collaborate", runs, artifactsDir, startedAt, "Stopped during planning; completed proposals remain on disk.");
 					return;
 				}
-				// The proposals render like /fh-opinion — the intermediate step is part of the output.
-				h.panel({ kind: "multi", command: "fh-collaborate", title: "⇄ PROPOSALS — how each agent would do the work", ok: runs.every(runOk), prompt, sources: runs.map(toStat), answers: runs.map((run) => ({ role: run.role, model: run.model, text: runOk(run) ? run.text : `FAILED: ${runError(run)}`, slotId: run.slot!.id, slotName: run.slot!.name, color: run.slot!.color, primary: run.slot!.primary })), artifactsDir, ...h.totals(runs, startedAt) }, runs.map((run) => `## ${run.slot!.name}\n${runOk(run) ? run.text : `FAILED: ${runError(run)}`}`).join("\n\n"));
+				// The proposals render like /titan-opinion — the intermediate step is part of the output.
+				h.panel({ kind: "multi", command: "titan-collaborate", title: "⇄ PROPOSALS — how each agent would do the work", ok: runs.every(runOk), prompt, sources: runs.map(toStat), answers: runs.map((run) => ({ role: run.role, model: run.model, text: runOk(run) ? run.text : `FAILED: ${runError(run)}`, slotId: run.slot!.id, slotName: run.slot!.name, color: run.slot!.color, primary: run.slot!.primary })), artifactsDir, ...h.totals(runs, startedAt) }, runs.map((run) => `## ${run.slot!.name}\n${runOk(run) ? run.text : `FAILED: ${runError(run)}`}`).join("\n\n"));
 				if (runs.filter(runOk).length < 2) {
-					h.panel({ kind: "error", command: "fh-collaborate", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, "Collaboration needs at least two successful plans.");
+					h.panel({ kind: "error", command: "titan-collaborate", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, "Collaboration needs at least two successful plans.");
 					return;
 				}
 
@@ -126,7 +126,7 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 					const delegatePrompt = collabDelegatePrompt(stack, prompt, collabDir, planPath) + (planError ? `\n\nPREVIOUS PLAN VALIDATION FAILED:\n${planError}\nRewrite the complete corrected plan.` : "");
 					await runChild({ run: architectRun, prompt: delegatePrompt, systemPrompt: contractSystemPrompt(stack.architect.systemPrompt, "SYSTEM_PROMPT_COLLAB_COORDINATOR.md"), appendSystemPrompts: stack.architect.appendSystemPrompts, tools: READONLY_TOOLS, thinking: stack.architect.thinking, ...h.slotNextSpawn(stack.architect, architectRun, initialSpawns.get(stack.architect.id)!, ctx), cwd: ctx.cwd, timeoutMs: h.childTimeoutMs(), signal: stopper.signal });
 					if (stopper.stopped()) {
-						h.stoppedPanel("fh-collaborate", runs, artifactsDir, startedAt, "Stopped while the architect was producing the delegation graph.");
+						h.stoppedPanel("titan-collaborate", runs, artifactsDir, startedAt, "Stopped while the architect was producing the delegation graph.");
 						return;
 					}
 					try {
@@ -152,7 +152,7 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 					}
 				}
 				if (!plan) {
-					h.panel({ kind: "error", command: "fh-collaborate", ok: false, agent: toStat(architectRun), artifactsDir }, `Architect could not produce a valid delegation graph after 3 attempts:\n${planError}`);
+					h.panel({ kind: "error", command: "titan-collaborate", ok: false, agent: toStat(architectRun), artifactsDir }, `Architect could not produce a valid delegation graph after 3 attempts:\n${planError}`);
 					return;
 				}
 				// The task breakdown is itself a deliverable — render it before executing.
@@ -167,12 +167,12 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 					"",
 					...plan.tasks.map((task) => `- **${task.id}** (${task.assignee}, ${task.mode}) — ${task.description}`),
 				].join("\n");
-				h.panel({ kind: "solo", command: "fh-collaborate", ok: true, agent: toStat(architectRun), artifactsDir }, planBody);
+				h.panel({ kind: "solo", command: "titan-collaborate", ok: true, agent: toStat(architectRun), artifactsDir }, planBody);
 
 				try {
-					writerLease = acquireWriterLease(ctx.cwd, `/fh-collaborate ${path.basename(artifactsDir)}`);
+					writerLease = acquireWriterLease(ctx.cwd, `/titan-collaborate ${path.basename(artifactsDir)}`);
 				} catch (error) {
-					h.panel({ kind: "error", command: "fh-collaborate", ok: false, sources: runs.map(toStat), artifactsDir }, error instanceof Error ? error.message : String(error));
+					h.panel({ kind: "error", command: "titan-collaborate", ok: false, sources: runs.map(toStat), artifactsDir }, error instanceof Error ? error.message : String(error));
 					return;
 				}
 
@@ -227,7 +227,7 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 					taskState.set(task.id, ok ? "done" : "failed");
 					if (!stopper.stopped()) {
 						// Every finished task renders its report — the intermediate work IS the output.
-						h.panel({ kind: "solo", command: "fh-collaborate", ok, agent: toStat(run), artifactsDir }, `### Task ${task.id} (${task.mode}) — ${slot.name}\n${task.description}\n\n${report}`);
+						h.panel({ kind: "solo", command: "titan-collaborate", ok, agent: toStat(run), artifactsDir }, `### Task ${task.id} (${task.mode}) — ${slot.name}\n${task.description}\n\n${report}`);
 						if (!ok) executionFailure ??= `task ${task.id} (${slot.id}) failed: ${runError(run)}`;
 					}
 				};
@@ -259,11 +259,11 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 				await Promise.allSettled([...inFlight.values()]);
 				renderBoard();
 				if (stopper.stopped()) {
-					h.stoppedPanel("fh-collaborate", runs, artifactsDir, startedAt, "Stopped during delegated execution; finished task reports remain on disk.");
+					h.stoppedPanel("titan-collaborate", runs, artifactsDir, startedAt, "Stopped during delegated execution; finished task reports remain on disk.");
 					return;
 				}
 				if (executionFailure) {
-					h.panel({ kind: "error", command: "fh-collaborate", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, `Delegated execution halted: ${executionFailure}. Downstream tasks were not started.`);
+					h.panel({ kind: "error", command: "titan-collaborate", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, `Delegated execution halted: ${executionFailure}. Downstream tasks were not started.`);
 					return;
 				}
 
@@ -279,17 +279,17 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 				}
 				taskExecutions.push({ taskId: "final", slot: stack.architect.id, mode: "write", startedAt: finalStartedAt, endedAt: Date.now(), ok: runOk(architectRun) && !stopper.stopped() });
 				if (stopper.stopped()) {
-					h.stoppedPanel("fh-collaborate", runs, artifactsDir, startedAt, "Stopped during final architect integration.");
+					h.stoppedPanel("titan-collaborate", runs, artifactsDir, startedAt, "Stopped during final architect integration.");
 					return;
 				}
 				await h.save(collabDir, "final.md", runOk(architectRun) ? architectRun.text : `FAILED: ${runError(architectRun)}`);
 				const worktreeCommandsObserved = runs.flatMap((run) => run.toolEvents).filter((event) => event.name === "bash" && /\bgit\s+worktree\b/.test(event.argument));
 				const ok = runOk(architectRun) && maxConcurrentWriteEnabledChildren === 1 && worktreeCommandsObserved.length === 0;
-				h.panel({ kind: "collab", command: "fh-collaborate", ok, round: plan.tasks.length, prompt, agent: toStat(architectRun), sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, runOk(architectRun) ? architectRun.text : `Final coordination failed: ${runError(architectRun)}`);
-				await h.save(artifactsDir, "summary.json", JSON.stringify({ command: "fh-collaborate", ok, plan, taskExecutions, maxConcurrentWriteEnabledChildren, worktreeCommandsObserved, writerLeasePath: writerLease?.path, agents: runs.map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals(runs, startedAt) }, null, 2));
+				h.panel({ kind: "collab", command: "titan-collaborate", ok, round: plan.tasks.length, prompt, agent: toStat(architectRun), sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, runOk(architectRun) ? architectRun.text : `Final coordination failed: ${runError(architectRun)}`);
+				await h.save(artifactsDir, "summary.json", JSON.stringify({ command: "titan-collaborate", ok, plan, taskExecutions, maxConcurrentWriteEnabledChildren, worktreeCommandsObserved, writerLeasePath: writerLease?.path, agents: runs.map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals(runs, startedAt) }, null, 2));
 			} finally {
 				const observedWorktrees = runs.flatMap((run) => run.toolEvents).filter((event) => event.name === "bash" && /\bgit\s+worktree\b/.test(event.argument));
-				await h.ensureSummary(artifactsDir, { command: "fh-collaborate", ok: false, stopped: stopper.stopped(), plan, taskExecutions, maxConcurrentWriteEnabledChildren, worktreeCommandsObserved: observedWorktrees, writerLeasePath: writerLease?.path, agents: runs.map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals(runs, startedAt) });
+				await h.ensureSummary(artifactsDir, { command: "titan-collaborate", ok: false, stopped: stopper.stopped(), plan, taskExecutions, maxConcurrentWriteEnabledChildren, worktreeCommandsObserved: observedWorktrees, writerLeasePath: writerLease?.path, agents: runs.map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals(runs, startedAt) });
 				writerLease?.release();
 				stopper.release();
 				stopWidget();
@@ -300,7 +300,7 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 	});
 }
 
-// ═══ /fh-auto-validate ═══════════════════════════════════════════════════════
+// ═══ /titan-auto-validate ═══════════════════════════════════════════════════════
 // Gate-first validation loop (red → green):
 //   1. VALIDATOR designs the acceptance gate (uv script) BEFORE any work happens.
 //   2. Baseline gate run — expected FAIL (integrity check on the gate itself).
@@ -321,13 +321,13 @@ const gateHarnessError = (g: { code: number; output: string }): string | undefin
 };
 
 export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): void {
-	pi.registerCommand("fh-auto-validate", {
+	pi.registerCommand("titan-auto-validate", {
 		description:
 			"Auto-validation loop: VALIDATOR designs a uv acceptance gate FIRST, BUILDER builds, the gate runs, failures feed back to the builder — until pass or --max-validations (default 5)",
 		handler: async (raw, ctx) => {
 			h.noteHost(ctx); // an unset --builder follows the host session's live model
 			let input = (raw ?? "").trim();
-			// Inline overrides of the startup flags: /fh-auto-validate --max-validations 3 --escalate-to-validator-count 2 <prompt>
+			// Inline overrides of the startup flags: /titan-auto-validate --max-validations 3 --escalate-to-validator-count 2 <prompt>
 			let maxV = clampValidations(Number.parseInt(h.flagStr("max-validations"), 10));
 			let escalateAt = clampCount(Number.parseInt(h.flagStr("escalate-to-validator-count"), 10), ESCALATE_DEFAULT);
 			input = input
@@ -341,7 +341,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 				})
 				.trim();
 			if (!input) {
-				ctx.ui.notify("Usage: /fh-auto-validate [--max-validations N] [--escalate-to-validator-count N] <prompt>", "warning");
+				ctx.ui.notify("Usage: /titan-auto-validate [--max-validations N] [--escalate-to-validator-count N] <prompt>", "warning");
 				return;
 			}
 			const prompt = input;
@@ -351,11 +351,11 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 			const artifactsDir = await h.mkArtifacts();
 			await h.save(artifactsDir, "prompt.md", prompt);
 
-			h.panel({ kind: "prompt", command: "fh-auto-validate", ok: true }, `/fh-auto-validate ${(raw ?? "").trim()}`);
+			h.panel({ kind: "prompt", command: "titan-auto-validate", ok: true }, `/titan-auto-validate ${(raw ?? "").trim()}`);
 			h.panel(
 				{
 					kind: "banner",
-					command: "fh-auto-validate",
+					command: "titan-auto-validate",
 					ok: true,
 					prompt,
 					maxRounds: maxV,
@@ -379,12 +379,12 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 			let writerLease: WriterLease | undefined;
 			const fail = (agentStat: AgentStat, body: string, extra: Partial<FhDetails> = {}) => {
 				const t = h.totals([validator, builder], startedAt);
-				h.panel({ kind: "error", command: "fh-auto-validate", ok: false, agent: agentStat, artifactsDir, maxRounds: maxV, ...t, ...extra }, body);
+				h.panel({ kind: "error", command: "titan-auto-validate", ok: false, agent: agentStat, artifactsDir, maxRounds: maxV, ...t, ...extra }, body);
 			};
 
 			try {
 				try {
-					writerLease = acquireWriterLease(ctx.cwd, `/fh-auto-validate ${path.basename(artifactsDir)}`);
+					writerLease = acquireWriterLease(ctx.cwd, `/titan-auto-validate ${path.basename(artifactsDir)}`);
 				} catch (error) {
 					fail(toStat(builder), error instanceof Error ? error.message : String(error));
 					return;
@@ -470,7 +470,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 				h.panel(
 					{
 						kind: "gate",
-						command: "fh-auto-validate",
+						command: "titan-auto-validate",
 						ok: true,
 						agent: toStat(validator),
 						maxRounds: maxV,
@@ -560,7 +560,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 					h.panel(
 						{
 							kind: "validation",
-							command: "fh-auto-validate",
+							command: "titan-auto-validate",
 							ok,
 							round,
 							maxRounds: maxV,
@@ -583,7 +583,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 							artifactsDir,
 							"summary.json",
 							JSON.stringify(
-								{ command: "fh-auto-validate", ok: true, rounds: round, maxValidations: maxV, escalateAt, gateExitCode: 0, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...t },
+								{ command: "titan-auto-validate", ok: true, rounds: round, maxValidations: maxV, escalateAt, gateExitCode: 0, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...t },
 								null,
 								2,
 							),
@@ -624,7 +624,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 							h.panel(
 								{
 									kind: "triage",
-									command: "fh-auto-validate",
+									command: "titan-auto-validate",
 									ok: true,
 									round,
 									maxRounds: maxV,
@@ -671,7 +671,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 									h.panel(
 										{
 											kind: "gate",
-											command: "fh-auto-validate",
+											command: "titan-auto-validate",
 											ok: rerun.code === 0,
 											round,
 											maxRounds: maxV,
@@ -699,7 +699,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 										h.panel(
 											{
 												kind: "validation",
-												command: "fh-auto-validate",
+												command: "titan-auto-validate",
 												ok: true,
 												round,
 												maxRounds: maxV,
@@ -721,7 +721,7 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 											artifactsDir,
 											"summary.json",
 											JSON.stringify(
-												{ command: "fh-auto-validate", ok: true, rounds: round, gateRepaired: true, maxValidations: maxV, escalateAt, gateExitCode: 0, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...tt },
+												{ command: "titan-auto-validate", ok: true, rounds: round, gateRepaired: true, maxValidations: maxV, escalateAt, gateExitCode: 0, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...tt },
 												null,
 												2,
 											),
@@ -763,13 +763,13 @@ export function registerAutoValidateCommand(pi: ExtensionAPI, h: HarnessDeps): v
 					artifactsDir,
 					"summary.json",
 					JSON.stringify(
-						{ command: "fh-auto-validate", ok: false, halted: true, rounds: maxV, maxValidations: maxV, escalateAt, gateExitCode: lastGate?.code, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...h.totals([validator, builder], startedAt) },
+						{ command: "titan-auto-validate", ok: false, halted: true, rounds: maxV, maxValidations: maxV, escalateAt, gateExitCode: lastGate?.code, agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...h.totals([validator, builder], startedAt) },
 						null,
 						2,
 					),
 				);
 			} finally {
-				await h.ensureSummary(artifactsDir, { command: "fh-auto-validate", ok: false, stopped: stopper.stopped(), agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...h.totals([validator, builder], startedAt) });
+				await h.ensureSummary(artifactsDir, { command: "titan-auto-validate", ok: false, stopped: stopper.stopped(), agents: [toStat(validator), toStat(builder)], sessions: { architect: validator.sessionRef ?? h.cachedRoleId("architect"), builder: builder.sessionRef ?? h.cachedRoleId("builder") }, ...h.totals([validator, builder], startedAt) });
 				writerLease?.release();
 				stopper.release(); // never leave the escape tap installed past the command
 				stopWidget();

@@ -1,19 +1,19 @@
 /**
- * fusion-harness — FUSE 2-5 frontier models instead of racing them. AND, not OR.
+ * titan-harness — FUSE 2-5 frontier models instead of racing them. AND, not OR.
  *
  * Model stack: exactly one ARCHITECT, exactly one primary/Main BUILDER (the live
- * raw-chat host), and up to three secondary builders. Explicit YAML via --fh-config;
+ * raw-chat host), and up to three secondary builders. Explicit YAML via --titan-config;
  * legacy two-slot flags remain compatible.
  *
  * Commands:
- *   /fh-opinion      N independent read-only opinions            (modules/cmd-readonly.ts)
- *   /fh-debate       N-way all-to-all debate, no judge           (modules/cmd-readonly.ts)
- *   /fh-fusion       N sources → sole-writer FUSION → ACKs       (modules/cmd-fusion.ts)
- *   /fh-collaborate  plans → architect DAG → readiness execution (modules/cmd-build.ts)
- *   /fh-auto-validate architect + Main gate-first build loop     (modules/cmd-build.ts)
- *   /fh-only         direct one slot or arm the next plain prompt
- *   /fh-model        slot → model → thinking picker (session-only)
- *   /fh-system-prompt · /fh-reset · /fh model-bar front door
+ *   /titan-opinion      N independent read-only opinions            (modules/cmd-readonly.ts)
+ *   /titan-debate       N-way all-to-all debate, no judge           (modules/cmd-readonly.ts)
+ *   /titan-fusion       N sources → sole-writer FUSION → ACKs       (modules/cmd-fusion.ts)
+ *   /titan-collaborate  plans → architect DAG → readiness execution (modules/cmd-build.ts)
+ *   /titan-auto-validate architect + Main gate-first build loop     (modules/cmd-build.ts)
+ *   /titan-only         direct one slot or arm the next plain prompt
+ *   /titan-model        slot → model → thinking picker (session-only)
+ *   /titan-system-prompt · /titan-reset · /titan model-bar front door
  *
  * This file is the extension FACTORY: flags/config and stack resolution, host-model
  * selection, persistent slot sessions, live widgets + the model bar, panel plumbing,
@@ -26,10 +26,10 @@
  *
  * Safety invariant: parallel agents never mutate the same checkout. Opinion, debate,
  * fusion sources, and collaboration planning are tool-enforced read-only. The temporary
- * FUSION agent is the only /fh-fusion writer. Collaboration serializes every write-enabled
+ * FUSION agent is the only /titan-fusion writer. Collaboration serializes every write-enabled
  * task through one shared-CWD writer token; no worktrees.
  *
- * UI (pi-fusion-stack edit): NO panels, grids, banners, or transcript renderers. Results
+ * UI (titan-harness edit): NO panels, grids, banners, or transcript renderers. Results
  * land in the transcript as plain markdown custom messages; while children run a single
  * status line reports progress, and the belowEditor MODEL BAR (one row per slot: model,
  * thinking, context, tps, cost — plus a FAN-OUT row) is ON by default. Pi's own footer
@@ -37,8 +37,8 @@
  *
  * Every child is a `pi --mode json -p` subprocess that loads the host's extensions
  * (provider extensions such as antigravity/*) but never this package. Artifacts live under
- * /tmp/fusion-harness-* and persistent slot/model sessions under
- * /tmp/fusion-harness-sessions/.
+ * /tmp/titan-harness-* and persistent slot/model sessions under
+ * /tmp/titan-harness-sessions/.
  */
 
 import { createHash, randomUUID } from "node:crypto"; // persistent session ids + project hashes
@@ -94,7 +94,7 @@ const DEFAULT_ARCHITECT = "anthropic/claude-fable-5-1"; // plans, fuses, validat
 const DEFAULT_BUILDER = "openai-codex/gpt-6-astra"; // last-resort builder — an unset --builder normally follows the HOST session's model
 
 const CHILD_TIMEOUT_S_DEFAULT = 28_800; // 8h — every spawned child; real work runs for hours (--child-timeout overrides)
-const BUILD_TIMEOUT_MS_FLOOR = 28_800_000; // /fh-auto-validate builder floor — never below 8h even with a small --child-timeout
+const BUILD_TIMEOUT_MS_FLOOR = 28_800_000; // /titan-auto-validate builder floor — never below 8h even with a small --child-timeout
 const WIDGET_TICK_MS = 1_000; // live-widget refresh cadence
 
 // ═══ 2. Extension ════════════════════════════════════════════════════════════
@@ -105,9 +105,9 @@ export default function (pi: ExtensionAPI) {
 	if (isStackChild()) return;
 
 	// ── 2.1 Flags ──────────────────────────────────────────────
-	pi.registerFlag("fh-config", {
+	pi.registerFlag("titan-config", {
 		type: "string",
-		description: "Explicit path to .pi/fusion-harness/model-stack-<codename>.yaml (2-5 slots, exactly one architect and one primary builder).",
+		description: "Explicit path to .pi/titan-harness/model-stack-<codename>.yaml (2-5 slots, exactly one architect and one primary builder).",
 	});
 	pi.registerFlag("architect", {
 		type: "string",
@@ -119,7 +119,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerFlag("max-validations", {
 		type: "string",
-		description: "Max gate validations (build attempts) for /fh-auto-validate before development halts. Default 5. Also overridable inline: /fh-auto-validate --max-validations 3 <prompt>.",
+		description: "Max gate validations (build attempts) for /titan-auto-validate before development halts. Default 5. Also overridable inline: /titan-auto-validate --max-validations 3 <prompt>.",
 	});
 	pi.registerFlag("escalate-to-validator-count", {
 		type: "string",
@@ -129,7 +129,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag("architect-system-prompt", {
 		type: "string",
 		description:
-			"Override the system prompt for ARCHITECT-family worker/fh-fusion agents (inline text, or a path to a file). VALIDATOR/TRIAGE keep their SYSTEM_PROMPT_*.md contracts — edit those files to tune them.",
+			"Override the system prompt for ARCHITECT-family worker/titan-fusion agents (inline text, or a path to a file). VALIDATOR/TRIAGE keep their SYSTEM_PROMPT_*.md contracts — edit those files to tune them.",
 	});
 	pi.registerFlag("builder-system-prompt", {
 		type: "string",
@@ -137,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerFlag("architect-thinking", {
 		type: "string",
-		description: "Thinking level for EVERY architect-family execution (worker/fh-fusion/validator/triage): off|minimal|low|medium|high|xhigh|max. Default medium.",
+		description: "Thinking level for EVERY architect-family execution (worker/titan-fusion/validator/triage): off|minimal|low|medium|high|xhigh|max. Default medium.",
 	});
 	pi.registerFlag("builder-thinking", {
 		type: "string",
@@ -146,12 +146,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag("rounds", {
 		type: "string",
 		description:
-			"Round count for /fh-debate (clamp 1-10; default 3, minimum 2). Inline-overridable: /fh-debate --rounds 2 <prompt>.",
+			"Round count for /titan-debate (clamp 1-10; default 3, minimum 2). Inline-overridable: /titan-debate --rounds 2 <prompt>.",
 	});
 	pi.registerFlag("child-timeout", {
 		type: "string",
 		description:
-			"Timeout in SECONDS for every spawned child agent (/fh-opinion + /fh-fusion workers, the FUSION merge, /fh-auto-validate builder rounds and validator). Default 28800 (8h), clamp 10-86400 (24h); the /fh-auto-validate builder never drops below the 8h floor. Real work runs for hours — don't starve it.",
+			"Timeout in SECONDS for every spawned child agent (/titan-opinion + /titan-fusion workers, the FUSION merge, /titan-auto-validate builder rounds and validator). Default 28800 (8h), clamp 10-86400 (24h); the /titan-auto-validate builder never drops below the 8h floor. Real work runs for hours — don't starve it.",
 	});
 
 	// ── 2.2 Flag readers + configured stack ────────────────────
@@ -180,11 +180,11 @@ export default function (pi: ExtensionAPI) {
 	const ensureConfigLoaded = () => {
 		if (configLoaded) return;
 		configLoaded = true;
-		const configPath = flagStr("fh-config") || rawCliFlag("fh-config");
+		const configPath = flagStr("titan-config") || rawCliFlag("titan-config");
 		if (!configPath) return;
 		const conflicts = ["architect", "builder", "architect-thinking", "builder-thinking", "architect-system-prompt", "builder-system-prompt"].filter((name) => flagStr(name) || rawCliFlag(name));
 		if (conflicts.length) {
-			stackReadyError = `fusion-harness: --fh-config cannot be combined with legacy role flags: ${conflicts.map((name) => `--${name}`).join(", ")}`;
+			stackReadyError = `titan-harness: --titan-config cannot be combined with legacy role flags: ${conflicts.map((name) => `--${name}`).join(", ")}`;
 			throw new Error(stackReadyError);
 		}
 		try {
@@ -194,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 			throw error;
 		}
 	};
-	if (rawCliFlag("fh-config")) {
+	if (rawCliFlag("titan-config")) {
 		try {
 			ensureConfigLoaded();
 		} catch (error) {
@@ -244,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	/**
-	 * pi's own buildSystemPrompt(), for /fh-system-prompt: when a role has no override, the
+	 * pi's own buildSystemPrompt(), for /titan-system-prompt: when a role has no override, the
 	 * prompt its children actually run with is pi's DEFAULT — which the package builds at
 	 * spawn time and does not re-export from its main entry. Import it straight from the
 	 * running pi installation's dist (a file URL bypasses the "exports" map); a bun-compiled
@@ -272,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 		const s = Number.isFinite(v) && v > 0 ? Math.max(10, Math.min(v, 86_400)) : CHILD_TIMEOUT_S_DEFAULT;
 		return s * 1000;
 	};
-	/** The /fh-auto-validate builder does real work — never below the 8h floor, even with a small --child-timeout. */
+	/** The /titan-auto-validate builder does real work — never below the 8h floor, even with a small --child-timeout. */
 	const buildTimeoutMs = (): number => Math.max(childTimeoutMs(), BUILD_TIMEOUT_MS_FLOOR);
 
 	/** --<role>-thinking: one thinking level for EVERY execution of that model. Default medium. */
@@ -290,7 +290,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	const resolveThinking = (raw: string): Thinking | undefined => THINKING_ALIAS[raw.trim().toLowerCase()];
 
-	/** Legacy role-thinking overrides; configured stacks use per-slot values and /fh-model. */
+	/** Legacy role-thinking overrides; configured stacks use per-slot values and /titan-model. */
 	const thinkingOverride: Partial<Record<"architect" | "builder", Thinking>> = {};
 	const roleThinking = (role: "architect" | "builder"): Thinking => {
 		ensureConfigLoaded();
@@ -361,7 +361,7 @@ export default function (pi: ExtensionAPI) {
 		if (!errors.length) pi.setThinkingLevel(configuredStack.primaryBuilder.thinking);
 		if (errors.length) {
 			process.exitCode = 1;
-			stackReadyError = `fusion-harness: configured model stack is not runnable:\n${errors.map((error) => `- ${error}`).join("\n")}`;
+			stackReadyError = `titan-harness: configured model stack is not runnable:\n${errors.map((error) => `- ${error}`).join("\n")}`;
 			try {
 				ctx.ui.notify(stackReadyError, "error");
 			} catch {}
@@ -402,7 +402,7 @@ export default function (pi: ExtensionAPI) {
 				absorbedRuns.add(r);
 				bumpSlotPerf(r.slot.id, r.tokensOut, r.tpsSeconds, r.costUsd);
 			}
-			// FUSION is a FRESH throwaway session by design and runs LAST in /fh-fusion — letting
+			// FUSION is a FRESH throwaway session by design and runs LAST in /titan-fusion — letting
 			// it become sideLast would pin the left cell to a session that no longer exists and
 			// overwrite the persistent ARCHITECT brain's real context with the merge's ~2%.
 			// ARCHITECT/VALIDATOR/TRIAGE all share the one persistent architect session, so
@@ -451,10 +451,10 @@ export default function (pi: ExtensionAPI) {
 	// across restarts, and freshly-launched agents greeted prompts with "already read
 	// earlier this session"). Ids are minted in-memory per process; session files land
 	// under a per-process run dir that is removed at shutdown. Cross-model keying is
-	// unchanged: a /fh-model swap mid-run still mints a separate brain per slot+model.
+	// unchanged: a /titan-model swap mid-run still mints a separate brain per slot+model.
 	// (FUSION stays fresh per command — the merge judges answers without contamination.)
 
-	// Per-run artifacts land under /tmp/fusion-harness-* (the spec'd, inspectable location —
+	// Per-run artifacts land under /tmp/titan-harness-* (the spec'd, inspectable location —
 	// note os.tmpdir() on macOS is /var/folders/…, so we pin /tmp explicitly).
 	const ARTIFACT_ROOT = fs.existsSync("/tmp") ? "/tmp" : os.tmpdir();
 
@@ -465,7 +465,7 @@ export default function (pi: ExtensionAPI) {
 		const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 12);
 		return `${readable}-${hash}`;
 	};
-	const sessionsRootFor = (cwd: string): string => path.join(ARTIFACT_ROOT, "fusion-harness-sessions", projectSlug(cwd));
+	const sessionsRootFor = (cwd: string): string => path.join(ARTIFACT_ROOT, "titan-harness-sessions", projectSlug(cwd));
 	// One run dir per PROCESS: concurrent harness launches on the same project can never
 	// share (or clobber) each other's session files, and a restart starts from nothing.
 	const runSessionDirs = new Set<string>();
@@ -474,7 +474,7 @@ export default function (pi: ExtensionAPI) {
 	// as another model's own history. Observed live: a sonnet-5-built architect session
 	// (full of "You are the ARCHITECT agent (anthropic/claude-sonnet-5)" turns) replayed
 	// into claude-fable-5 tripped Anthropic's usage-policy classifier — every request
-	// BLOCKED at the API, even "/fh-opinion hello" — while the identical prompt on a fresh
+	// BLOCKED at the API, even "/titan-opinion hello" — while the identical prompt on a fresh
 	// fable session passed. Swapping models mid-run mints a separate brain for that model.
 	const slotSessions: Record<string, { id: string; dir: string }> = {};
 	const slotKey = (slot: ModelSlot): string => `${slot.id}:${modelTag(slot.model)}:${createHash("sha256").update(slot.model).digest("hex").slice(0, 12)}`;
@@ -502,7 +502,7 @@ export default function (pi: ExtensionAPI) {
 	const cachedSlotId = (slot: ModelSlot): string | undefined => slotSessions[slotKey(slot)]?.id;
 	const cachedRoleId = (side: "architect" | "builder"): string | undefined => cachedSlotId(roleSlot(side));
 
-	/** Wipe THIS run's slot sessions (disk + in-memory, all models) — shared by /fh-reset and /new. */
+	/** Wipe THIS run's slot sessions (disk + in-memory, all models) — shared by /titan-reset and /new. */
 	const resetRoleSessions = async (cwd: string): Promise<string> => {
 		const root = runSessionsRoot(cwd);
 		await fs.promises.rm(root, { recursive: true, force: true }).catch(() => {});
@@ -533,12 +533,12 @@ export default function (pi: ExtensionAPI) {
 	// Pi's built-in /new gives the HOST a fresh session, but the ARCHITECT (and the
 	// headless-fallback BUILDER) children resume their persistent per-project sessions —
 	// without this hook they'd drag the old context straight into the "new" conversation.
-	// So a /new also does the /fh-reset work. `reason` distinguishes the user's /new from
+	// So a /new also does the /titan-reset work. `reason` distinguishes the user's /new from
 	// startup/reload/resume/fork, where persisting across restarts is the whole design.
 	pi.on("session_start", async (ev: any, ctx: any) => {
 		if (ev?.reason !== "new") return;
 		// Silent by design (user preference): a fresh session resetting the role brains is
-		// the expected behavior, not news. /fh-reset keeps its notify — it's an explicit ask.
+		// the expected behavior, not news. /titan-reset keeps its notify — it's an explicit ask.
 		await resetRoleSessions(ctx.cwd);
 	});
 
@@ -596,15 +596,15 @@ export default function (pi: ExtensionAPI) {
 		return { sessionDir: session.dir, sessionId: session.id };
 	};
 
-	// ── 2.5 The MODEL BAR (/fh): one aligned cell per model — `◆ ROLE | model (med) | [██--------] 12%` ──
+	// ── 2.5 The MODEL BAR (/titan): one aligned cell per model — `◆ ROLE | model (med) | [██--------] 12%` ──
 	//
 	// The harness CLEARS pi's default footer at TUI session start (user direction
 	// 2026-08-17: "get rid of the default footer") — these recipes launch pi with only
 	// this extension, so there is no other footer owner to fight. The model bar itself
-	// stays a separate `belowEditor` widget, OFF by default and toggled with /fh —
+	// stays a separate `belowEditor` widget, OFF by default and toggled with /titan —
 	// auxiliary telemetry, not something worth spending permanent screen rows on.
 	const FOOTER_WIDGET = `${CUSTOM_TYPE}-modelbar`;
-	let footerVisible = readStackSettings().modelBar; // persisted through /stack and /fh on|off
+	let footerVisible = readStackSettings().modelBar; // persisted through /stack and /titan on|off
 	let footerCtx: any; // the session ctx — the widget needs its ui + modelRegistry + live model
 	let footerTicker: ReturnType<typeof setInterval> | undefined;
 
@@ -713,7 +713,7 @@ export default function (pi: ExtensionAPI) {
 	/** One markdown header line (+ optional stats line) so a plain custom message still says what it is. */
 	const panelHeader = (details: FhDetails): string => {
 		const title = details.title ? ` — ${details.title}` : "";
-		const head = `**FUSION HARNESS · /${details.command ?? "?"}${title}**${details.ok === false && details.kind !== "prompt" ? " ✗" : ""}`;
+		const head = `**TITAN HARNESS · /${details.command ?? "?"}${title}**${details.ok === false && details.kind !== "prompt" ? " ✗" : ""}`;
 		const bits = [
 			details.totalMs ? `run ${fmtSecs(details.totalMs)}` : "",
 			details.totalCostUsd ? `~$${details.totalCostUsd.toFixed(4)}` : "",
@@ -881,7 +881,7 @@ export default function (pi: ExtensionAPI) {
 			ctl.abort();
 			try {
 				ctx.ui.setStatus(CUSTOM_TYPE, `${command}: stopping…`);
-				ctx.ui.notify(`fusion-harness: stopping /${command} — escape pressed`, "warning");
+				ctx.ui.notify(`titan-harness: stopping /${command} — escape pressed`, "warning");
 			} catch {
 				/* best effort */
 			}
@@ -898,7 +898,7 @@ export default function (pi: ExtensionAPI) {
 		activeCommandControllers.clear();
 	});
 
-	const mkArtifacts = async (): Promise<string> => fs.promises.mkdtemp(path.join(ARTIFACT_ROOT, "fusion-harness-"));
+	const mkArtifacts = async (): Promise<string> => fs.promises.mkdtemp(path.join(ARTIFACT_ROOT, "titan-harness-"));
 	const save = (dir: string, name: string, body: string) => fs.promises.writeFile(path.join(dir, name), body, "utf-8");
 	const ensureSummary = async (dir: string, payload: Record<string, unknown>) => {
 		const summaryPath = path.join(dir, "summary.json");
@@ -909,7 +909,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await fs.promises.writeFile(summaryPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 		} catch (error) {
-			process.stderr.write(`fusion-harness: FAILED to write required summary ${summaryPath}: ${String(error)}\n`);
+			process.stderr.write(`titan-harness: FAILED to write required summary ${summaryPath}: ${String(error)}\n`);
 		}
 	};
 	const totals = (runs: AgentRun[], startedAt: number) => ({
@@ -917,17 +917,17 @@ export default function (pi: ExtensionAPI) {
 		totalCostUsd: runs.reduce((s, r) => s + r.costUsd, 0),
 	});
 
-	// ── 2.8 (no boot banner — pi-fusion-stack keeps the transcript plain) ──
+	// ── 2.8 (no boot banner — titan-harness keeps the transcript plain) ──
 
-	// ── 2.9 /fh-reset — wipe the persistent slot sessions for this project ──
+	// ── 2.9 /titan-reset — wipe the persistent slot sessions for this project ──
 	// (/new triggers the same reset via the session_start hook above, on top of pi's own fresh session.)
-	pi.registerCommand("fh-reset", {
+	pi.registerCommand("titan-reset", {
 		description: "Full reset: fresh host session AND fresh slot memories — every agent starts from nothing",
 		handler: async (_args, ctx) => {
 			noteHost(ctx); // an unset --builder follows the host session's live model
 			await resetRoleSessions(ctx.cwd);
 			// Main IS the host: without a fresh host session, the Main row keeps its raw-chat
-			// context (user report 2026-08-18: "/fh-reset didn't reset the builder"). The old
+			// context (user report 2026-08-18: "/titan-reset didn't reset the builder"). The old
 			// ctx is STALE after replacement — all post-swap work runs in withSession on the
 			// ctx pi hands over (per pi's own staleness guard).
 			try {
@@ -938,48 +938,48 @@ export default function (pi: ExtensionAPI) {
 						// showing, put it straight back on the fresh session.
 						if (footerVisible) setFooterVisible(true);
 						try {
-							newCtx.ui?.notify?.("fusion-harness: full reset — fresh host session, fresh slot memories", "info");
+							newCtx.ui?.notify?.("titan-harness: full reset — fresh host session, fresh slot memories", "info");
 						} catch {}
 					},
 				});
 			} catch {
 				// headless / no session manager — the slot reset alone still applied
 				try {
-					ctx.ui.notify("fusion-harness: slot memories reset (no host session to replace)", "info");
+					ctx.ui.notify("titan-harness: slot memories reset (no host session to replace)", "info");
 				} catch {}
 			}
 		},
 	});
 
-	// ── 2.10 /fh — the harness's front door: the command index + the model bar toggle ──
-	// One thing to remember (`/fh`) instead of ten. Bare invocation prints every command and
+	// ── 2.10 /titan — the harness's front door: the command index + the model bar toggle ──
+	// One thing to remember (`/titan`) instead of ten. Bare invocation prints every command and
 	// flips the multi-row model bar; `on`/`off` pin the bar. The bar stays OFF by default —
 	// the session runs footerless (pi's default footer is cleared at startup) until you ask.
 	// Descriptions stay 3-8 words so index lines NEVER wrap in a normal terminal.
 	const COMMAND_INDEX: Array<[string, string]> = [
-		["/fh-opinion <prompt>", "every agent answers read-only"],
-		['/fh-fusion "<prompt>" "<fusion>"', "parallel research, one writer, all ACK"],
-		["/fh-debate [--rounds N] <prompt>", "all-to-all debate, no judge"],
-		["/fh-collaborate <prompt>", "agents plan, architect delegates, parallel build"],
-		["/fh-only [slot] [prompt]", "route one prompt to one agent"],
-		["/fh-model", "pick slot, model, thinking"],
+		["/titan-opinion <prompt>", "every agent answers read-only"],
+		['/titan-fusion "<prompt>" "<fusion>"', "parallel research, one writer, all ACK"],
+		["/titan-debate [--rounds N] <prompt>", "all-to-all debate, no judge"],
+		["/titan-collaborate <prompt>", "agents plan, architect delegates, parallel build"],
+		["/titan-only [slot] [prompt]", "route one prompt to one agent"],
+		["/titan-model", "pick slot, model, thinking"],
 		["/ctx", "272k / 828k / OpenRouter 1M context"],
 		["/stack", "subagent tools, fan-out, model bar, workflows"],
-		["/fh-auto-validate [--max-validations N] <prompt>", "gate written first, build until green"],
-		["/fh-system-prompt", "every slot's effective system prompt"],
-		["/fh-reset", "full reset, host and slots"],
-		["/fh [on|off]", "this list, toggle model bar"],
+		["/titan-auto-validate [--max-validations N] <prompt>", "gate written first, build until green"],
+		["/titan-system-prompt", "every slot's effective system prompt"],
+		["/titan-reset", "full reset, host and slots"],
+		["/titan [on|off]", "this list, toggle model bar (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
 
-	pi.registerCommand("fh", {
-		description: "FUSION HARNESS — list every /fh-* command and toggle the multi-row model bar. /fh [on|off]",
-		handler: async (args, ctx) => {
+	const frontDoor = {
+		description: "TITAN HARNESS — list every /titan-* command and toggle the multi-row model bar. /titan [on|off] (alias: /fh)",
+		handler: async (args: string, ctx: any) => {
 			noteHost(ctx); // an unset --builder follows the host session's live model
 			footerCtx ??= ctx; // first use before any tui session_start (e.g. after a reload)
 			const arg = args.trim().toLowerCase();
 			if (arg && !["on", "off", "show", "hide", "toggle"].includes(arg)) {
-				ctx.ui.notify(`fusion-harness: /fh takes on|off (or nothing to toggle the model bar). Got "${arg}".`, "error");
+				ctx.ui.notify(`titan-harness: /titan takes on|off (or nothing to toggle the model bar). Got "${arg}".`, "error");
 				return;
 			}
 			const next = arg === "on" || arg === "show" ? true : arg === "off" || arg === "hide" ? false : !footerVisible;
@@ -988,20 +988,22 @@ export default function (pi: ExtensionAPI) {
 			// Just the name and the tabbed index — the model bar appearing/disappearing is
 			// its own feedback, and short descriptions keep every line unwrapped.
 			ctx.ui.notify(
-				["FUSION HARNESS", ...COMMAND_INDEX.map(([cmd, what]) => `  ${cmd.padEnd(COMMAND_PAD)}  ${what}`)].join("\n"),
+				["TITAN HARNESS", ...COMMAND_INDEX.map(([cmd, what]) => `  ${cmd.padEnd(COMMAND_PAD)}  ${what}`)].join("\n"),
 				"info",
 			);
 		},
-	});
+	};
+	pi.registerCommand("titan", frontDoor);
+	pi.registerCommand("fh", { ...frontDoor, description: "Alias for /titan (legacy fusion-harness name)" });
 
-	// ── 2.11 /fh-model — choose slot → model → thinking, session-only ──
-	pi.registerCommand("fh-model", {
+	// ── 2.11 /titan-model — choose slot → model → thinking, session-only ──
+	pi.registerCommand("titan-model", {
 		description: "Choose a configured slot, model, and thinking level. Session-only; never rewrites YAML.",
 		handler: async (_args, ctx) => {
 			noteHost(ctx);
 			const stack = modelStack();
 			const choices = orderedSlots(stack).map((slot) => `${slot.architect ? "◆ ARCHITECT" : "▲ BUILDER"} | ${slot.name} | ${slot.model} (${THINKING_SHORT[slot.thinking]})`);
-			const picked = await ctx.ui.select("Fusion Harness — choose slot", choices);
+			const picked = await ctx.ui.select("Titan Harness — choose slot", choices);
 			if (!picked) return;
 			const slotIndex = choices.indexOf(picked);
 			const selectedSlot = orderedSlots(stack)[slotIndex];
@@ -1035,7 +1037,7 @@ export default function (pi: ExtensionAPI) {
 				const slash = selectedModel.indexOf("/");
 				const model = ctx.modelRegistry.find(selectedModel.slice(0, slash), selectedModel.slice(slash + 1));
 				if (!model || !ctx.modelRegistry.hasConfiguredAuth(model) || !(await pi.setModel(model))) {
-					ctx.ui.notify(`fusion-harness: could not switch Main host model to ${selectedModel}`, "error");
+					ctx.ui.notify(`titan-harness: could not switch Main host model to ${selectedModel}`, "error");
 					return;
 				}
 				hostModel = selectedModel;
@@ -1047,12 +1049,12 @@ export default function (pi: ExtensionAPI) {
 			next.builders = next.slots.filter((slot) => !slot.architect);
 			configuredStack = next;
 			renderFooterWidget();
-			ctx.ui.notify(`fusion-harness: ${target.name} → ${target.model} (${target.thinking}); session-only, YAML unchanged`, "info");
+			ctx.ui.notify(`titan-harness: ${target.name} → ${target.model} (${target.thinking}); session-only, YAML unchanged`, "info");
 		},
 	});
 
-	// ── 2.12 /fh-system-prompt — every configured slot, responsive grid ──
-	pi.registerCommand("fh-system-prompt", {
+	// ── 2.12 /titan-system-prompt — every configured slot, responsive grid ──
+	pi.registerCommand("titan-system-prompt", {
 		description: "Show the system prompt every configured slot runs with.",
 		handler: async (_args, ctx) => {
 			noteHost(ctx);
@@ -1078,11 +1080,11 @@ export default function (pi: ExtensionAPI) {
 				color: slot.color,
 				primary: slot.primary,
 			}));
-			panel({ kind: "system-prompt", command: "fh-system-prompt", ok: true, answers }, answers.map((answer) => `## ${answer.slotName} · ${answer.model}\n${answer.text}`).join("\n\n"));
+			panel({ kind: "system-prompt", command: "titan-system-prompt", ok: true, answers }, answers.map((answer) => `## ${answer.slotName} · ${answer.model}\n${answer.text}`).join("\n\n"));
 		},
 	});
 
-	// ── 2.13 /fh-only — direct one-slot execution + armed one-send routing ──
+	// ── 2.13 /titan-only — direct one-slot execution + armed one-send routing ──
 	const ONE_SHOT_WIDGET = `${CUSTOM_TYPE}-one-shot`;
 	let oneShotTargetSlotId: string | undefined;
 	let oneShotCtx: any;
@@ -1094,7 +1096,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const slot = modelStack().slots.find((candidate) => candidate.id === oneShotTargetSlotId);
 			if (!slot) return;
-			oneShotCtx.ui.setStatus(ONE_SHOT_WIDGET, `▶ one-shot → ${slot.name} | ${slot.model} (${THINKING_SHORT[slot.thinking]}) · next plain prompt routes only there · /fh-only same slot to disarm`);
+			oneShotCtx.ui.setStatus(ONE_SHOT_WIDGET, `▶ one-shot → ${slot.name} | ${slot.model} (${THINKING_SHORT[slot.thinking]}) · next plain prompt routes only there · /titan-only same slot to disarm`);
 		} catch {}
 	};
 	const disarmOneShot = () => {
@@ -1107,31 +1109,31 @@ export default function (pi: ExtensionAPI) {
 		const artifactsDir = await mkArtifacts();
 		await save(artifactsDir, "prompt.md", prompt);
 		await save(artifactsDir, "stack.json", JSON.stringify(modelStack(), null, 2));
-		panel({ kind: "prompt", command: "fh-only", ok: true }, `${source === "command" ? "/fh-only " : ""}${prompt}`);
+		panel({ kind: "prompt", command: "titan-only", ok: true }, `${source === "command" ? "/titan-only " : ""}${prompt}`);
 		const run = newSlotRun(slot);
-		const stopper = startStoppable(ctx, "fh-only");
-		const stopWidget = startSoloWidget(ctx, "fh-only", run, startedAt);
+		const stopper = startStoppable(ctx, "titan-only");
+		const stopWidget = startSoloWidget(ctx, "titan-only", run, startedAt);
 		let writerLease: WriterLease | undefined;
-		ctx.ui.setStatus(CUSTOM_TYPE, `fh-only: ${slot.name} working…`);
+		ctx.ui.setStatus(CUSTOM_TYPE, `titan-only: ${slot.name} working…`);
 		try {
 			try {
-				writerLease = acquireWriterLease(ctx.cwd, `/fh-only ${slot.id} ${path.basename(artifactsDir)}`);
+				writerLease = acquireWriterLease(ctx.cwd, `/titan-only ${slot.id} ${path.basename(artifactsDir)}`);
 			} catch (error) {
-				panel({ kind: "error", command: "fh-only", ok: false, agent: toStat(run), artifactsDir }, error instanceof Error ? error.message : String(error));
+				panel({ kind: "error", command: "titan-only", ok: false, agent: toStat(run), artifactsDir }, error instanceof Error ? error.message : String(error));
 				return;
 			}
 			await runChild({ run, prompt, systemPrompt: slot.systemPrompt, appendSystemPrompts: slot.appendSystemPrompts, tools: FULL_TOOLS, thinking: slot.thinking, ...slotInitialSpawn(slot, ctx, path.join(artifactsDir, slot.id)), cwd: ctx.cwd, timeoutMs: childTimeoutMs(), signal: stopper.signal });
 			if (stopper.stopped()) {
-				stoppedPanel("fh-only", [run], artifactsDir, startedAt, `${slot.name} was stopped mid-answer.`);
+				stoppedPanel("titan-only", [run], artifactsDir, startedAt, `${slot.name} was stopped mid-answer.`);
 				return;
 			}
 			await save(artifactsDir, `${slot.id}.md`, runOk(run) ? run.text : `FAILED: ${runError(run)}`);
 			const t = totals([run], startedAt);
-			if (runOk(run)) panel({ kind: "solo", command: "fh-only", ok: true, agent: toStat(run), artifactsDir, ...t }, run.text);
-			else panel({ kind: "error", command: "fh-only", ok: false, agent: toStat(run), artifactsDir, ...t }, `${slot.name} produced no usable answer: ${runError(run)}`);
-			await save(artifactsDir, "summary.json", JSON.stringify({ command: "fh-only", source, ok: runOk(run), targetSlot: slot.id, writerLeasePath: writerLease?.path, agents: [toStat(run)], sessions: { [slot.id]: run.sessionRef ?? cachedSlotId(slot) }, ...t }, null, 2));
+			if (runOk(run)) panel({ kind: "solo", command: "titan-only", ok: true, agent: toStat(run), artifactsDir, ...t }, run.text);
+			else panel({ kind: "error", command: "titan-only", ok: false, agent: toStat(run), artifactsDir, ...t }, `${slot.name} produced no usable answer: ${runError(run)}`);
+			await save(artifactsDir, "summary.json", JSON.stringify({ command: "titan-only", source, ok: runOk(run), targetSlot: slot.id, writerLeasePath: writerLease?.path, agents: [toStat(run)], sessions: { [slot.id]: run.sessionRef ?? cachedSlotId(slot) }, ...t }, null, 2));
 		} finally {
-			await ensureSummary(artifactsDir, { command: "fh-only", source, ok: false, stopped: stopper.stopped(), targetSlot: slot.id, writerLeasePath: writerLease?.path, agents: [toStat(run)], sessions: { [slot.id]: run.sessionRef ?? cachedSlotId(slot) }, ...totals([run], startedAt) });
+			await ensureSummary(artifactsDir, { command: "titan-only", source, ok: false, stopped: stopper.stopped(), targetSlot: slot.id, writerLeasePath: writerLease?.path, agents: [toStat(run)], sessions: { [slot.id]: run.sessionRef ?? cachedSlotId(slot) }, ...totals([run], startedAt) });
 			writerLease?.release();
 			stopper.release();
 			stopWidget();
@@ -1139,7 +1141,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	pi.registerCommand("fh-only", {
+	pi.registerCommand("titan-only", {
 		description: "Choose one configured agent. With a prompt, run immediately; without one, arm the next plain prompt as a one-send route.",
 		handler: async (raw, ctx) => {
 			noteHost(ctx);
@@ -1151,12 +1153,12 @@ export default function (pi: ExtensionAPI) {
 			const rest = firstSpace === -1 ? "" : input.slice(firstSpace).trim();
 			let selected = targetToken ? stack.slots.find((slot) => slot.id.toLowerCase() === targetToken.toLowerCase() || slot.name.toLowerCase() === targetToken.toLowerCase()) : undefined;
 			if (targetToken && !selected) {
-				ctx.ui.notify(`fusion-harness: unknown slot ${targetToken}. Valid: ${orderedSlots(stack).map((slot) => slot.id).join(", ")}`, "error");
+				ctx.ui.notify(`titan-harness: unknown slot ${targetToken}. Valid: ${orderedSlots(stack).map((slot) => slot.id).join(", ")}`, "error");
 				return;
 			}
 			if (!selected) {
 				const choices = orderedSlots(stack).map((slot) => `${slot.architect ? "◆ ARCHITECT" : "▲ BUILDER"} | ${slot.name} | ${slot.model}`);
-				const picked = await ctx.ui.select("Fusion Harness — one-send target", choices);
+				const picked = await ctx.ui.select("Titan Harness — one-send target", choices);
 				if (!picked) return;
 				selected = orderedSlots(stack)[choices.indexOf(picked)];
 			}
@@ -1167,19 +1169,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (oneShotTargetSlotId === selected.id) {
 				disarmOneShot();
-				ctx.ui.notify(`fusion-harness: one-shot ${selected.name} disarmed`, "info");
+				ctx.ui.notify(`titan-harness: one-shot ${selected.name} disarmed`, "info");
 				return;
 			}
 			oneShotTargetSlotId = selected.id;
 			renderOneShot();
-			ctx.ui.notify(`fusion-harness: next plain prompt routes only to ${selected.name}`, "info");
+			ctx.ui.notify(`titan-harness: next plain prompt routes only to ${selected.name}`, "info");
 		},
 	});
 
 	pi.on("input", async (event: any, ctx: any) => {
 		if (!oneShotTargetSlotId || event.source !== "interactive" || event.text.startsWith("/")) return { action: "continue" as const };
 		if (event.images?.length) {
-			ctx.ui.notify("fusion-harness: /fh-only one-shot image routing is not supported yet; target remains armed", "warning");
+			ctx.ui.notify("titan-harness: /titan-only one-shot image routing is not supported yet; target remains armed", "warning");
 			return { action: "continue" as const };
 		}
 		const slot = modelStack().slots.find((candidate) => candidate.id === oneShotTargetSlotId);
@@ -1221,8 +1223,8 @@ export default function (pi: ExtensionAPI) {
 		ensureSummary,
 		totals,
 	};
-	registerReadonlyCommands(pi, deps); // /fh-opinion + /fh-debate
-	registerFusionCommand(pi, deps); // /fh-fusion
-	registerCollaborateCommand(pi, deps); // /fh-collaborate
-	registerAutoValidateCommand(pi, deps); // /fh-auto-validate
+	registerReadonlyCommands(pi, deps); // /titan-opinion + /titan-debate
+	registerFusionCommand(pi, deps); // /titan-fusion
+	registerCollaborateCommand(pi, deps); // /titan-collaborate
+	registerAutoValidateCommand(pi, deps); // /titan-auto-validate
 }

@@ -1,8 +1,8 @@
 /**
- * stack-config.ts — the pi-fusion-stack settings store and the process-wide hooks
+ * stack-config.ts — the titan-harness settings store and the process-wide hooks
  * the package's extensions use to talk to each other.
  *
- * Settings live in ~/.pi/agent/pi-fusion-stack.json (machine-local, never in a repo):
+ * Settings live in ~/.pi/agent/titan-harness.json (machine-local, never in a repo):
  *   subagentTools    true  → harness children keep the tools their command asks for;
  *                    false → every child runs tool-less (--no-tools). /stack mirrors
  *                            this into pi-dynamic-workflows' excludeSubagentTools.
@@ -26,12 +26,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export const STACK_CHILD_ENV = "PI_FUSION_STACK_CHILD";
-export const STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "pi-fusion-stack.json");
-/** globalThis hook: (visible: boolean) => void — set by fusion-harness, called by /stack. */
-export const STACK_MODEL_BAR_HOOK = Symbol.for("pi-fusion-stack:model-bar");
+export const STACK_CHILD_ENV = "TITAN_HARNESS_CHILD";
+export const STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "titan-harness.json");
+/** globalThis hook: (visible: boolean) => void — set by titan-harness, called by /stack. */
+export const STACK_MODEL_BAR_HOOK = Symbol.for("titan-harness:model-bar");
 /** globalThis hook: (ctx, openNavigator) => Promise<void> — set by /stack, called by the patched /workflows. */
-export const STACK_WORKFLOWS_MENU_HOOK = Symbol.for("pi-fusion-stack:workflows-menu");
+export const STACK_WORKFLOWS_MENU_HOOK = Symbol.for("titan-harness:workflows-menu");
 
 /** pi-subagents' delegation tool. */
 export const SUBAGENT_TOOL = "subagent";

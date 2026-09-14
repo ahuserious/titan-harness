@@ -24,7 +24,7 @@ function canonicalCwd(cwd: string): string {
 }
 
 export function writerLeasePath(cwd: string): string {
-	const root = path.join(fs.existsSync("/tmp") ? "/tmp" : os.tmpdir(), "fusion-harness-writer-locks");
+	const root = path.join(fs.existsSync("/tmp") ? "/tmp" : os.tmpdir(), "titan-harness-writer-locks");
 	const key = createHash("sha256").update(canonicalCwd(cwd)).digest("hex").slice(0, 24);
 	return path.join(root, `${key}.lock`);
 }

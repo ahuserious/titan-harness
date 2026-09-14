@@ -1,5 +1,5 @@
 /**
- * cmd-fusion.ts — /fh-fusion: N read-only sources → one sole-writer FUSION → context ACKs.
+ * cmd-fusion.ts — /titan-fusion: N read-only sources → one sole-writer FUSION → context ACKs.
  *
  * Every configured slot researches concurrently with read-only tools; one fresh
  * temporary FUSION agent (full tools, CWD writer lease) merges and implements; then
@@ -38,13 +38,13 @@ import {
 import { acquireWriterLease, type WriterLease } from "./writer-lease.ts";
 
 export function registerFusionCommand(pi: ExtensionAPI, h: HarnessDeps): void {
-	pi.registerCommand("fh-fusion", {
+	pi.registerCommand("titan-fusion", {
 		description: 'All configured agents research in parallel read-only; one fresh FUSION agent merges/builds, then every slot acknowledges the fused context.',
 		handler: async (raw, ctx) => {
 			h.noteHost(ctx);
 			const input = (raw ?? "").trim();
 			if (!input) {
-				ctx.ui.notify('Usage: /fh-fusion "<prompt>" "<fusion-prompt>"  (or: /fh-fusion <prompt> :: <fusion-prompt>)', "warning");
+				ctx.ui.notify('Usage: /titan-fusion "<prompt>" "<fusion-prompt>"  (or: /titan-fusion <prompt> :: <fusion-prompt>)', "warning");
 				return;
 			}
 			const parsed = parseFusionArgs(input);
@@ -58,14 +58,14 @@ export function registerFusionCommand(pi: ExtensionAPI, h: HarnessDeps): void {
 			await h.save(artifactsDir, "stack.json", JSON.stringify(stack, null, 2));
 			await fs.promises.mkdir(path.join(artifactsDir, "agents"), { recursive: true });
 
-			h.panel({ kind: "prompt", command: "fh-fusion", ok: true }, `/fh-fusion ${input}`);
-			h.panel({ kind: "banner", command: "fh-fusion", ok: true, prompt, fusionPrompt: fusionInstruction, roles: [...slots.map((slot) => ({ role: (slot.architect ? "ARCHITECT" : "BUILDER") as Role, model: slot.model, slotId: slot.id, slotName: slot.name, color: slot.color, primary: slot.primary, architect: slot.architect })), { role: "FUSION" as Role, model: stack.architect.model }], artifactsDir }, "");
+			h.panel({ kind: "prompt", command: "titan-fusion", ok: true }, `/titan-fusion ${input}`);
+			h.panel({ kind: "banner", command: "titan-fusion", ok: true, prompt, fusionPrompt: fusionInstruction, roles: [...slots.map((slot) => ({ role: (slot.architect ? "ARCHITECT" : "BUILDER") as Role, model: slot.model, slotId: slot.id, slotName: slot.name, color: slot.color, primary: slot.primary, architect: slot.architect })), { role: "FUSION" as Role, model: stack.architect.model }], artifactsDir }, "");
 
 			const runs = slots.map(h.newSlotRun);
 			const initialSpawns = new Map(slots.map((slot) => [slot.id, h.slotInitialSpawn(slot, ctx, path.join(artifactsDir, "agents", slot.id))]));
 			const fuser = newRun("FUSION", stack.architect.model);
-			const stopper = h.startStoppable(ctx, "fh-fusion");
-			const stopWidget = h.startGridWidget(ctx, "fh-fusion", runs, fuser, startedAt);
+			const stopper = h.startStoppable(ctx, "titan-fusion");
+			const stopWidget = h.startGridWidget(ctx, "titan-fusion", runs, fuser, startedAt);
 			let writerLease: WriterLease | undefined;
 			let hostContextChunks = 0;
 			const ackRuns: AgentRun[] = []; // every ACK attempt — absorbed into the model bar after the widget stops
@@ -80,35 +80,35 @@ export function registerFusionCommand(pi: ExtensionAPI, h: HarnessDeps): void {
 					await h.save(agentDir, "answer.md", runOk(run) ? run.text : `FAILED: ${runError(run)}`);
 				}));
 				if (stopper.stopped()) {
-					h.stoppedPanel("fh-fusion", runs, artifactsDir, startedAt, "All active source agents were stopped; completed source artifacts remain on disk.");
+					h.stoppedPanel("titan-fusion", runs, artifactsDir, startedAt, "All active source agents were stopped; completed source artifacts remain on disk.");
 					return;
 				}
 
 				const sourceManifest = runs.map((run) => ({ slot: run.slot!.id, name: run.slot!.name, model: run.model, status: run.status, ok: runOk(run), artifact: path.join(artifactsDir, "agents", run.slot!.id, "answer.md"), error: runOk(run) ? undefined : runError(run) }));
 				await h.save(artifactsDir, "source-manifest.json", JSON.stringify(sourceManifest, null, 2));
-				h.panel({ kind: "multi", command: "fh-fusion", title: "READ-ONLY SOURCE RESULTS", ok: runs.every(runOk), prompt, sources: runs.map(toStat), answers: runs.map((run) => ({ role: run.role, model: run.model, text: runOk(run) ? run.text : `FAILED: ${runError(run)}`, slotId: run.slot!.id, slotName: run.slot!.name, color: run.slot!.color, primary: run.slot!.primary })), artifactsDir, ...h.totals(runs, startedAt) }, runs.map((run) => `## ${run.slot!.name}\n${runOk(run) ? run.text : `FAILED: ${runError(run)}`}`).join("\n\n"));
+				h.panel({ kind: "multi", command: "titan-fusion", title: "READ-ONLY SOURCE RESULTS", ok: runs.every(runOk), prompt, sources: runs.map(toStat), answers: runs.map((run) => ({ role: run.role, model: run.model, text: runOk(run) ? run.text : `FAILED: ${runError(run)}`, slotId: run.slot!.id, slotName: run.slot!.name, color: run.slot!.color, primary: run.slot!.primary })), artifactsDir, ...h.totals(runs, startedAt) }, runs.map((run) => `## ${run.slot!.name}\n${runOk(run) ? run.text : `FAILED: ${runError(run)}`}`).join("\n\n"));
 
 				const successful = runs.filter(runOk);
 				if (successful.length < 2) {
-					h.panel({ kind: "error", command: "fh-fusion", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, `FUSION did not run: at least 2 successful sources are required; found ${successful.length}.`);
+					h.panel({ kind: "error", command: "titan-fusion", ok: false, sources: runs.map(toStat), artifactsDir, ...h.totals(runs, startedAt) }, `FUSION did not run: at least 2 successful sources are required; found ${successful.length}.`);
 					return;
 				}
 
 				try {
-					writerLease = acquireWriterLease(ctx.cwd, `/fh-fusion ${path.basename(artifactsDir)}`);
+					writerLease = acquireWriterLease(ctx.cwd, `/titan-fusion ${path.basename(artifactsDir)}`);
 				} catch (error) {
-					h.panel({ kind: "error", command: "fh-fusion", ok: false, sources: runs.map(toStat), artifactsDir }, error instanceof Error ? error.message : String(error));
+					h.panel({ kind: "error", command: "titan-fusion", ok: false, sources: runs.map(toStat), artifactsDir }, error instanceof Error ? error.message : String(error));
 					return;
 				}
 				ctx.ui.setStatus(CUSTOM_TYPE, "fusion: temporary sole-writer agent merging and implementing…");
 				await runChild({ run: fuser, prompt: fuserPrompt(fusionInstruction, prompt, runs, fuser.model, stack.architect.thinking, artifactsDir), systemPrompt: contractSystemPrompt(stack.architect.systemPrompt, "SYSTEM_PROMPT_FUSION.md"), appendSystemPrompts: stack.architect.appendSystemPrompts, tools: FULL_TOOLS, thinking: stack.architect.thinking, sessionDir: path.join(artifactsDir, "fusion"), cwd: ctx.cwd, timeoutMs: h.childTimeoutMs(), signal: stopper.signal });
 				if (stopper.stopped()) {
-					h.stoppedPanel("fh-fusion", [...runs, fuser], artifactsDir, startedAt, "The temporary FUSION writer was stopped; source work remains on disk.");
+					h.stoppedPanel("titan-fusion", [...runs, fuser], artifactsDir, startedAt, "The temporary FUSION writer was stopped; source work remains on disk.");
 					return;
 				}
 				await h.save(artifactsDir, "fused.md", runOk(fuser) ? fuser.text : `FAILED: ${runError(fuser)}`);
 				if (!runOk(fuser)) {
-					h.panel({ kind: "error", command: "fh-fusion", ok: false, agent: toStat(fuser), sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, `Sources completed, but the temporary FUSION agent failed: ${runError(fuser)}`);
+					h.panel({ kind: "error", command: "titan-fusion", ok: false, agent: toStat(fuser), sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, `Sources completed, but the temporary FUSION agent failed: ${runError(fuser)}`);
 					return;
 				}
 
@@ -117,9 +117,9 @@ export function registerFusionCommand(pi: ExtensionAPI, h: HarnessDeps): void {
 				// plus hidden continuation messages; together they retain every byte for raw Main.
 				const fusedChunks = splitUtf8(fuser.text, 80_000);
 				hostContextChunks = fusedChunks.length;
-				h.panel({ kind: "fused", command: "fh-fusion", ok: true, prompt, fusionPrompt: fusionInstruction, agent: toStat(fuser), sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, fusedChunks[0] + (fusedChunks.length > 1 ? `\n\n… ${fusedChunks.length - 1} complete continuation chunk(s) added invisibly to Main context` : ""));
+				h.panel({ kind: "fused", command: "titan-fusion", ok: true, prompt, fusionPrompt: fusionInstruction, agent: toStat(fuser), sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, fusedChunks[0] + (fusedChunks.length > 1 ? `\n\n… ${fusedChunks.length - 1} complete continuation chunk(s) added invisibly to Main context` : ""));
 				for (let index = 1; index < fusedChunks.length; index++) {
-					pi.sendMessage<FhDetails>({ customType: CUSTOM_TYPE, content: `[FUSED RESULT CONTINUATION ${index + 1}/${fusedChunks.length}]\n${fusedChunks[index]}`, display: false, details: { kind: "sync", command: "fh-fusion", ok: true, artifactsDir } });
+					pi.sendMessage<FhDetails>({ customType: CUSTOM_TYPE, content: `[FUSED RESULT CONTINUATION ${index + 1}/${fusedChunks.length}]\n${fusedChunks[index]}`, display: false, details: { kind: "sync", command: "titan-fusion", ok: true, artifactsDir } });
 				}
 				await h.save(artifactsDir, "fusion-context.md", fuser.text);
 
@@ -159,10 +159,10 @@ export function registerFusionCommand(pi: ExtensionAPI, h: HarnessDeps): void {
 				}));
 
 				const syncOk = acknowledgements.length === slots.length && acknowledgements.every((ack) => ack.status === "acknowledged");
-				h.panel({ kind: "sync", command: "fh-fusion", ok: syncOk, sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, [`fused sha256: ${ackSpec.hash}`, ...orderedSlots(stack).map((slot) => { const ack = acknowledgements.find((item) => item.slot === slot.id); return `${ack?.status === "acknowledged" ? "✓" : "✗"} ${slot.name} · ${slot.model} · ${ack?.status ?? "missing"} · ${ack?.route ?? "no-route"}`; })].join("\n"));
-				await h.save(artifactsDir, "summary.json", JSON.stringify({ command: "fh-fusion", ok: syncOk, fusionOk: true, contextSync: acknowledgements, fusedHash: ackSpec.hash, hostContextChunks, writerLeasePath: writerLease?.path, agents: [...runs, fuser].map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals([...runs, fuser], startedAt) }, null, 2));
+				h.panel({ kind: "sync", command: "titan-fusion", ok: syncOk, sources: runs.map(toStat), artifactsDir, ...h.totals([...runs, fuser], startedAt) }, [`fused sha256: ${ackSpec.hash}`, ...orderedSlots(stack).map((slot) => { const ack = acknowledgements.find((item) => item.slot === slot.id); return `${ack?.status === "acknowledged" ? "✓" : "✗"} ${slot.name} · ${slot.model} · ${ack?.status ?? "missing"} · ${ack?.route ?? "no-route"}`; })].join("\n"));
+				await h.save(artifactsDir, "summary.json", JSON.stringify({ command: "titan-fusion", ok: syncOk, fusionOk: true, contextSync: acknowledgements, fusedHash: ackSpec.hash, hostContextChunks, writerLeasePath: writerLease?.path, agents: [...runs, fuser].map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals([...runs, fuser], startedAt) }, null, 2));
 			} finally {
-				await h.ensureSummary(artifactsDir, { command: "fh-fusion", ok: false, stopped: stopper.stopped(), hostContextChunks, agents: [...runs, fuser].map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals([...runs, fuser], startedAt) });
+				await h.ensureSummary(artifactsDir, { command: "titan-fusion", ok: false, stopped: stopper.stopped(), hostContextChunks, agents: [...runs, fuser].map(toStat), sessions: Object.fromEntries(slots.map((slot) => [slot.id, runs.find((run) => run.slot?.id === slot.id)?.sessionRef ?? h.cachedSlotId(slot)])), ...h.totals([...runs, fuser], startedAt) });
 				writerLease?.release();
 				stopper.release();
 				stopWidget();

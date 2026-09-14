@@ -1,5 +1,5 @@
 /**
- * stack-settings.ts — /stack, the pi-fusion-stack settings menu.
+ * stack-settings.ts — /stack, the titan-harness settings menu.
  *
  *   /stack                          interactive menu
  *   /stack tools on|off             subagent tools for harness children AND workflow agents
@@ -13,7 +13,7 @@
  *   /stack status                   print the effective settings
  *
  * "Subagent tools OFF" means:
- *   - fusion-harness children spawn with --no-tools (child-runner.ts reads the setting)
+ *   - titan-harness children spawn with --no-tools (child-runner.ts reads the setting)
  *   - pi-dynamic-workflows gets `excludeSubagentTools` = every tool name Pi knows, in
  *     ~/.pi/workflows/settings.json, then extensions are reloaded so its manager
  *     reconfigures (it only re-reads that file on reload).
@@ -45,7 +45,7 @@ import {
 	STACK_WORKFLOWS_MENU_HOOK,
 	THINKING_LEVELS,
 	writeStackSettings,
-} from "./fusion-harness/modules/stack-config.ts";
+} from "./titan-harness/modules/stack-config.ts";
 
 const PI_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
 const WORKFLOWS_SETTINGS_PATH = path.join(os.homedir(), ".pi", "workflows", "settings.json");
@@ -208,7 +208,7 @@ export default function (pi: ExtensionAPI) {
 		writeStackSettings({ modelBar: on });
 		const hook = (globalThis as any)[STACK_MODEL_BAR_HOOK];
 		if (typeof hook === "function") hook(on);
-		ctx.ui.notify(`Model bar ${on ? "ON" : "OFF"}${typeof hook === "function" ? "" : " (takes effect once fusion-harness is loaded)"}.`, "info");
+		ctx.ui.notify(`Model bar ${on ? "ON" : "OFF"}${typeof hook === "function" ? "" : " (takes effect once titan-harness is loaded)"}.`, "info");
 	};
 
 	const invokeCommand = async (ctx: any, name: string, args: string): Promise<boolean> => {
@@ -313,13 +313,13 @@ export default function (pi: ExtensionAPI) {
 			auth = !found ? "not in catalog" : ctx.modelRegistry.hasConfiguredAuth(found) ? "authed" : `not authed → /login ${stack.subagentModel.slice(0, slash)}`;
 		} catch {}
 		return [
-			"pi-fusion-stack settings",
+			"titan-harness settings",
 			`  subagent tools  : ${stack.subagentTools ? "ON" : "OFF"}   (harness children ${stack.subagentTools ? "keep their tools" : "run --no-tools"}; workflows excludeSubagentTools: ${excluded})`,
 			`  subagent model  : ${stack.subagentModel} (${stack.subagentThinking})${auth ? `   [${auth}]` : ""}   (Pi settings.json → subagents.defaultModel)`,
 			`  child subagents : ${stack.childSubagents}   (which harness children get the subagent tool)`,
 			`  exa in children : ${stack.childExa ? "ON" : "OFF"}   (${EXA_TOOL_NAMES.length} pi-exa tools)`,
 			`  workflow fan-out: ${fanOut ?? "package default (8)"}   (~/.pi/workflows/settings.json defaultConcurrency)`,
-			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (slots + FAN-OUT + SUBAGENT + EXA rows, /fh on|off)`,
+			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (slots + FAN-OUT + SUBAGENT + EXA rows, /titan on|off)`,
 			`  settings file   : ${STACK_SETTINGS_PATH}`,
 		].join("\n");
 	};
@@ -342,7 +342,7 @@ export default function (pi: ExtensionAPI) {
 			}],
 			["Show current settings", async () => ctx.ui.notify(statusText(ctx), "info")],
 		];
-		const picked = await ctx.ui.select("pi-fusion-stack", items.map(([label]) => label));
+		const picked = await ctx.ui.select("titan-harness", items.map(([label]) => label));
 		if (!picked) return;
 		const item = items.find(([label]) => label === picked);
 		if (item) await item[1]();
@@ -396,7 +396,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("stack", {
-		description: "pi-fusion-stack settings: subagent model, child subagents, subagent tools, exa, workflow fan-out, model bar",
+		description: "titan-harness settings: subagent model, child subagents, subagent tools, exa, workflow fan-out, model bar",
 		handler,
 	});
 	pi.registerCommand("stack-settings", {

@@ -114,19 +114,19 @@ export function loadModelStack(configPathInput: string): ModelStack {
 	try {
 		source = fs.readFileSync(configPath, "utf8");
 	} catch (error) {
-		throw new Error(`fusion-harness: model-stack config invalid (${configPath}):\n- file is unreadable: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`titan-harness: model-stack config invalid (${configPath}):\n- file is unreadable: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = parseYaml(source);
 	} catch (error) {
-		throw new Error(`fusion-harness: model-stack config invalid (${configPath}):\n- YAML parse failed: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`titan-harness: model-stack config invalid (${configPath}):\n- YAML parse failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	const errors: string[] = [];
 	if (!Array.isArray(parsed)) {
-		throw new Error(`fusion-harness: model-stack config invalid (${configPath}):\n- top-level YAML value must be a list of model slots`);
+		throw new Error(`titan-harness: model-stack config invalid (${configPath}):\n- top-level YAML value must be a list of model slots`);
 	}
 	if (parsed.length < 2 || parsed.length > 5) errors.push(`slot count must be between 2 and 5; found ${parsed.length}`);
 
@@ -214,7 +214,7 @@ export function loadModelStack(configPathInput: string): ModelStack {
 	}
 
 	if (errors.length) {
-		throw new Error(`fusion-harness: model-stack config invalid (${configPath}):\n${errors.map((error) => `- ${error}`).join("\n")}`);
+		throw new Error(`titan-harness: model-stack config invalid (${configPath}):\n${errors.map((error) => `- ${error}`).join("\n")}`);
 	}
 
 	const usedColors = new Set(explicitColors);

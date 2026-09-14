@@ -7,7 +7,7 @@ import { loadModelStack, orderedSlots, synthesizeLegacyStack } from "../modules/
 const dirs: string[] = [];
 afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true }); });
 function fixture(body: string, name = "model-stack-test.yaml") {
-  const dir = mkdtempSync(join(tmpdir(), "fh-stack-test-")); dirs.push(dir);
+  const dir = mkdtempSync(join(tmpdir(), "titan-stack-test-")); dirs.push(dir);
   const file = join(dir, name); writeFileSync(file, body); return { dir, file };
 }
 
