@@ -95,3 +95,36 @@ export const exaCellStr = (theme: any, e: ExaSnapshot): string => {
 	const state = e.active > 0 ? `live · ${e.active}/${e.total} tools` : `registered, inactive (${e.total} tools) · /exa-enable`;
 	return theme.fg(color, theme.bold("⌕ EXA")) + sep + theme.fg(color, state) + sep + theme.fg(color, `children: ${e.children ? "on" : "off"}`);
 };
+
+export interface AuditorSnapshot {
+	name: string; // auditor callsign
+	forName: string; // the builder it audits
+	model: string;
+	thinking: string;
+	authed: boolean | undefined;
+	state: string; // idle | reviewing | last verdict
+	color: HexColorLike;
+}
+type HexColorLike = `#${string}`;
+
+/** The AUDITOR row: `⚖ AUDITOR | ward ⇐ forge | claude-opus-4-6 (hi) | idle`. Amber when the provider is not authed. */
+export const auditorCellStr = (theme: any, a: AuditorSnapshot): string => {
+	const sep = theme.fg("dim", " | ");
+	const paint = (text: string) => (a.authed === false ? theme.fg("warning", text) : fgHex(a.color, text));
+	return paint(theme.bold(`${ROLE_GLYPH.AUDITOR} AUDITOR`)) + sep + paint(`${a.name} ⇐ ${a.forName}`) + sep + paint(`${shortModel(a.model)}${thinkingTag(a.thinking)}`) + sep + paint(a.authed === false ? `not authed · /login ${a.model.split("/")[0]}` : a.state);
+};
+
+export interface ShapeSnapshot {
+	shape: string;
+	builders: number;
+	subagentCap: number;
+	auditor: boolean;
+	anonymize: boolean;
+}
+
+/** The SHAPE row: `⬡ SHAPE | astra-gemini | builders 2 | subagents ≤4 | auditor on | callsigns only`. */
+export const shapeCellStr = (theme: any, s: ShapeSnapshot): string => {
+	const sep = theme.fg("dim", " | ");
+	const c = (t: string) => theme.fg("accent", t);
+	return c(theme.bold("⬡ SHAPE")) + sep + c(s.shape) + sep + c(`builders ${s.builders}`) + sep + c(s.subagentCap > 0 ? `subagents ≤${s.subagentCap}` : "subagents off") + sep + c(`auditor ${s.auditor ? "on" : "off"}`) + sep + c(s.anonymize ? "callsigns only" : "models visible");
+};

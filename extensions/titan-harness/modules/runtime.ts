@@ -33,14 +33,15 @@ export const BOOT_TYPE = "titan-harness-boot"; // the boot banner's own tag — 
 
 // ═══ Roles ═══════════════════════════════════════════════════════════════════
 
-export type Role = "ARCHITECT" | "BUILDER" | "FUSION" | "VALIDATOR";
+export type Role = "ARCHITECT" | "BUILDER" | "FUSION" | "VALIDATOR" | "AUDITOR";
 
 /** One consistent color per role, everywhere (columns, footer, panels, errors). */
-export const ROLE_COLOR: Record<Role, "accent" | "warning" | "success" | "mdLink"> = {
+export const ROLE_COLOR: Record<Role, "accent" | "warning" | "success" | "mdLink" | "muted"> = {
 	ARCHITECT: "accent",
 	BUILDER: "warning",
 	FUSION: "success",
 	VALIDATOR: "mdLink",
+	AUDITOR: "mdLink",
 };
 
 /** One consistent glyph per role, paired with the color above. */
@@ -49,6 +50,7 @@ export const ROLE_GLYPH: Record<Role, string> = {
 	BUILDER: "▲",
 	FUSION: "⧉",
 	VALIDATOR: "✓",
+	AUDITOR: "⚖",
 };
 
 /** Render an actual configured #RRGGBB slot color without consuming a pi theme token. */
@@ -375,6 +377,34 @@ export const clampCount = (n: number, fallback: number): number => (Number.isFin
 /** How a child lands in a session: fork the host, resume an earlier child, or pin a persistent id. */
 export type SpawnIdentity = { fork?: string; sessionDir: string; sessionId?: string; resume?: string };
 
+// ═══ Audit gate (titan-harness) ═══════════════════════════════════════════════
+export type AuditStatus = "PASS" | "PASS_WITH_WARNINGS" | "FAIL" | "AUDIT_EXHAUSTED" | "SAFETY" | "SCOPE_VIOLATION" | "INCONCLUSIVE" | "AUDIT_SKIPPED" | "AUDIT_ERROR";
+export interface AuditTask {
+	id: string;
+	description: string;
+	outputs: string[];
+}
+export interface AuditRequest {
+	builder: ModelSlot;
+	run: AgentRun; // the builder's run (resumed for correction rounds)
+	task: AuditTask;
+	report: string; // the builder's report as produced
+	artifactsDir: string;
+	prompt: string; // the original user request (context only)
+	tools: string; // the tool contract the builder ran with (reused for corrections)
+	spawn: SpawnIdentity; // how to resume the builder for corrections
+	signal?: AbortSignal;
+}
+export interface AuditOutcome {
+	status: AuditStatus;
+	report: string; // the builder's report with the audit verdict appended
+	verdicts: string[]; // raw YAML verdict blocks, one per review
+	reviews: number;
+	corrections: number;
+	failClosed: boolean; // SAFETY / SCOPE_VIOLATION: the task must not count as done
+	auditor?: ModelSlot;
+}
+
 /**
  * Everything a command module needs from the extension factory. The factory owns pi
  * wiring, flags/config, persistent sessions, widgets, and panel plumbing; command
@@ -394,6 +424,13 @@ export interface HarnessDeps {
 	startStoppable(ctx: any, command: string): { signal: AbortSignal; stopped: () => boolean; release: () => void };
 	startWidget(ctx: any, command: string, cols: [AgentRun, AgentRun], span: AgentRun | undefined, startedAt: number): () => void;
 	startGridWidget(ctx: any, command: string, runs: AgentRun[], span: AgentRun | undefined, startedAt: number): () => void;
+	/**
+	 * The audit gate: review a finished write task before its report may reach the
+	 * architect. Bounded correction rounds on FAIL; SAFETY / SCOPE_VIOLATION fail closed;
+	 * everything else is forwarded with the verdict attached (the architect arbitrates).
+	 * Returns the report to forward. A no-op (AUDIT_SKIPPED) when auditors are off.
+	 */
+	auditBuilderRun(ctx: any, request: AuditRequest): Promise<AuditOutcome>;
 	// stack + host
 	noteHost(ctx: any): void;
 	modelStack(): ModelStack;

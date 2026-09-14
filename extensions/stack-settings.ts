@@ -4,31 +4,22 @@
  *   /stack                          interactive menu
  *   /stack tools on|off             subagent tools for harness children AND workflow agents
  *   /stack subagent-model <provider/id> [thinking]
- *                                   the model pi-subagents uses for delegated workers
+ *                                   the model pi-subagents uses for delegated workers (tier 3)
  *   /stack child-subagents all|builders|off
  *                                   which harness children carry the `subagent` tool
  *   /stack exa on|off               pi-exa web search tools in harness children
- *   /stack fanout <1-16>            pi-dynamic-workflows defaultConcurrency (fan-out size)
+ *   /stack fanout <1-16>            pi-dynamic-workflows defaultConcurrency
+ *   /stack auditor-model auto|<provider/id> [thinking]
+ *                                   the auditor's model ("auto" = cross-family vs the builder)
+ *   /stack audit-rounds <1-3>       bounded correction rounds after a FAIL verdict
+ *   /stack anonymize on|off         callsign-only prompts (models withheld from agents)
  *   /stack bar on|off               the belowEditor model bar
  *   /stack status                   print the effective settings
  *
- * "Subagent tools OFF" means:
- *   - titan-harness children spawn with --no-tools (child-runner.ts reads the setting)
- *   - pi-dynamic-workflows gets `excludeSubagentTools` = every tool name Pi knows, in
- *     ~/.pi/workflows/settings.json, then extensions are reloaded so its manager
- *     reconfigures (it only re-reads that file on reload).
- * "ON" restores the command's own tool contract and clears the exclusion list.
- *
- * The subagent model is mirrored into Pi's settings.json as
- * `subagents.defaultModel` / `defaultProvider` / `defaultThinking`, the keys
- * pi-subagents documents; a reload makes it re-read them. Picking starts from the
- * ★ favorites (Pi's enabledModels), then Cerebras, then the whole OpenRouter
- * catalog, then every provider Pi knows; unauthed picks are allowed and flagged.
- *
- * The same toggles are offered inside the dynamic-workflows menu: bare `/workflows`
- * calls the hook this extension publishes at STACK_WORKFLOWS_MENU_HOOK (see the
- * one-line patch documented in README.md), falling back to the navigator when the
- * hook is absent.
+ * Shape controls live in the harness itself: /titan-shape, /titan-n, /titan-s,
+ * /titan-audit and their hotkeys. This file owns the settings that need other packages'
+ * config files: Pi settings.json (pi-subagents defaults), ~/.pi/workflows/settings.json
+ * (dynamic-workflows), ~/.pi/agent/extensions/subagent/config.json (pi-subagents cap).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -39,9 +30,11 @@ import {
 	type ChildSubagents,
 	EXA_TOOL_NAMES,
 	isStackChild,
+	PI_SUBAGENTS_CONFIG_PATH,
 	readStackSettings,
 	STACK_MODEL_BAR_HOOK,
 	STACK_SETTINGS_PATH,
+	STACK_SHAPE_HOOK,
 	STACK_WORKFLOWS_MENU_HOOK,
 	THINKING_LEVELS,
 	writeStackSettings,
@@ -51,7 +44,7 @@ const PI_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json"
 const WORKFLOWS_SETTINGS_PATH = path.join(os.homedir(), ".pi", "workflows", "settings.json");
 const FANOUT_CHOICES = [1, 2, 4, 8, 16];
 /** Tool names workflow agents can see even when the host has not loaded the extension that owns them. */
-const KNOWN_TOOL_NAMES = ["read", "write", "edit", "bash", "grep", "find", "ls", "subagent", "run-ci", "workflow", "workflow_control", ...EXA_TOOL_NAMES];
+const KNOWN_TOOL_NAMES = ["read", "write", "edit", "bash", "grep", "find", "ls", "subagent", "parallel", "run-ci", "workflow", "workflow_control", ...EXA_TOOL_NAMES];
 
 type JsonObject = Record<string, unknown>;
 
@@ -86,6 +79,11 @@ function matchesPattern(pattern: string, key: string): boolean {
 
 export default function (pi: ExtensionAPI) {
 	if (isStackChild()) return;
+
+	const shapeChanged = () => {
+		const hook = (globalThis as any)[STACK_SHAPE_HOOK];
+		if (typeof hook === "function") hook();
+	};
 
 	const allToolNames = (): string[] => {
 		const names = new Set(KNOWN_TOOL_NAMES);
@@ -162,6 +160,18 @@ export default function (pi: ExtensionAPI) {
 		await reloadExtensions(ctx, `Workflow fan-out set to ${n} concurrent agents.`);
 	};
 
+	/** Mirror the subagent cap into pi-subagents' globalConcurrencyLimit (0 → leave its default). */
+	const applySubagentCapToPiSubagents = (cap: number) => {
+		try {
+			const config = readJsonObject(PI_SUBAGENTS_CONFIG_PATH);
+			if (cap > 0) config.globalConcurrencyLimit = cap;
+			else delete config.globalConcurrencyLimit;
+			writeJsonAtomic(PI_SUBAGENTS_CONFIG_PATH, config);
+		} catch {
+			/* malformed pi-subagents config: leave it alone */
+		}
+	};
+
 	/** Subagent model: stack setting + pi-subagents' documented keys in Pi's settings.json. */
 	const applySubagentModel = async (ctx: any, model: string, thinking: string) => {
 		const slash = model.indexOf("/");
@@ -187,8 +197,28 @@ export default function (pi: ExtensionAPI) {
 		await reloadExtensions(ctx, `Subagent model → ${model} (${thinking})${authNote}.`);
 	};
 
+	const applyAuditorModel = (ctx: any, model: string, thinking: string) => {
+		if (model !== "auto" && model.indexOf("/") <= 0) return ctx.ui.notify("Auditor model must be auto or provider/id.", "warning");
+		if (!THINKING_LEVELS.includes(thinking)) return ctx.ui.notify(`Thinking must be one of ${THINKING_LEVELS.join(", ")}.`, "warning");
+		writeStackSettings({ auditorModel: model, auditorThinking: thinking });
+		shapeChanged();
+		ctx.ui.notify(`Auditor model → ${model === "auto" ? "auto (cross-family vs the builder and architect)" : model} (${thinking}).`, "info");
+	};
+
+	const applyAuditRounds = (ctx: any, rounds: number) => {
+		writeStackSettings({ auditRounds: rounds });
+		ctx.ui.notify(`Audit correction rounds → ${rounds}.`, "info");
+	};
+
+	const applyAnonymize = (ctx: any, on: boolean) => {
+		writeStackSettings({ anonymize: on });
+		shapeChanged();
+		ctx.ui.notify(on ? "Anonymize ON: agents see callsigns only; the transcript and bar still show models." : "Anonymize OFF: prompts include provider/model ids.", "info");
+	};
+
 	const applyChildSubagents = (ctx: any, mode: ChildSubagents) => {
 		writeStackSettings({ childSubagents: mode });
+		shapeChanged();
 		ctx.ui.notify(
 			mode === "all"
 				? "Child subagents: ALL harness children (architect and builders) get the subagent tool."
@@ -199,8 +229,17 @@ export default function (pi: ExtensionAPI) {
 		);
 	};
 
+	const applySubagentCap = async (ctx: any, cap: number) => {
+		writeStackSettings({ subagentFanOut: cap });
+		applySubagentCapToPiSubagents(cap);
+		shapeChanged();
+		if (cap > 0) await applyFanOut(ctx, Math.min(16, cap));
+		else ctx.ui.notify("Subagent fan-out OFF: children get no delegation tool.", "info");
+	};
+
 	const applyChildExa = (ctx: any, on: boolean) => {
 		writeStackSettings({ childExa: on });
+		shapeChanged();
 		ctx.ui.notify(`Exa in children ${on ? "ON" : "OFF"}: harness children ${on ? "get" : "lose"} pi-exa's web search/fetch tools.`, "info");
 	};
 
@@ -229,13 +268,16 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const all = ctx.modelRegistry?.getAll?.() ?? ctx.modelRegistry?.getAvailable?.() ?? [];
 			return all
-				.map((m: any) => ({ key: `${m.provider}/${m.id}`, authed: (() => {
-					try {
-						return !!ctx.modelRegistry.hasConfiguredAuth(m);
-					} catch {
-						return false;
-					}
-				})() }))
+				.map((m: any) => ({
+					key: `${m.provider}/${m.id}`,
+					authed: (() => {
+						try {
+							return !!ctx.modelRegistry.hasConfiguredAuth(m);
+						} catch {
+							return false;
+						}
+					})(),
+				}))
 				.sort((a: ModelRow, b: ModelRow) => a.key.localeCompare(b.key));
 		} catch {
 			return [];
@@ -249,7 +291,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {}
 		return rows.filter((row) => patterns.some((pattern) => matchesPattern(pattern, row.key)));
 	};
-	const pickModel = async (ctx: any, title: string, current: string): Promise<string | undefined> => {
+	const pickModel = async (ctx: any, title: string, current: string, extraChoices: string[] = []): Promise<string | undefined> => {
 		const rows = catalog(ctx);
 		const favs = favorites(rows);
 		const cerebras = rows.filter((row) => row.key.startsWith("cerebras/"));
@@ -260,8 +302,9 @@ export default function (pi: ExtensionAPI) {
 			[`OpenRouter — full catalog (${openrouter.length})`, openrouter],
 			[`All providers (${rows.length})`, rows],
 		];
-		const picked = await ctx.ui.select(title, sources.map(([label]) => label));
+		const picked = await ctx.ui.select(title, [...extraChoices, ...sources.map(([label]) => label)]);
 		if (!picked) return undefined;
+		if (extraChoices.includes(picked)) return picked;
 		const list = sources.find(([label]) => label === picked)?.[1] ?? [];
 		if (!list.length) {
 			ctx.ui.notify("Nothing in that list yet (unauthed providers still show once their models are in Pi's catalog).", "warning");
@@ -272,17 +315,26 @@ export default function (pi: ExtensionAPI) {
 		if (!choice) return undefined;
 		return list[labels.indexOf(choice)]?.key;
 	};
-	const pickThinking = async (ctx: any, current: string): Promise<string | undefined> => {
-		const choice = await ctx.ui.select("Thinking level for subagents", THINKING_LEVELS.map((level) => `${level === current ? "● " : "○ "}${level}`));
+	const pickThinking = async (ctx: any, title: string, current: string): Promise<string | undefined> => {
+		const choice = await ctx.ui.select(title, THINKING_LEVELS.map((level) => `${level === current ? "● " : "○ "}${level}`));
 		return choice ? choice.slice(2) : undefined;
 	};
 	const pickSubagentModel = async (ctx: any) => {
 		const stack = readStackSettings();
 		const model = await pickModel(ctx, "Subagent model (pi-subagents default)", stack.subagentModel);
 		if (!model) return;
-		const thinking = await pickThinking(ctx, stack.subagentThinking);
+		const thinking = await pickThinking(ctx, "Thinking level for subagents", stack.subagentThinking);
 		if (!thinking) return;
 		await applySubagentModel(ctx, model, thinking);
+	};
+	const pickAuditorModel = async (ctx: any) => {
+		const stack = readStackSettings();
+		const auto = "auto — cross-family vs the builder (recommended)";
+		const model = await pickModel(ctx, "Auditor model", stack.auditorModel, [auto]);
+		if (!model) return;
+		const thinking = await pickThinking(ctx, "Thinking level for auditors", stack.auditorThinking);
+		if (!thinking) return;
+		applyAuditorModel(ctx, model === auto ? "auto" : model, thinking);
 	};
 	const pickFanOut = async (ctx: any) => {
 		const current = currentFanOut();
@@ -306,20 +358,26 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			excluded = "unreadable settings file";
 		}
-		let auth = "";
-		try {
-			const slash = stack.subagentModel.indexOf("/");
-			const found = ctx?.modelRegistry?.find?.(stack.subagentModel.slice(0, slash), stack.subagentModel.slice(slash + 1));
-			auth = !found ? "not in catalog" : ctx.modelRegistry.hasConfiguredAuth(found) ? "authed" : `not authed → /login ${stack.subagentModel.slice(0, slash)}`;
-		} catch {}
+		const authOf = (model: string): string => {
+			try {
+				const slash = model.indexOf("/");
+				const found = ctx?.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1));
+				return !found ? "not in catalog" : ctx.modelRegistry.hasConfiguredAuth(found) ? "authed" : `not authed → /login ${model.slice(0, slash)}`;
+			} catch {
+				return "";
+			}
+		};
 		return [
 			"titan-harness settings",
+			`  shape           : ${stack.shape}   builders ${stack.builderFanOut}   (/titan-shape, /titan-n · Ctrl+Tab, Ctrl+Shift+N)`,
+			`  auditor         : ${stack.auditor ? "ON" : "OFF"}   model ${stack.auditorModel} (${stack.auditorThinking})   rounds ${stack.auditRounds}   (/titan-audit · Ctrl+Shift+A)`,
+			`  anonymize       : ${stack.anonymize ? "ON (callsigns only)" : "OFF (models in prompts)"}`,
 			`  subagent tools  : ${stack.subagentTools ? "ON" : "OFF"}   (harness children ${stack.subagentTools ? "keep their tools" : "run --no-tools"}; workflows excludeSubagentTools: ${excluded})`,
-			`  subagent model  : ${stack.subagentModel} (${stack.subagentThinking})${auth ? `   [${auth}]` : ""}   (Pi settings.json → subagents.defaultModel)`,
-			`  child subagents : ${stack.childSubagents}   (which harness children get the subagent tool)`,
+			`  subagent model  : ${stack.subagentModel} (${stack.subagentThinking})   [${authOf(stack.subagentModel)}]   (Pi settings.json → subagents.defaultModel)`,
+			`  subagent fan-out: ${stack.subagentFanOut > 0 ? `≤${stack.subagentFanOut} per child` : "off"}   child subagents: ${stack.childSubagents}   (/titan-s · Ctrl+Shift+S; pi-subagents globalConcurrencyLimit)`,
 			`  exa in children : ${stack.childExa ? "ON" : "OFF"}   (${EXA_TOOL_NAMES.length} pi-exa tools)`,
 			`  workflow fan-out: ${fanOut ?? "package default (8)"}   (~/.pi/workflows/settings.json defaultConcurrency)`,
-			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (slots + FAN-OUT + SUBAGENT + EXA rows, /titan on|off)`,
+			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (slots + FAN-OUT + SUBAGENT + EXA + SHAPE + AUDITOR rows)`,
 			`  settings file   : ${STACK_SETTINGS_PATH}`,
 		].join("\n");
 	};
@@ -328,7 +386,18 @@ export default function (pi: ExtensionAPI) {
 		const stack = readStackSettings();
 		const fanOut = currentFanOut();
 		const items: Array<[string, () => Promise<void>]> = [
+			[`Harness shape: ${stack.shape} · builders ${stack.builderFanOut}  → /titan-shape`, async () => {
+				if (!(await invokeCommand(ctx, "titan-shape", "next"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
+			[`Auditor: ${stack.auditor ? "ON" : "OFF"}  → toggle`, async () => {
+				if (!(await invokeCommand(ctx, "titan-audit", "toggle"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
+			[`Auditor model: ${stack.auditorModel} (${stack.auditorThinking}) · rounds ${stack.auditRounds}  → change`, () => pickAuditorModel(ctx)],
+			[`Anonymize (callsigns only): ${stack.anonymize ? "ON" : "OFF"}  → toggle`, async () => applyAnonymize(ctx, !stack.anonymize)],
 			[`Subagent model: ${stack.subagentModel} (${stack.subagentThinking})  → change`, () => pickSubagentModel(ctx)],
+			[`Subagent fan-out: ${stack.subagentFanOut > 0 ? `≤${stack.subagentFanOut}` : "off"} · children: ${stack.childSubagents}  → /titan-s`, async () => {
+				if (!(await invokeCommand(ctx, "titan-s", "next"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
 			[`Child subagents: ${stack.childSubagents}  → ${nextChildMode(stack.childSubagents)}`, async () => applyChildSubagents(ctx, nextChildMode(stack.childSubagents))],
 			[`Subagent tools: ${stack.subagentTools ? "ON" : "OFF"}  → turn ${stack.subagentTools ? "OFF" : "ON"}`, () => applySubagentTools(ctx, !stack.subagentTools)],
 			[`Exa in children: ${stack.childExa ? "ON" : "OFF"}  → toggle`, async () => applyChildExa(ctx, !stack.childExa)],
@@ -366,11 +435,31 @@ export default function (pi: ExtensionAPI) {
 				if (!value) return pickSubagentModel(ctx);
 				return applySubagentModel(ctx, value, (parts[2] ?? readStackSettings().subagentThinking).toLowerCase());
 			}
+			case "auditor-model": {
+				if (!value) return pickAuditorModel(ctx);
+				return applyAuditorModel(ctx, value.toLowerCase() === "auto" ? "auto" : value, (parts[2] ?? readStackSettings().auditorThinking).toLowerCase());
+			}
+			case "audit-rounds": {
+				const n = Number.parseInt(value, 10);
+				if (!Number.isFinite(n) || n < 1 || n > 3) return ctx.ui.notify("Usage: /stack audit-rounds <1-3>", "warning");
+				return applyAuditRounds(ctx, n);
+			}
+			case "anonymize": {
+				const on = onOff(value);
+				if (on === undefined) return ctx.ui.notify("Usage: /stack anonymize on|off", "warning");
+				return applyAnonymize(ctx, on);
+			}
 			case "child-subagents":
 			case "children": {
 				const mode = value.toLowerCase() as ChildSubagents;
 				if (!CHILD_SUBAGENT_MODES.includes(mode)) return ctx.ui.notify("Usage: /stack child-subagents all|builders|off", "warning");
 				return applyChildSubagents(ctx, mode);
+			}
+			case "subagent-cap":
+			case "cap": {
+				const n = Number.parseInt(value, 10);
+				if (!Number.isFinite(n) || n < 0 || n > 16) return ctx.ui.notify("Usage: /stack subagent-cap <0-16>", "warning");
+				return applySubagentCap(ctx, n);
 			}
 			case "exa": {
 				const on = onOff(value);
@@ -391,12 +480,12 @@ export default function (pi: ExtensionAPI) {
 			case "status":
 				return ctx.ui.notify(statusText(ctx), "info");
 			default:
-				return ctx.ui.notify("Usage: /stack [tools on|off | subagent-model <provider/id> [thinking] | child-subagents all|builders|off | exa on|off | fanout <1-16> | bar on|off | status]", "warning");
+				return ctx.ui.notify("Usage: /stack [tools on|off | subagent-model <provider/id> [thinking] | auditor-model auto|<provider/id> [thinking] | audit-rounds <1-3> | anonymize on|off | child-subagents all|builders|off | subagent-cap <0-16> | exa on|off | fanout <1-16> | bar on|off | status]", "warning");
 		}
 	};
 
 	pi.registerCommand("stack", {
-		description: "titan-harness settings: subagent model, child subagents, subagent tools, exa, workflow fan-out, model bar",
+		description: "titan-harness settings: shape, auditor, anonymize, subagent model/cap, subagent tools, exa, workflow fan-out, model bar",
 		handler,
 	});
 	pi.registerCommand("stack-settings", {

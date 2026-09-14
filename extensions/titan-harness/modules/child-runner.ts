@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { briefArg, runOk, type AgentRun } from "./runtime.ts";
-import { childToolsFor, STACK_CHILD_ENV } from "./stack-config.ts";
+import { childToolsFor, readStackSettings, STACK_CHILD_ENV, subagentCapHint } from "./stack-config.ts";
 
 const KILL_GRACE_MS = 5_000; // SIGTERM → SIGKILL escalation window
 
@@ -82,6 +82,10 @@ export function runChild(opts: {
 	for (const append of opts.appendSystemPrompts ?? []) {
 		if (append.trim()) args.push("--append-system-prompt", append);
 	}
+	// Tier-3 delegation contract for this child: the /stack subagent fan-out cap and the
+	// "subagents never spawn subagents" rule travel as an appended system prompt.
+	const capHint = subagentCapHint(readStackSettings());
+	if (capHint) args.push("--append-system-prompt", capHint);
 	// /stack "subagent tools" OFF forces every child to run tool-less, whatever the
 	// command asked for; ON keeps the command's own read-only/full-tools contract.
 	const effectiveTools = childToolsFor(opts.tools);

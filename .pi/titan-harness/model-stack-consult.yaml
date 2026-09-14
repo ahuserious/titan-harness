@@ -1,0 +1,15 @@
+# Consult stack: three authed providers for a design review (no Codex until re-login).
+- name: gemini
+  model: antigravity/gemini-3.8-flash
+  thinking: high
+  architect: true
+  color: "#34D399"
+- name: grok
+  model: xai/grok-4.6
+  thinking: high
+  primary: true
+  color: "#F59E0B"
+- name: opus
+  model: antigravity/claude-opus-4-6
+  thinking: high
+  color: "#A78BFA"

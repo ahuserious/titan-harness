@@ -188,3 +188,26 @@ machine lacks it, add to `~/.pi/agent/models.json`:
 not; the interactive picker lists ★ favorites, Cerebras, the full OpenRouter catalog,
 then every provider. OpenRouter and Cerebras models appear once those providers are
 authed (`/login openrouter`, `/login cerebras`).
+
+## 8. Shape, auditors, hotkeys (0.2.0)
+
+Stacks are `~/.pi/titan-harness/model-stack-<codename>.yaml` (copy the package's
+`.pi/titan-harness/*.yaml` there). `/titan-shape list` shows them; `/titan-shape next`
+cycles, skipping any stack with an unauthed slot. Persisted in
+`~/.pi/agent/titan-harness.json` (`shape`, `builderFanOut`, `subagentFanOut`, `auditor`,
+`auditorModel`, `auditorThinking`, `auditRounds`, `anonymize`).
+
+Hotkeys need the Kitty keyboard protocol for the Ctrl variants (Kitty, Ghostty, WezTerm,
+foot); the Alt variants work in every terminal:
+
+| Action | Ctrl form | Alt form | Command |
+|---|---|---|---|
+| cycle shape | Ctrl+Tab | Alt+H | `/titan-shape next` |
+| builders 1→4 | Ctrl+Shift+N | Alt+N | `/titan-n [1-4]` |
+| subagent cap 0/2/4/6/8 | Ctrl+Shift+S | Alt+S | `/titan-s [0-16]` |
+| auditors on/off | Ctrl+Shift+A | Alt+A | `/titan-audit [on|off]` |
+
+The auditor needs a usable cross-family model: with Antigravity and xAI authed the
+auto rule picks Claude Opus 4.6, Gemini 3.8 Flash, or Grok 4.6 depending on the builder.
+`/stack auditor-model <provider/id>` pins one. The subagent cap is also written to
+`~/.pi/agent/extensions/subagent/config.json` (`globalConcurrencyLimit`).

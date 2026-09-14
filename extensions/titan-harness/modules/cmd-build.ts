@@ -94,7 +94,7 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 			let writerLease: WriterLease | undefined;
 			let maxConcurrentWriteEnabledChildren = 0;
 			let activeWriters = 0;
-			const taskExecutions: Array<{ taskId: string; slot: string; mode: "read" | "write"; startedAt: number; endedAt: number; ok: boolean }> = [];
+			const taskExecutions: Array<{ taskId: string; slot: string; mode: "read" | "write"; startedAt: number; endedAt: number; ok: boolean; audit?: string }> = [];
 			let plan: ValidatedCollaborationPlan | undefined;
 			try {
 				// ── Phase 1: every slot PLANS the work independently, read-only ──
@@ -214,21 +214,36 @@ export function registerCollaborateCommand(pi: ExtensionAPI, h: HarnessDeps): vo
 						activeWriters++;
 						maxConcurrentWriteEnabledChildren = Math.max(maxConcurrentWriteEnabledChildren, activeWriters);
 					}
+					let auditBlocked = false;
+					let auditStatus: string | undefined;
+					let report = "";
 					try {
-						await runChild({ run, prompt: collabExecutePrompt(slot, prompt, task, taskHandoff(task)), systemPrompt: slot.systemPrompt, appendSystemPrompts: slot.appendSystemPrompts, tools: write ? FULL_TOOLS : READONLY_TOOLS, thinking: slot.thinking, ...h.slotNextSpawn(slot, run, initialSpawns.get(slot.id)!, ctx), cwd: ctx.cwd, timeoutMs: h.childTimeoutMs(), signal: stopper.signal });
+						const spawn = h.slotNextSpawn(slot, run, initialSpawns.get(slot.id)!, ctx);
+						await runChild({ run, prompt: collabExecutePrompt(slot, prompt, task, taskHandoff(task)), systemPrompt: slot.systemPrompt, appendSystemPrompts: slot.appendSystemPrompts, tools: write ? FULL_TOOLS : READONLY_TOOLS, thinking: slot.thinking, ...spawn, cwd: ctx.cwd, timeoutMs: h.childTimeoutMs(), signal: stopper.signal });
+						report = runOk(run) ? run.text : `FAILED: ${runError(run)}`;
+						// AUDIT GATE: a finished write task is reviewed (bounded corrections happen
+						// here, still inside the writer's critical section) before its report can
+						// reach the architect. Read tasks are not audited.
+						if (write && runOk(run) && !stopper.stopped() && !slot.architect) {
+							taskState.set(task.id, "writing");
+							renderBoard();
+							const outcome = await h.auditBuilderRun(ctx, { builder: slot, run, task: { id: task.id, description: task.description, outputs: task.outputs }, report, artifactsDir, prompt, tools: FULL_TOOLS, spawn, signal: stopper.signal });
+							report = outcome.report;
+							auditBlocked = outcome.failClosed;
+							auditStatus = outcome.status;
+						}
 					} finally {
 						if (write) activeWriters--;
 					}
-					const ok = runOk(run) && !stopper.stopped();
-					taskExecutions.push({ taskId: task.id, slot: slot.id, mode: task.mode, startedAt: taskStartedAt, endedAt: Date.now(), ok });
-					const report = runOk(run) ? run.text : `FAILED: ${runError(run)}`;
+					const ok = runOk(run) && !stopper.stopped() && !auditBlocked;
+					taskExecutions.push({ taskId: task.id, slot: slot.id, mode: task.mode, startedAt: taskStartedAt, endedAt: Date.now(), ok, ...(auditStatus ? { audit: auditStatus } : {}) });
 					taskReports.set(task.id, report);
 					await h.save(reportsDir, `${task.id}-${slot.id}.md`, report);
 					taskState.set(task.id, ok ? "done" : "failed");
 					if (!stopper.stopped()) {
 						// Every finished task renders its report — the intermediate work IS the output.
 						h.panel({ kind: "solo", command: "titan-collaborate", ok, agent: toStat(run), artifactsDir }, `### Task ${task.id} (${task.mode}) — ${slot.name}\n${task.description}\n\n${report}`);
-						if (!ok) executionFailure ??= `task ${task.id} (${slot.id}) failed: ${runError(run)}`;
+						if (!ok) executionFailure ??= auditBlocked ? `task ${task.id} (${slot.id}) blocked by audit: ${auditStatus}` : `task ${task.id} (${slot.id}) failed: ${runError(run)}`;
 					}
 				};
 				ctx.ui.setStatus(CUSTOM_TYPE, "collaborate: executing the delegation graph…");

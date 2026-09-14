@@ -83,3 +83,27 @@ pi-exa's web search is live in the host and whether children get it too.
 Picking the subagent model in `/stack` starts from your ★ favorites (Pi's
 `enabledModels`), then Cerebras, then the whole OpenRouter catalog, then every
 provider Pi knows, authed or not; unauthed picks are allowed and flagged.
+
+## The 3-tier shape (0.2.0)
+
+Design record: `docs/harness-shape-consult.md` (a `/titan-fusion` of Gemini 3.8 Flash,
+Grok 4.6 and Claude Opus 4.6 reviewing the proposal). What shipped:
+
+- **Tiers.** ARCHITECT (tier 1) → BUILDERS (tier 2, `n` = 1-4, extra builders come from a
+  heterogeneous pool) → SUBAGENTS (tier 3, pi-subagents, capped per child). The cap and
+  the "subagents never spawn subagents" rule travel in every child's system prompt and in
+  pi-subagents' `globalConcurrencyLimit`.
+- **Auditors.** One per builder when on. Every finished WRITE task is reviewed by an
+  ephemeral, read-only, cross-family auditor before the report reaches the architect:
+  bounded corrections on FAIL, `AUDIT_EXHAUSTED` escalation for the architect to arbitrate,
+  `SAFETY` / `SCOPE_VIOLATION` fail-closed. Read-only tasks skip the gate. Verdicts are
+  YAML (`prompts/SYSTEM_PROMPT_AUDITOR.md`) and are saved under the run's `audit/` dir.
+- **Callsigns only.** Prompts, rosters, and cross-agent packets carry names (forge, anvil,
+  ward, …) and "undisclosed model"; the transcript and model bar show the real models.
+- **Live reshaping.** `/titan-shape` cycles the `model-stack-*.yaml` files in
+  `~/.pi/titan-harness` (unrunnable ones are skipped), `/titan-n` builders, `/titan-s`
+  subagent cap, `/titan-audit` auditors. Hotkeys: Ctrl+Tab, Ctrl+Shift+N, Ctrl+Shift+S,
+  Ctrl+Shift+A on Kitty-protocol terminals; Alt+H, Alt+N, Alt+S, Alt+A everywhere.
+  Changes take effect at the next command or next child spawn; nothing in flight is preempted.
+- **Model bar rows.** `⬡ SHAPE | astra-gemini | builders 2 | subagents ≤4 | auditor on | callsigns only`
+  and `⚖ AUDITOR | ward ⇐ forge | claude-opus-4-6 (hi) | idle` per builder.

@@ -17,6 +17,8 @@ Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `pac
 | `design-to-code-pipeline` | combo | Combo workflow: Figma design → tokens → shadcn/Relume components → Framer or app code, with the titan-harness fanning out builders |
 | `brand-launch-kit` | combo | Combo workflow: Brandfetch brand data → Higgsfield hero media → Macro launch doc/tasks, assembling a launch kit for a company or product |
 | `ship-and-verify` | combo | Combo workflow: gate a build with TestMu cloud runs, Kane CLI browser flows, and Momentic E2E before merge, wired into /titan-auto-validate |
+| `titan-orchestration` | harness | the 3-tier hierarchy, commands, hotkeys |
+| `titan-auditor` | harness | the audit contract and verdict format |
 | `mcp-cli-bridges` | bridge | Call any MCP server from bash with mcp2cli (Python) or mcporter (TypeScript) instead of loading tool schemas into context; list tools, pass args, handle auth headers |
 
 Each `SKILL.md` has: Setup (server + auth), Playbook, Guardrails. Tool names are discovered live (`/mcp` in Pi) because vendors rename them; the skills describe capabilities, not brittle signatures.

@@ -8,6 +8,7 @@
  * models to those contracts (raw JSON objects, gate scripts).
  */
 
+import { readStackSettings } from "./stack-config.ts";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -49,18 +50,41 @@ export function contractSystemPrompt(base: string | undefined, contractFile: str
 	return [base?.trim(), promptTemplate(contractFile)].filter(Boolean).join("\n\n");
 }
 
-/** A stable, explicit roster injected into every N-agent protocol. */
+/**
+ * Anonymization boundary (titan-harness): agents address each other by callsign only.
+ * When the stack setting `anonymize` is on (default), every prompt that used to carry a
+ * provider/model id gets this neutral label instead, so a model never knows which vendor
+ * wrote what it is judging or rebutting (self-preference bias). The human-facing
+ * transcript and model bar still show real models.
+ */
+export function modelLabel(model: string): string {
+	return readStackSettings().anonymize ? "undisclosed model" : model;
+}
+
+/** A stable, explicit roster injected into every N-agent protocol (callsigns + tiers, models withheld when anonymized). */
 export function rosterText(stack: ModelStack): string {
 	return orderedSlots(stack)
-		.map((slot) => `- [${slot.name.toUpperCase()}] ${slot.architect ? "ARCHITECT" : slot.primary ? "BUILDER (Main)" : "BUILDER"} · ${slot.model} · thinking=${slot.thinking}`)
+		.map((slot) => `- [${slot.name.toUpperCase()}] ${slot.architect ? "ARCHITECT (tier 1)" : slot.primary ? "BUILDER (Main, tier 2)" : "BUILDER (tier 2)"} · ${modelLabel(slot.model)} · thinking=${slot.thinking}`)
 		.join("\n");
+}
+
+// ═══ Audit (titan-harness) ═══════════════════════════════════════════════════
+
+/** The auditor's review request: task, acceptance, the builder's report, and the scoped diff. */
+export function auditPrompt(vars: { AUDITOR_NAME: string; BUILDER_NAME: string; ROUND: number; MAX_ROUNDS: number; TASK_ID: string; TASK_DESCRIPTION: string; TASK_OUTPUTS: string; REPORT: string; DIFF: string; PROMPT: string }): string {
+	return fill("USER_PROMPT_AUDIT.md", { ...Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, String(v)])), REPORT: truncateChars(vars.REPORT, 16_000), DIFF: truncateChars(vars.DIFF, 60_000) });
+}
+
+/** The builder's bounded correction turn after a FAIL verdict: only the blocking items travel. */
+export function auditCorrectionPrompt(vars: { BUILDER_NAME: string; ROUND: number; MAX_ROUNDS: number; TASK_ID: string; TASK_DESCRIPTION: string; VERDICT: string; PROMPT: string }): string {
+	return fill("USER_PROMPT_AUDIT_CORRECTION.md", Object.fromEntries(Object.entries(vars).map(([k, v]) => [k, String(v)])));
 }
 
 // ═══ Fusion ══════════════════════════════════════════════════════════════════
 
 /** /titan-fusion parallel workers are strictly read-only researchers; the fuser is the sole writer. */
 export function workerPrompt(slot: ModelSlot, stack: ModelStack, prompt: string): string {
-	return fill("USER_PROMPT_FUSION_WORKER.md", { SLOT_NAME: slot.name, MODEL: slot.model, ROSTER: rosterText(stack), PROMPT: prompt });
+	return fill("USER_PROMPT_FUSION_WORKER.md", { SLOT_NAME: slot.name, MODEL: modelLabel(slot.model), ROSTER: rosterText(stack), PROMPT: prompt });
 }
 
 /** The built-in critical-merge instruction, used when /titan-fusion gets no explicit fusion prompt. */
@@ -100,7 +124,7 @@ export function fuserPrompt(
 			const slot = run.slot!;
 			const artifactPath = path.join(artifactsDir, "agents", slot.id, "answer.md");
 			return [
-				`## [${slot.name.toUpperCase()}] ${slot.model}`,
+				`## [${slot.name.toUpperCase()}] ${modelLabel(slot.model)}`,
 				`status: ${run.status}${runOk(run) ? "" : ` (${runError(run)})`}`,
 				`artifact: ${artifactPath}`,
 				runOk(run) ? `excerpt:\n${truncateChars(run.text, perSource)}` : "excerpt: unavailable",
@@ -109,7 +133,7 @@ export function fuserPrompt(
 		.join("\n\n");
 	return fill("USER_PROMPT_FUSION_MERGE.md", {
 		FUSION_INSTRUCTION: fusionInstruction,
-		MODEL: shortModel(fuserModel),
+		MODEL: modelLabel(shortModel(fuserModel)),
 		THINKING: fuserThinking,
 		PROMPT: prompt,
 		SOURCE_COUNT: String(sources.length),
@@ -207,7 +231,7 @@ export function validatorPrompt(prompt: string, cwd: string, gatePath: string): 
 
 /** /titan-opinion: every slot gives one independent, strictly read-only opinion. */
 export function opinionPrompt(slot: ModelSlot, stack: ModelStack, prompt: string): string {
-	return fill("USER_PROMPT_OPINION.md", { SLOT_NAME: slot.name, MODEL: slot.model, ROSTER: rosterText(stack), PROMPT: prompt });
+	return fill("USER_PROMPT_OPINION.md", { SLOT_NAME: slot.name, MODEL: modelLabel(slot.model), ROSTER: rosterText(stack), PROMPT: prompt });
 }
 
 /** Clearly labeled concrete opinions from every other surviving agent's previous round. */
@@ -220,8 +244,8 @@ export function debateOpinionsBlock(slot: ModelSlot, previousRuns: AgentRun[]): 
 	return others
 		.map((run) => {
 			const name = run.slot?.name ?? run.role;
-			if (!runOk(run)) return [`----- PARTICIPANT UNAVAILABLE -----`, `SLOT: ${name}`, `MODEL: ${run.model}`, `STATUS: FAILED — no opinion is available`, `----- END PARTICIPANT STATUS -----`].join("\n");
-			return [`----- BEGIN CONCRETE OPINION -----`, `SLOT: ${name}`, `MODEL: ${run.model}`, `STATUS: SUCCESS`, run.text, `----- END CONCRETE OPINION -----`].join("\n");
+			if (!runOk(run)) return [`----- PARTICIPANT UNAVAILABLE -----`, `SLOT: ${name}`, `MODEL: ${modelLabel(run.model)}`, `STATUS: FAILED — no opinion is available`, `----- END PARTICIPANT STATUS -----`].join("\n");
+			return [`----- BEGIN CONCRETE OPINION -----`, `SLOT: ${name}`, `MODEL: ${modelLabel(run.model)}`, `STATUS: SUCCESS`, run.text, `----- END CONCRETE OPINION -----`].join("\n");
 		})
 		.join("\n\n");
 }
@@ -229,7 +253,7 @@ export function debateOpinionsBlock(slot: ModelSlot, previousRuns: AgentRun[]): 
 export function debateOpeningPrompt(slot: ModelSlot, stack: ModelStack, prompt: string, rounds: number): string {
 	return fill("USER_PROMPT_DEBATE_OPENING.md", {
 		SLOT_NAME: slot.name,
-		MODEL: slot.model,
+		MODEL: modelLabel(slot.model),
 		ROSTER: rosterText(stack),
 		ROUNDS: String(rounds),
 		PROMPT: prompt,
@@ -239,7 +263,7 @@ export function debateOpeningPrompt(slot: ModelSlot, stack: ModelStack, prompt: 
 export function debateRebuttalPrompt(slot: ModelSlot, prompt: string, round: number, rounds: number, previousRuns: AgentRun[]): string {
 	return fill("USER_PROMPT_DEBATE_REBUTTAL.md", {
 		SLOT_NAME: slot.name,
-		MODEL: slot.model,
+		MODEL: modelLabel(slot.model),
 		PROMPT: prompt,
 		ROUND: String(round),
 		PREV_ROUND: String(round - 1),
@@ -252,7 +276,7 @@ export function debateRebuttalPrompt(slot: ModelSlot, prompt: string, round: num
 export function debateClosingPrompt(slot: ModelSlot, prompt: string, round: number, rounds: number, previousRuns: AgentRun[]): string {
 	return fill("USER_PROMPT_DEBATE_CLOSING.md", {
 		SLOT_NAME: slot.name,
-		MODEL: slot.model,
+		MODEL: modelLabel(slot.model),
 		PROMPT: prompt,
 		ROUND: String(round),
 		PREV_ROUND: String(round - 1),
@@ -264,7 +288,7 @@ export function debateClosingPrompt(slot: ModelSlot, prompt: string, round: numb
 // ═══ Collaboration ═══════════════════════════════════════════════════════════
 
 export function collabProposePrompt(slot: ModelSlot, stack: ModelStack, prompt: string): string {
-	return fill("USER_PROMPT_COLLAB_PROPOSE.md", { SLOT_NAME: slot.name, MODEL: slot.model, ROSTER: rosterText(stack), PROMPT: prompt });
+	return fill("USER_PROMPT_COLLAB_PROPOSE.md", { SLOT_NAME: slot.name, MODEL: modelLabel(slot.model), ROSTER: rosterText(stack), PROMPT: prompt });
 }
 
 export function collabDelegatePrompt(stack: ModelStack, prompt: string, collabDir: string, planPath: string): string {
@@ -275,7 +299,7 @@ export function collabDelegatePrompt(stack: ModelStack, prompt: string, collabDi
 export function collabExecutePrompt(slot: ModelSlot, prompt: string, task: CollaborationTask, handoff: string): string {
 	return fill("USER_PROMPT_COLLAB_EXECUTE.md", {
 		SLOT_NAME: slot.name,
-		MODEL: slot.model,
+		MODEL: modelLabel(slot.model),
 		TASK_ID: task.id,
 		TASK_DESCRIPTION: task.description,
 		TASK_OUTPUTS: task.outputs.length ? task.outputs.map((output) => `- ${output}`).join("\n") : "- concrete task report",

@@ -54,6 +54,7 @@ import { registerReadonlyCommands } from "./modules/cmd-readonly.ts";
 import { piInvocation, runChild } from "./modules/child-runner.ts";
 import {
 	cloneStack,
+	type HexColor,
 	loadModelStack,
 	orderedSlots,
 	resolveThinking as resolveStackThinking,
@@ -79,13 +80,27 @@ import {
 	toStat,
 	truncateBytes,
 	type AgentRun,
+	type AuditRequest,
 	type FhDetails,
 	type HarnessDeps,
 	type Role,
 	type SpawnIdentity,
 } from "./modules/runtime.ts";
-import { EXA_TOOL_NAMES, isStackChild, readStackSettings, STACK_MODEL_BAR_HOOK, writeStackSettings } from "./modules/stack-config.ts";
-import { cellStr, exaCellStr, fanOutCellStr, subagentCellStr } from "./modules/tui.ts";
+import { auditBuilderRun as runAuditGate } from "./modules/audit.ts";
+import {
+	BUILDER_FANOUT_CYCLE,
+	EXA_TOOL_NAMES,
+	isStackChild,
+	modelFamily,
+	nextInCycle,
+	readStackSettings,
+	STACK_DIR,
+	STACK_MODEL_BAR_HOOK,
+	STACK_SHAPE_HOOK,
+	SUBAGENT_FANOUT_CYCLE,
+	writeStackSettings,
+} from "./modules/stack-config.ts";
+import { auditorCellStr, cellStr, exaCellStr, fanOutCellStr, shapeCellStr, subagentCellStr } from "./modules/tui.ts";
 import { acquireWriterLease, type WriterLease } from "./modules/writer-lease.ts";
 
 // ═══ 1. Defaults ═════════════════════════════════════════════════════════════
@@ -214,13 +229,25 @@ export default function (pi: ExtensionAPI) {
 	 * ONE flag: set --architect (the fusion model) and the builder rides pi's own default.
 	 */
 	let hostModel: string | undefined;
+	let hostCtx: any; // the latest session ctx — registry + auth lookups for shapes and auditors
 	const noteHost = (ctx: any): void => {
 		ensureConfigLoaded();
 		if (stackReadyError) throw new Error(stackReadyError);
+		if (ctx?.modelRegistry) hostCtx = ctx;
 		try {
 			if (ctx?.model?.provider && ctx?.model?.id) hostModel = `${ctx.model.provider}/${ctx.model.id}`;
 		} catch {
 			/* no model on this context — keep the last known one */
+		}
+	};
+	/** Is `provider/id` in the catalog with configured auth? (false until a ctx is known) */
+	const modelUsable = (model: string): boolean => {
+		try {
+			const slash = model.indexOf("/");
+			const found = slash > 0 ? hostCtx?.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1)) : undefined;
+			return !!found && !!hostCtx.modelRegistry.hasConfiguredAuth(found);
+		} catch {
+			return false;
 		}
 	};
 	// Precedence: explicit --builder > the host session's live model > the shipped default.
@@ -301,7 +328,7 @@ export default function (pi: ExtensionAPI) {
 		return resolveThinking(flagStr(`${role}-thinking`)) ?? "medium";
 	};
 
-	const modelStack = (): ModelStack => {
+	const baseStack = (): ModelStack => {
 		ensureConfigLoaded();
 		return configuredStack ??
 		synthesizeLegacyStack({
@@ -312,6 +339,115 @@ export default function (pi: ExtensionAPI) {
 			architectSystemPrompt: roleSystemPrompt("architect"),
 			builderSystemPrompt: roleSystemPrompt("builder"),
 		});
+	};
+
+	// ── 2.2b The SHAPE: builder fan-out n, auditors, shape cycling (titan-harness) ──
+	// Tier 1 ARCHITECT, tier 2 BUILDERS (n = settings.builderFanOut), tier 3 subagents via
+	// pi-subagents inside every child. Extra builders beyond the YAML come from a
+	// heterogeneous pool (correlated-failure hedge); surplus YAML builders are parked.
+	const BUILDER_POOL = ["xai/grok-4.6", "antigravity/claude-opus-4-6", "antigravity/gemini-3.8-flash", "openai-codex/gpt-6-astra", "openai-codex/gpt-5.6-terra", "anthropic/claude-fable-5-1"];
+	const BUILDER_NAMES = ["forge", "anvil", "mason", "welder"];
+	const BUILDER_COLORS: HexColor[] = ["#F59E0B", "#22D3EE", "#F472B6", "#FB923C"];
+	// Auditors: cross-family relative to the builder under review (and, when possible, the
+	// architect), so a model never grades its own family's work.
+	const AUDITOR_POOL = ["antigravity/claude-opus-4-6", "antigravity/gemini-3.8-flash", "xai/grok-4.6", "openai-codex/gpt-6-astra", "anthropic/claude-fable-5-1"];
+	const AUDITOR_NAMES = ["ward", "sentinel", "warden", "arbiter"];
+	const applyShape = (base: ModelStack): ModelStack => {
+		const n = readStackSettings().builderFanOut;
+		const stack = cloneStack(base);
+		const extras = stack.builders.filter((slot) => !slot.primary);
+		const builders: ModelSlot[] = [stack.primaryBuilder, ...extras.slice(0, Math.max(0, n - 1))];
+		if (builders.length < n) {
+			const used = new Set(stack.slots.map((slot) => slot.model));
+			let index = extras.length;
+			for (const model of BUILDER_POOL) {
+				if (builders.length >= n) break;
+				if (used.has(model) || !modelUsable(model)) continue;
+				used.add(model);
+				builders.push({
+					id: `builder-${index + 1}`,
+					name: BUILDER_NAMES[index] ?? `builder-${index + 1}`,
+					model,
+					thinking: "high",
+					color: BUILDER_COLORS[index % BUILDER_COLORS.length],
+					architect: false,
+					primary: false,
+					systemPrompt: stack.primaryBuilder.systemPrompt,
+					appendSystemPrompts: [...stack.primaryBuilder.appendSystemPrompts],
+				});
+				index++;
+			}
+		}
+		return { ...stack, slots: [stack.architect, ...builders], builders };
+	};
+	const modelStack = (): ModelStack => applyShape(baseStack());
+	const shapeName = (): string => configuredStack?.codename ?? "legacy";
+	const auditorState = new Map<string, string>();
+	const auditorFor = (builder: ModelSlot): ModelSlot => {
+		const s = readStackSettings();
+		const stack = modelStack();
+		const index = Math.max(0, stack.builders.findIndex((slot) => slot.id === builder.id));
+		let model = s.auditorModel;
+		if (model === "auto") {
+			const builderFamily = modelFamily(builder.model);
+			const architectFamily = modelFamily(stack.architect.model);
+			model =
+				AUDITOR_POOL.find((candidate) => modelFamily(candidate) !== builderFamily && modelFamily(candidate) !== architectFamily && modelUsable(candidate)) ??
+				AUDITOR_POOL.find((candidate) => modelFamily(candidate) !== builderFamily && modelUsable(candidate)) ??
+				stack.architect.model;
+		}
+		return { id: `${builder.id}-audit`, name: AUDITOR_NAMES[index] ?? `auditor-${index + 1}`, model, thinking: s.auditorThinking as Thinking, color: "#9CA3AF", architect: false, primary: false, appendSystemPrompts: [] };
+	};
+	const auditorsFor = (stack: ModelStack): ModelSlot[] => (readStackSettings().auditor ? stack.builders.map(auditorFor) : []);
+	/** Codenames of every model-stack-*.yaml in ~/.pi/titan-harness, plus "legacy". */
+	const listShapes = (): string[] => {
+		let names: string[] = [];
+		try {
+			names = fs
+				.readdirSync(STACK_DIR)
+				.filter((file) => /^model-stack-.+\.ya?ml$/.test(file))
+				.map((file) => file.replace(/^model-stack-/, "").replace(/\.ya?ml$/, ""))
+				.sort();
+		} catch {
+			/* no stack dir */
+		}
+		return ["legacy", ...names.filter((name) => name !== "legacy")];
+	};
+	const stackProblems = (stack: ModelStack): string[] =>
+		orderedSlots(stack).map((slot) => (modelUsable(slot.model) ? "" : `${slot.name}: ${slot.model} is not usable (not in catalog or not authed)`)).filter(Boolean);
+	/** Switch the live shape (session-only) and persist the codename. */
+	const loadShape = async (codename: string, ctx: any, switchHost = true): Promise<string[]> => {
+		noteHost(ctx);
+		if (codename === "legacy") {
+			configuredStack = undefined;
+			writeStackSettings({ shape: "legacy" });
+			return [];
+		}
+		let stack: ModelStack;
+		try {
+			stack = cloneStack(loadModelStack(path.join(STACK_DIR, `model-stack-${codename}.yaml`)));
+		} catch (error) {
+			return [error instanceof Error ? error.message : String(error)];
+		}
+		const problems = stackProblems(stack);
+		if (problems.length) return problems;
+		configuredStack = stack;
+		writeStackSettings({ shape: codename });
+		if (!switchHost) return [];
+		const primary = stack.primaryBuilder;
+		try {
+			const slash = primary.model.indexOf("/");
+			const model = ctx.modelRegistry.find(primary.model.slice(0, slash), primary.model.slice(slash + 1));
+			if (model && !(ctx.model && `${ctx.model.provider}/${ctx.model.id}` === primary.model)) {
+				if (await pi.setModel(model)) {
+					hostModel = primary.model;
+					pi.setThinkingLevel(primary.thinking);
+				}
+			}
+		} catch {
+			/* host model switch is best effort */
+		}
+		return [];
 	};
 
 	let childVisibleModelsPromise: Promise<Set<string>> | undefined;
@@ -664,6 +800,14 @@ export default function (pi: ExtensionAPI) {
 						// whether its provider is authed. EXA row: is web search live in this session.
 						rows.push(truncateToWidth(subagentCellStr(theme, subagentSnapshot(ctx)), width));
 						rows.push(truncateToWidth(exaCellStr(theme, exaSnapshot()), width));
+						// SHAPE row + one AUDITOR row per builder (when auditors are on).
+						const s = readStackSettings();
+						const stack = modelStack();
+						rows.push(truncateToWidth(shapeCellStr(theme, { shape: shapeName(), builders: stack.builders.length, subagentCap: s.subagentFanOut, auditor: s.auditor, anonymize: s.anonymize }), width));
+						for (const auditor of auditorsFor(stack)) {
+							const forName = stack.builders.find((slot) => `${slot.id}-audit` === auditor.id)?.name ?? "?";
+							rows.push(truncateToWidth(auditorCellStr(theme, { name: auditor.name, forName, model: auditor.model, thinking: auditor.thinking, authed: modelUsable(auditor.model), state: auditorState.get(auditor.id) ?? "idle", color: auditor.color }), width));
+						}
 						return rows;
 					},
 				}),
@@ -696,6 +840,27 @@ export default function (pi: ExtensionAPI) {
 
 	// /stack toggles the bar through this hook (and persists the choice itself).
 	(globalThis as any)[STACK_MODEL_BAR_HOOK] = (visible: boolean) => setFooterVisible(visible);
+	(globalThis as any)[STACK_SHAPE_HOOK] = () => renderFooterWidget();
+
+	// Boot: without --titan-config, load the persisted shape (settings.shape) as the session stack.
+	pi.on("session_start", async (_ev: any, ctx: any) => {
+		try {
+			noteHost(ctx);
+		} catch {
+			return; // --titan-config validation already reported
+		}
+		if (configuredStack) return;
+		const wanted = readStackSettings().shape;
+		if (wanted === "legacy") return;
+		// Boot never switches the host model (an explicit --model or the saved default wins);
+		// cycling with /titan-shape or Ctrl+Tab does.
+		const problems = await loadShape(wanted, ctx, false);
+		if (problems.length) {
+			try {
+				ctx.ui.notify(`titan: shape "${wanted}" is not runnable — ${problems.join("; ")}. Using the legacy two-slot stack. /titan-shape to pick another.`, "warning");
+			} catch {}
+		}
+	});
 
 	pi.on("session_start", async (_ev: any, ctx: any) => {
 		noteHost(ctx);
@@ -968,7 +1133,11 @@ export default function (pi: ExtensionAPI) {
 		["/titan-auto-validate [--max-validations N] <prompt>", "gate written first, build until green"],
 		["/titan-system-prompt", "every slot's effective system prompt"],
 		["/titan-reset", "full reset, host and slots"],
-		["/titan [on|off]", "this list, toggle model bar (alias /fh)"],
+		["/titan-shape [next|name]", "cycle stack YAML (Ctrl+Tab · Alt+H)"],
+		["/titan-n [1-4]", "builder fan-out (Ctrl+Shift+N · Alt+N)"],
+		["/titan-s [0-16]", "subagent cap per child (Ctrl+Shift+S · Alt+S)"],
+		["/titan-audit [on|off]", "auditors per builder (Ctrl+Shift+A · Alt+A)"],
+		["/titan [on|off|toggle]", "this list; model bar on/off (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
 
@@ -979,12 +1148,15 @@ export default function (pi: ExtensionAPI) {
 			footerCtx ??= ctx; // first use before any tui session_start (e.g. after a reload)
 			const arg = args.trim().toLowerCase();
 			if (arg && !["on", "off", "show", "hide", "toggle"].includes(arg)) {
-				ctx.ui.notify(`titan-harness: /titan takes on|off (or nothing to toggle the model bar). Got "${arg}".`, "error");
+				ctx.ui.notify(`titan-harness: /titan takes on|off|toggle (or nothing to print the index). Got "${arg}".`, "error");
 				return;
 			}
-			const next = arg === "on" || arg === "show" ? true : arg === "off" || arg === "hide" ? false : !footerVisible;
-			setFooterVisible(next);
-			writeStackSettings({ modelBar: next });
+			// Bare /titan only prints the index; the bar changes only on an explicit on|off|toggle.
+			if (arg) {
+				const next = arg === "on" || arg === "show" ? true : arg === "off" || arg === "hide" ? false : !footerVisible;
+				setFooterVisible(next);
+				writeStackSettings({ modelBar: next });
+			}
 			// Just the name and the tabbed index — the model bar appearing/disappearing is
 			// its own feedback, and short descriptions keep every line unwrapped.
 			ctx.ui.notify(
@@ -1122,14 +1294,30 @@ export default function (pi: ExtensionAPI) {
 				panel({ kind: "error", command: "titan-only", ok: false, agent: toStat(run), artifactsDir }, error instanceof Error ? error.message : String(error));
 				return;
 			}
-			await runChild({ run, prompt, systemPrompt: slot.systemPrompt, appendSystemPrompts: slot.appendSystemPrompts, tools: FULL_TOOLS, thinking: slot.thinking, ...slotInitialSpawn(slot, ctx, path.join(artifactsDir, slot.id)), cwd: ctx.cwd, timeoutMs: childTimeoutMs(), signal: stopper.signal });
+			const spawn = slotInitialSpawn(slot, ctx, path.join(artifactsDir, slot.id));
+			await runChild({ run, prompt, systemPrompt: slot.systemPrompt, appendSystemPrompts: slot.appendSystemPrompts, tools: FULL_TOOLS, thinking: slot.thinking, ...spawn, cwd: ctx.cwd, timeoutMs: childTimeoutMs(), signal: stopper.signal });
 			if (stopper.stopped()) {
 				stoppedPanel("titan-only", [run], artifactsDir, startedAt, `${slot.name} was stopped mid-answer.`);
 				return;
 			}
-			await save(artifactsDir, `${slot.id}.md`, runOk(run) ? run.text : `FAILED: ${runError(run)}`);
+			// Builders are audited before their report is shown (write-capable run); the
+			// architect's own answers are not.
+			let report = runOk(run) ? run.text : `FAILED: ${runError(run)}`;
+			let blocked = false;
+			if (!slot.architect && runOk(run)) {
+				ctx.ui.setStatus(CUSTOM_TYPE, `titan-only: auditing ${slot.name}…`);
+				const outcome = await auditGate(ctx, { builder: slot, run, task: { id: "only", description: prompt, outputs: [] }, report, artifactsDir, prompt, tools: FULL_TOOLS, spawn, signal: stopper.signal });
+				report = outcome.report;
+				blocked = outcome.failClosed;
+				if (stopper.stopped()) {
+					stoppedPanel("titan-only", [run], artifactsDir, startedAt, `${slot.name} was stopped during audit.`);
+					return;
+				}
+			}
+			await save(artifactsDir, `${slot.id}.md`, report);
 			const t = totals([run], startedAt);
-			if (runOk(run)) panel({ kind: "solo", command: "titan-only", ok: true, agent: toStat(run), artifactsDir, ...t }, run.text);
+			if (runOk(run) && !blocked) panel({ kind: "solo", command: "titan-only", ok: true, agent: toStat(run), artifactsDir, ...t }, report);
+			else if (runOk(run)) panel({ kind: "error", command: "titan-only", ok: false, agent: toStat(run), artifactsDir, ...t }, `${slot.name}'s work was blocked by the auditor (fail-closed).\n\n${report}`);
 			else panel({ kind: "error", command: "titan-only", ok: false, agent: toStat(run), artifactsDir, ...t }, `${slot.name} produced no usable answer: ${runError(run)}`);
 			await save(artifactsDir, "summary.json", JSON.stringify({ command: "titan-only", source, ok: runOk(run), targetSlot: slot.id, writerLeasePath: writerLease?.path, agents: [toStat(run)], sessions: { [slot.id]: run.sessionRef ?? cachedSlotId(slot) }, ...t }, null, 2));
 		} finally {
@@ -1194,8 +1382,134 @@ export default function (pi: ExtensionAPI) {
 		return { action: "handled" as const };
 	});
 
+	// ── 2.13b The audit gate wiring (modules/audit.ts) ──
+	const auditGate = (ctx: any, request: AuditRequest) =>
+		runAuditGate(
+			{
+				auditorFor,
+				childTimeoutMs,
+				noteAuditor: (auditorId, state) => {
+					auditorState.set(auditorId, state);
+					renderFooterWidget();
+				},
+				save,
+				mkdir: async (dir) => {
+					await fs.promises.mkdir(dir, { recursive: true });
+				},
+			},
+			ctx.cwd,
+			request,
+		);
+
+	// ── 2.13c Shape controls: /titan-shape, /titan-n, /titan-s, /titan-audit + hotkeys ──
+	const describeShape = (): string => {
+		const s = readStackSettings();
+		const stack = modelStack();
+		return `shape ${shapeName()} · builders ${stack.builders.length} (${stack.builders.map((slot) => slot.name).join(", ")}) · subagents ${s.subagentFanOut > 0 ? `≤${s.subagentFanOut}` : "off"} · auditor ${s.auditor ? "on" : "off"} · ${s.anonymize ? "callsigns only" : "models visible"}`;
+	};
+	const announce = (ctx: any, text: string, level: "info" | "warning" | "error" = "info") => {
+		try {
+			ctx.ui.notify(text, level);
+		} catch {}
+		renderFooterWidget();
+	};
+	const cycleShape = async (ctx: any, wanted?: string) => {
+		const shapes = listShapes();
+		let target = wanted;
+		if (!target || target === "next") {
+			const current = shapeName();
+			let index = shapes.indexOf(current);
+			// Skip shapes that are not runnable on this machine (unauthed slots).
+			for (let step = 0; step < shapes.length; step++) {
+				index = (index + 1) % shapes.length;
+				const candidate = shapes[index];
+				const problems = await loadShape(candidate, ctx);
+				if (!problems.length) {
+					announce(ctx, `titan: ${describeShape()}`);
+					return;
+				}
+			}
+			announce(ctx, "titan: no other runnable shape in ~/.pi/titan-harness (every candidate has an unauthed slot).", "warning");
+			return;
+		}
+		if (!shapes.includes(target)) {
+			announce(ctx, `titan: unknown shape "${target}". Available: ${shapes.join(", ")}`, "warning");
+			return;
+		}
+		const problems = await loadShape(target, ctx);
+		announce(ctx, problems.length ? `titan: shape "${target}" not runnable — ${problems.join("; ")}` : `titan: ${describeShape()}`, problems.length ? "warning" : "info");
+	};
+	const setBuilders = (ctx: any, n: number) => {
+		writeStackSettings({ builderFanOut: n });
+		announce(ctx, `titan: builders → ${n} · applies to the next command · ${describeShape()}`);
+	};
+	const setSubagents = (ctx: any, cap: number) => {
+		writeStackSettings({ subagentFanOut: cap, childSubagents: cap > 0 ? readStackSettings().childSubagents === "off" ? "all" : readStackSettings().childSubagents : readStackSettings().childSubagents });
+		announce(ctx, `titan: subagent fan-out → ${cap > 0 ? `≤${cap} per child` : "off"} · applies to children spawned from now on`);
+	};
+	const setAuditor = (ctx: any, on: boolean) => {
+		writeStackSettings({ auditor: on });
+		announce(ctx, `titan: auditor ${on ? "ON — every builder's write task is reviewed before it reaches the architect" : "OFF — reports go straight to the architect"}`);
+	};
+	pi.registerCommand("titan-shape", {
+		description: "Cycle or pick the harness shape (model-stack-*.yaml in ~/.pi/titan-harness): /titan-shape [next|list|<codename>]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "list") return announce(ctx, `titan shapes: ${listShapes().map((name) => (name === shapeName() ? `● ${name}` : `○ ${name}`)).join("  ")}`);
+			await cycleShape(ctx, arg || "next");
+		},
+	});
+	pi.registerCommand("titan-n", {
+		description: "Builder fan-out (tier 2): /titan-n [1-4|next]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			const current = readStackSettings().builderFanOut;
+			const n = !arg || arg === "next" ? nextInCycle(BUILDER_FANOUT_CYCLE, current) : Number.parseInt(arg, 10);
+			if (!BUILDER_FANOUT_CYCLE.includes(n)) return announce(ctx, "Usage: /titan-n [1-4|next]", "warning");
+			setBuilders(ctx, n);
+		},
+	});
+	pi.registerCommand("titan-s", {
+		description: "Subagent fan-out cap per child (tier 3): /titan-s [0-16|next]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			const current = readStackSettings().subagentFanOut;
+			const cap = !arg || arg === "next" ? nextInCycle(SUBAGENT_FANOUT_CYCLE, SUBAGENT_FANOUT_CYCLE.includes(current) ? current : 0) : Number.parseInt(arg, 10);
+			if (!Number.isFinite(cap) || cap < 0 || cap > 16) return announce(ctx, "Usage: /titan-s [0-16|next]", "warning");
+			setSubagents(ctx, cap);
+		},
+	});
+	pi.registerCommand("titan-audit", {
+		description: "Auditors per builder: /titan-audit [on|off|toggle]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			const current = readStackSettings().auditor;
+			const on = arg === "on" ? true : arg === "off" ? false : !current;
+			setAuditor(ctx, on);
+		},
+	});
+	// Hotkeys. Ctrl+Tab / Ctrl+Shift+<key> need a terminal that speaks the Kitty keyboard
+	// protocol (Kitty, Ghostty, WezTerm, foot, recent VTE); the Alt+<key> twins work everywhere.
+	const bindKey = (keys: string[], description: string, handler: (ctx: any) => Promise<void> | void) => {
+		for (const key of keys) {
+			try {
+				(pi as any).registerShortcut?.(key, { description, handler });
+			} catch {
+				/* older pi without shortcuts */
+			}
+		}
+	};
+	bindKey(["ctrl+tab", "alt+h"], "titan: cycle harness shape", async (ctx) => cycleShape(ctx, "next"));
+	bindKey(["ctrl+shift+n", "alt+n"], "titan: cycle builder fan-out (1-4)", async (ctx) => setBuilders(ctx, nextInCycle(BUILDER_FANOUT_CYCLE, readStackSettings().builderFanOut)));
+	bindKey(["ctrl+shift+s", "alt+s"], "titan: cycle subagent fan-out cap", async (ctx) => {
+		const current = readStackSettings().subagentFanOut;
+		setSubagents(ctx, nextInCycle(SUBAGENT_FANOUT_CYCLE, SUBAGENT_FANOUT_CYCLE.includes(current) ? current : 0));
+	});
+	bindKey(["ctrl+shift+a", "alt+a"], "titan: toggle auditors", async (ctx) => setAuditor(ctx, !readStackSettings().auditor));
+
 	// ── 2.14 The orchestration commands — modules/cmd-*.ts through the HarnessDeps seam ──
 	const deps: HarnessDeps = {
+		auditBuilderRun: auditGate,
 		panel,
 		stoppedPanel,
 		absorbRuns: absorbTotals,
