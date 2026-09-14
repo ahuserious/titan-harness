@@ -106,4 +106,4 @@ Grok 4.6 and Claude Opus 4.6 reviewing the proposal). What shipped:
   Ctrl+Shift+A on Kitty-protocol terminals; Alt+H, Alt+N, Alt+S, Alt+A everywhere.
   Changes take effect at the next command or next child spawn; nothing in flight is preempted.
 - **Model bar rows.** `⬡ SHAPE | astra-gemini | builders 2 | subagents ≤4 | auditor on | callsigns only`
-  and `⚖ AUDITOR | ward ⇐ forge | claude-opus-4-6 (hi) | idle` per builder.
+  and `⚖ AUDITOR | ward · audits forge | claude-opus-4-6 (hi) | idle` per builder.

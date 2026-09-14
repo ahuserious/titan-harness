@@ -107,11 +107,11 @@ export interface AuditorSnapshot {
 }
 type HexColorLike = `#${string}`;
 
-/** The AUDITOR row: `⚖ AUDITOR | ward ⇐ forge | claude-opus-4-6 (hi) | idle`. Amber when the provider is not authed. */
+/** The AUDITOR row: `⚖ AUDITOR | ward · audits forge | claude-opus-4-6 (hi) | idle`. Amber when the provider is not authed. */
 export const auditorCellStr = (theme: any, a: AuditorSnapshot): string => {
 	const sep = theme.fg("dim", " | ");
 	const paint = (text: string) => (a.authed === false ? theme.fg("warning", text) : fgHex(a.color, text));
-	return paint(theme.bold(`${ROLE_GLYPH.AUDITOR} AUDITOR`)) + sep + paint(`${a.name} ⇐ ${a.forName}`) + sep + paint(`${shortModel(a.model)}${thinkingTag(a.thinking)}`) + sep + paint(a.authed === false ? `not authed · /login ${a.model.split("/")[0]}` : a.state);
+	return paint(theme.bold(`${ROLE_GLYPH.AUDITOR} AUDITOR`)) + sep + paint(`${a.name} · audits ${a.forName}`) + sep + paint(`${shortModel(a.model)}${thinkingTag(a.thinking)}`) + sep + paint(a.authed === false ? `not authed · /login ${a.model.split("/")[0]}` : a.state);
 };
 
 export interface ShapeSnapshot {

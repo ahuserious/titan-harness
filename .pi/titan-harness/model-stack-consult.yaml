@@ -1,15 +1,18 @@
 # Consult stack: three authed providers for a design review (no Codex until re-login).
-- name: gemini
+# Slots carry callsigns (rune, forge, anvil), never model names: the model bar shows
+# the real model next to the callsign, and a slot name that looks like a model misleads
+# when the primary builder follows the host model.
+- name: rune
   model: antigravity/gemini-3.8-flash
   thinking: high
   architect: true
   color: "#34D399"
-- name: grok
+- name: forge
   model: xai/grok-4.6
   thinking: high
   primary: true
   color: "#F59E0B"
-- name: opus
+- name: anvil
   model: antigravity/claude-opus-4-6
   thinking: high
   color: "#A78BFA"

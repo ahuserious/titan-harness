@@ -1,13 +1,13 @@
 # titan-harness example: Gemini (Antigravity OAuth) architect + Codex GPT-6 Astra host.
 # Both providers are extension/OAuth backed; children now load extensions, so
 # antigravity/* resolves inside them. Context window: Pi /ctx (272k · 828k · 1M).
-- name: gemini
+- name: rune
   model: antigravity/gemini-3.8-flash
   thinking: high
   architect: true
   color: "#34D399"
 
-- name: astra
+- name: forge
   model: openai-codex/gpt-6-astra
   thinking: xhigh
   primary: true
