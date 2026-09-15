@@ -51,6 +51,13 @@ import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { registerAutoValidateCommand, registerCollaborateCommand } from "./modules/cmd-build.ts";
 import { registerFusionCommand } from "./modules/cmd-fusion.ts";
 import { registerReadonlyCommands } from "./modules/cmd-readonly.ts";
+import { registerWorkflowCommands } from "./modules/cmd-workflow.ts";
+import { createWorkflowRuntime } from "./modules/workflow-runtime.ts";
+import { loadWorkflow } from "./modules/workflow/loader.ts";
+import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult } from "./modules/workflow/executor.ts";
+import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
+import type { ValidateContext } from "./modules/workflow/validator.ts";
+import { normalizeThinking } from "./modules/thinking.ts";
 import { piInvocation, runChild } from "./modules/child-runner.ts";
 import {
 	cloneStack,
@@ -75,6 +82,7 @@ import {
 	BOOT_TYPE,
 	CUSTOM_TYPE,
 	FULL_TOOLS,
+	READONLY_TOOLS,
 	fmtSecs,
 	modelTag,
 	newRun,
@@ -1384,6 +1392,7 @@ export default function (pi: ExtensionAPI) {
 		["/titan-audit [on|off]", "auditors per builder (Ctrl+Shift+A · Alt+A)"],
 		["/titan-level [0-3|next|status]", "harness level 0-3 (Shift+Tab after rebind · Alt+L)"],
 		["/titan-doctor [--json]", "models, credentials, tools, pins, decisions"],
+		["/workflow run|validate|list|status|stop|graph <name>", "YAML DAG workflows (.titan/workflows/<name>/<name>.yaml)"],
 		["/titan [on|off|toggle]", "this list; model bar on/off (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
@@ -1916,4 +1925,119 @@ export default function (pi: ExtensionAPI) {
 	registerFusionCommand(pi, deps); // /titan-fusion
 	registerCollaborateCommand(pi, deps); // /titan-collaborate
 	registerAutoValidateCommand(pi, deps); // /titan-auto-validate
+
+	// ── 2.14 /workflow — the YAML DAG engine (plan §3, P3). The engine is pure; this is its runtime. ──
+	/** A workflow role → the live shape's seat for it (model, thinking, callsign, prompts, tool contract). */
+	const resolveWorkflowRole = (role: SlotRole, _node: NodeDoc): ResolvedRole => {
+		const stack = modelStack();
+		const s = readStackSettings();
+		const lanes = stack.lanes;
+		const primary = stack.primaryBuilder;
+		const from = (slot: ModelSlot, tools: string): ResolvedRole => ({
+			model: slot.model,
+			thinking: slot.thinking,
+			callsign: slot.name,
+			systemPrompt: slot.systemPrompt,
+			appendSystemPrompts: [...(slot.appendSystemPrompts ?? [])],
+			tools,
+		});
+		switch (role) {
+			case "architect":
+				return from(stack.architect, READONLY_TOOLS);
+			case "builder":
+				return from(primary, FULL_TOOLS);
+			case "worker":
+				return from(lanes.workers[0] ?? primary, FULL_TOOLS);
+			case "verifier":
+				return from(lanes.verifiers[0] ?? lanes.workers[0] ?? primary, READONLY_TOOLS);
+			case "auditor":
+				return from(lanes.auditors[0] ?? auditorFor(primary), READONLY_TOOLS);
+			case "watchdog":
+				return { model: s.watchdog.model, thinking: s.watchdog.thinking, callsign: lanes.watchdogs[0]?.name ?? "hound", appendSystemPrompts: [], tools: READONLY_TOOLS };
+			case "fusion":
+				return from(lanes.fusion[0] ?? primary, READONLY_TOOLS);
+			case "judge":
+				return from(lanes.judge ?? stack.architect, READONLY_TOOLS);
+			case "fuser":
+				return from(lanes.fuser ?? primary, FULL_TOOLS);
+			default:
+				return from(primary, FULL_TOOLS);
+		}
+	};
+	/** The stack slot a request's callsign or model names — for the model bar's per-slot tps/cost. */
+	const workflowSlotFor = (req: { callsign?: string; model?: string }): ModelSlot | undefined => {
+		try {
+			const stack = modelStack();
+			return stack.slots.find((slot) => slot.name === req.callsign) ?? stack.slots.find((slot) => slot.model === req.model);
+		} catch {
+			return undefined;
+		}
+	};
+	const workflowUi = (ctx: any) =>
+		ctx?.hasUI
+			? {
+					confirm: (title: string, body: string) => ctx.ui.confirm(title, body),
+					input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder),
+					notify: (text: string, level?: "info" | "warning" | "error") => ctx.ui.notify(text, level ?? "info"),
+				}
+			: undefined;
+	const workflowValidateContext = (ctx: any): Partial<ValidateContext> => ({
+		modelStatus: (model: string) => {
+			try {
+				const slash = model.indexOf("/");
+				const found = slash > 0 ? (ctx?.modelRegistry ?? hostCtx?.modelRegistry)?.find?.(model.slice(0, slash), model.slice(slash + 1)) : undefined;
+				if (!found) return "unknown";
+				return (ctx?.modelRegistry ?? hostCtx?.modelRegistry).hasConfiguredAuth(found) ? "ok" : "unauthed";
+			} catch {
+				return "unknown";
+			}
+		},
+		thinkingCeiling: (model: string, requested: string) => normalizeThinking(model, requested as Thinking).effective,
+	});
+	const makeWorkflowRuntime = (ctx: any, loaded: ReturnType<typeof loadWorkflow>, runId: string, runDir: string, parentRunId?: string) =>
+		createWorkflowRuntime({
+			cwd: ctx.cwd,
+			runId,
+			runDir,
+			loaded,
+			store: runStore(),
+			settings: readStackSettings(),
+			runChild,
+			resolveRole: resolveWorkflowRole,
+			ui: workflowUi(ctx),
+			slotFor: workflowSlotFor,
+			onRun: (run) => {
+				// The workflow run holds the canonical rows; the session run aggregates every child this session spent.
+				if (run.slot) bumpSlotPerf(run.slot.id, run.tokensOut, run.tpsSeconds, run.costUsd);
+				recordRun(run);
+				renderFooterWidget();
+			},
+			runWorkflow: async (name: string, inputs: Record<string, unknown>): Promise<WorkflowRunResult> => {
+				const child = loadWorkflow(name, ctx.cwd, workflowValidateContext(ctx));
+				const opened = runStore().open({
+					projectSlug: RunStore.projectSlug(ctx.cwd),
+					cwd: ctx.cwd,
+					command: "workflow",
+					workflow: { name: child.name, sha256: child.sha256 },
+					parentRunId: parentRunId ?? runId,
+					status: "running",
+				});
+				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs });
+				try {
+					runStore().updateRun(opened.dir, { status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "aborted" : "failed", endedAt: new Date().toISOString() });
+				} catch {}
+				return result;
+			},
+		});
+	registerWorkflowCommands(pi, {
+		cwd: (ctx: any) => ctx.cwd,
+		runtime: (ctx: any, loaded, runId, runDir) => {
+			noteHost(ctx);
+			return makeWorkflowRuntime(ctx, loaded, runId, runDir);
+		},
+		store: () => runStore(),
+		notify: (ctx: any, text: string, level?: string) => announce(ctx, text, (level as "info" | "warning" | "error") ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow", ok: !/FAILED|CANCELLED/.test(title), title: title.replace(/^◆ WORKFLOW\s*/, "") }, markdown),
+		validateContext: (_cwd: string, ctx: any) => workflowValidateContext(ctx) as ValidateContext,
+	});
 }

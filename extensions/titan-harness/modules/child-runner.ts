@@ -61,6 +61,7 @@ export function runChild(opts: {
 	timeoutMs: number;
 	signal?: AbortSignal; // escape key — kill this child and settle it as "aborted"
 	priority?: boolean; // reviewers/inspectors bypass the concurrency cap so they never wait behind the children they review
+	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
 }): Promise<AgentRun> {
 	const run = opts.run;
 	run.thinking = opts.thinking;
@@ -252,7 +253,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 			detached: process.platform !== "win32", // own process group so cancellation reaches tool/bash descendants
 			stdio: ["ignore", "pipe", "pipe"],
 			// Children still make their real model API calls — this only skips startup chores.
-			env: { ...process.env, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" },
+			env: { ...process.env, ...(opts.env ?? {}), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" },
 		});
 
 		// Line-buffer stdout: events arrive one JSON object per line, possibly split across chunks.

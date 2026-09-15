@@ -1,6 +1,6 @@
 # Skill pack
 
-Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 17 skills: ten server skills, three combo workflows, two harness skills, one bridge, one reference.
+Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 18 skills: ten server skills, three combo workflows, three harness skills, one bridge, one reference.
 
 | Skill | Kind | Pairs with |
 |---|---|---|
@@ -19,6 +19,7 @@ Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `pac
 | `ship-and-verify` | combo | Combo workflow: gate a build with TestMu cloud runs, Kane CLI browser flows, and Momentic E2E before merge, wired into /titan-auto-validate |
 | `titan-orchestration` | harness | the 3-tier hierarchy, commands, hotkeys |
 | `titan-auditor` | harness | the audit contract and verdict format |
+| `titan-workflow-authoring` | harness | Author `.titan/workflows/<name>/<name>.yaml` DAGs for `/workflow`: the node types, `$id.output` hand-offs, `when` routing, roles, hooks, evidence; `/workflow validate` before `/workflow run` |
 | `mcp-cli-bridges` | bridge | Call any MCP server from bash with the Python mcp2cli (knowsuchagency) or mcporter (TypeScript); named links per server; not the Rust mcp2cli the Grok plugin uses |
 | `divmagic-raw` | reference | DivMagic is a Chrome extension (RAW export of styles/components), not an MCP server; its export feeds Brandfetch/tokens and is rebuilt on shadcn |
 

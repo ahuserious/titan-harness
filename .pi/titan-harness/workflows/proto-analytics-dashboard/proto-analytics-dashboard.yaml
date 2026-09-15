@@ -1,0 +1,73 @@
+apiVersion: titan.harness/v1
+name: proto-analytics-dashboard
+description: Prototype a sales-analytics page; spec + TDD; Cursor cloud + Kane verification; separate auditor
+version: 1
+returns: report
+phases: [{title: plan}, {title: build}, {title: verify}, {title: audit}, {title: report}]
+inputs:
+  spec:   { required: true }                 # path to spec.md
+  design: { default: design/dashboard.png }  # design-matching reference
+titan:
+  level: 3
+  shape: level-3
+  tier: prototype-analytics
+  modes: [spec, design, test]
+  elevation: default                         # 1 bump thinking · 2 max model · 3 re-author at level+1
+  watchdog: { enabled: true, stalemate_repeats: 3, on_compaction: halt-inspect }
+  budget: { usd: 25, max_concurrent_children: 8, context_budget: 120000 }
+nodes:
+  - id: spec-map
+    role: architect
+    phase: plan
+    context: fresh
+    prompt: "Read $spec and produce a feature/acceptance matrix with test ids per device (desktop, mobile)."
+    allowed_tools: [read, grep, find, ls]
+    output_format:
+      type: object
+      properties: { features: { type: array }, tests: { type: array } }
+      required: [features, tests]
+  - id: test-suite
+    role: builder
+    callsign: pool
+    phase: build
+    depends_on: [spec-map]
+    context: fresh
+    prompt: "Author the failing test suite for $spec-map.output.tests, one suite per end device. Do not implement features."
+    evidence: { produces: [test-log] }
+  - id: implement
+    role: builder
+    phase: build
+    depends_on: [test-suite]
+    review: required
+    loop:
+      prompt: "Implement the next failing feature from $spec-map.output.features and run the suite. When green: <promise>COMPLETE</promise>"
+      until: COMPLETE
+      until_bash: "bun test"
+      max_iterations: 3                      # CI/test red loops here at most 3 times
+      fresh_context: true
+    on_fail: { action: elevate, max: 3 }     # 1 thinking bump · 2 max model · 3 freeze + /create-workflow --elevate
+  - id: cursor-verify
+    phase: verify
+    depends_on: [implement]
+    verify: { runner: cursor-cloud, repo: ".", ref: "$implement.output.branch", objective: "Run the suite and exercise the dashboard; capture screenshots" }
+    evidence: { require: [test-log, screenshot] }
+  - id: kane-flows
+    phase: verify
+    depends_on: [implement]
+    verify: { runner: kane, objective: "As a sales manager, filter by region and export CSV", devices: [desktop, mobile], headless: true }
+    evidence: { require: [screenshot, console-log, evidence-pack] }
+  - id: audit
+    role: auditor                            # ephemeral, cross-family, read-only, fresh session per round
+    phase: audit
+    depends_on: [cursor-verify, kane-flows]
+    trigger_rule: all_done
+    context: fresh
+    prompt: "Audit $ARTIFACTS_DIR/evidence against $spec, the design $design, performance budgets and org rules. Verdict YAML."
+    output_format: { $ref: "titan://schemas/audit-verdict" }
+    on_fail: { action: reauthor }            # every failed audit: findings harvested to the architect → repair workflow via /create-workflow
+  - id: report
+    role: architect
+    phase: report
+    depends_on: [audit]
+    when: "$audit.output.status == 'PASS'"
+    prompt: "Write the acceptance report from $ARTIFACTS_DIR/evidence, citing the sha256 of every artifact."

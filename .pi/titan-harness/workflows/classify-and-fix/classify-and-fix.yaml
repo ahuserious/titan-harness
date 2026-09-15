@@ -1,0 +1,75 @@
+# classify-and-fix — the Archon canonical example, ported to titan-harness on Pi.
+#
+# Differences from the Archon original: apiVersion + provider added, `model: haiku`
+# became a fast, cheap Pi model (cerebras/qwen-3.8-27b), and the four `command:` nodes
+# are inline `prompt:` nodes so the workflow validates without command files. State
+# moves between nodes only through $ARTIFACTS_DIR files (every AI node is `context:
+# fresh`). Run with `/workflow run classify-and-fix --args <issue number>`.
+apiVersion: titan.harness/v1
+name: classify-and-fix
+description: Classify a GitHub issue, then route to the appropriate handler
+version: 1
+provider: pi
+returns: create-pr
+
+nodes:
+  - id: fetch-issue
+    bash: "gh issue view $ARGUMENTS --json title,body,labels"
+    timeout: 15000
+
+  - id: classify
+    prompt: "Classify this issue: $fetch-issue.output"
+    depends_on: [fetch-issue]
+    model: cerebras/qwen-3.8-27b
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        issue_type:
+          type: string
+          enum: [bug, feature]
+      required: [issue_type]
+
+  - id: investigate
+    prompt: |
+      You are investigating a bug report. The issue, as JSON from `gh issue view`:
+      $fetch-issue.output
+
+      Reproduce the problem from the code in this repository: find the code path, the
+      failing condition and the smallest change that fixes it. Do not implement the fix.
+      Write your findings to $ARTIFACTS_DIR/investigation.md with the sections Summary,
+      Root cause, Affected files, Proposed fix and Verification.
+    depends_on: [classify]
+    when: "$classify.output.issue_type == 'bug'"
+    context: fresh
+
+  - id: plan
+    prompt: |
+      You are planning a feature request. The issue, as JSON from `gh issue view`:
+      $fetch-issue.output
+
+      Study the repository and write an implementation plan to $ARTIFACTS_DIR/plan.md
+      with the sections Summary, Design, Files to change, Tests and Risks. Do not
+      implement anything.
+    depends_on: [classify]
+    when: "$classify.output.issue_type == 'feature'"
+    context: fresh
+
+  - id: implement
+    prompt: |
+      Read $ARTIFACTS_DIR/investigation.md or $ARTIFACTS_DIR/plan.md — exactly one of
+      them exists, and you have no memory of how it was produced. Implement the change
+      it describes on a new branch, run the project's tests, and write
+      $ARTIFACTS_DIR/implementation.md with the branch name, the files changed and the
+      test results.
+    depends_on: [investigate, plan]
+    trigger_rule: one_success
+    context: fresh
+
+  - id: create-pr
+    prompt: |
+      Read $ARTIFACTS_DIR/implementation.md and open a pull request for that branch with
+      `gh pr create`: a title under 70 characters, a body that summarizes the change and
+      the test results, and a reference to issue #$ARGUMENTS. Reply with the PR URL only.
+    depends_on: [implement]
+    context: fresh
