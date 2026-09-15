@@ -31,7 +31,8 @@ Source of truth: `extensions/titan-harness/modules/workflow/schema.ts` (types) a
 | `elevation` | `default` or `{ fail_1?, fail_2?, fail_3? }` | the ladder after `loop.max_iterations` is exhausted |
 | `watchdog` | `{ enabled?, model?, thinking?, cadence_tools?, stalemate_repeats?, on_compaction?: halt-inspect \| summary-only \| off, inspector_timeout_ms? }` | P5 |
 | `budget` | `{ usd?, tokens?, max_concurrent_children? (≤ 16), context_budget? }` | `max_concurrent_children` caps parallel nodes (default: `/stack concurrency`) |
-| `personas` | string[] | P7 |
+| `personas` | string[] | persona names the workflow uses (documentation; nodes name theirs with `persona:`) |
+| `parent_run` | run id | set by `/create-workflow --elevate` / `--from-findings`: the run this workflow repairs; the store records it as `parentRunId` |
 
 ## Node base fields (`NodeBase`, every node type)
 | key | type | notes |
@@ -46,7 +47,8 @@ Source of truth: `extensions/titan-harness/modules/workflow/schema.ts` (types) a
 | `phase` | title | must exist in `phases` when declared |
 | `role` | `architect · builder · worker · verifier · auditor · watchdog · fusion · judge · fuser` | resolves model/thinking/callsign/system prompt from the live shape; `architect` is read-only by construction |
 | `callsign` | `pool` or a name | unique per document |
-| `persona`, `mimeograph` | string | P7 |
+| `persona` | persona name | `personas/<name>.md` appended to the system prompt (project › user › package roots); its `model`/`thinking` sit under the node's own |
+| `mimeograph` | `"a,b"` or `{ personas: [...], models?: [provider/id], judge?, criteria? }` | the same brief × personas × models in fresh sessions (`mg-1..n`), judged; winner = output |
 | `tier` | string | per-node tier override |
 | `evidence` | `{ produces?: kind[], require?: kind[] }` | observed, hashed by the store |
 | `review` | `required · optional · none` | default `required` for `role: builder` → needs an `auditor`/`verify` descendant before `returns` |
@@ -59,7 +61,7 @@ Source of truth: `extensions/titan-harness/modules/workflow/schema.ts` (types) a
 | `model` | `provider/id` | must be in Pi's registry (unknown → error, unauthed → warning) |
 | `thinking` | level | above the ceiling → warning |
 | `context` | `fresh` (default) · `shared` · `{ resume: id }` | `shared` resumes the previous node's session (error in a parallel layer) |
-| `output_format` | JSON schema or `{ $ref: "titan://schemas/audit-verdict" }` | structured output: schema appended to the prompt + `submit_result` tool; validated, re-asked ≤ 3 times |
+| `output_format` | JSON schema or `{ $ref: "titan://schemas/audit-verdict" }` | structured output: the schema goes to the child as `TITAN_NODE_SCHEMA` + a terminating `submit_result` tool (added even to `allowed_tools: []`); its object, else the JSON in the text, is validated and re-asked ≤ 3 times |
 | `allowed_tools` | tool[] | allowlist over `read, bash, edit, write, grep, find, ls` (+ extension tools); `[]` = no tools |
 | `denied_tools` | tool[] | removed from the list |
 | `system_prompt` | string | replaces the child's system prompt |

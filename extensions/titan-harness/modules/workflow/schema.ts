@@ -35,10 +35,10 @@ export const ARCHITECT_NODE_TYPES: NodeType[] = ["prompt", "command", "approval"
 export const SLOT_ROLES = ["architect", "builder", "worker", "verifier", "auditor", "watchdog", "fusion", "judge", "fuser"] as const;
 export type SlotRole = (typeof SLOT_ROLES)[number];
 
-export const VERIFY_RUNNERS = ["kane", "testmu", "momentic", "cursor-cloud", "orca-browser", "bash"] as const;
+export const VERIFY_RUNNERS = ["kane", "testmu", "momentic", "cursor-cloud", "orca-browser", "cdp-browser", "bash", "verifier"] as const;
 export type VerifyRunner = (typeof VERIFY_RUNNERS)[number];
 /** Runners that drive simulated users — what a platform-update ship node must have upstream. */
-export const SIM_USER_RUNNERS: VerifyRunner[] = ["kane", "momentic", "orca-browser"];
+export const SIM_USER_RUNNERS: VerifyRunner[] = ["kane", "momentic", "orca-browser", "cdp-browser"];
 
 export const HOOK_EVENTS = ["PreToolUse", "PostToolUse", "Stop"] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
@@ -102,6 +102,18 @@ export interface WorkflowTitan {
 	};
 	budget?: { usd?: number; tokens?: number; max_concurrent_children?: number; context_budget?: number };
 	personas?: string[];
+	/** The run this workflow repairs or elevates (`/create-workflow --elevate|--from-findings`): the store records it as parentRunId. */
+	parent_run?: string;
+}
+
+/** `mimeograph:` — the same brief × k personas × m models, judged like best_of (plan A12). */
+export interface MimeographSpec {
+	personas: string[];
+	/** provider/id per column; default = the node's resolved seat. */
+	models?: string[];
+	/** Judge seat: a provider/id or a role (default judge). */
+	judge?: string;
+	criteria?: string;
 }
 
 export interface WorkflowDoc {
@@ -154,8 +166,10 @@ export interface NodeBase {
 	phase?: string;
 	role?: SlotRole;
 	callsign?: string;
+	/** personas/<name>.md — appended to the system prompt (never a model identity). */
 	persona?: string;
-	mimeograph?: string;
+	/** A comma-separated persona list, or the full spec; the node runs once per persona × model and a judge picks. */
+	mimeograph?: string | MimeographSpec;
 	tier?: string;
 	evidence?: { produces?: string[]; require?: string[] };
 	review?: "required" | "optional" | "none";
@@ -255,7 +269,8 @@ export const TOP_LEVEL_KEYS = new Set(["apiVersion", "name", "description", "ver
 export const INPUT_KEYS = new Set(["required", "default", "description"]);
 export const PHASE_KEYS = new Set(["title", "detail"]);
 export const TRIGGER_KEYS = new Set(["cron", "every", "event", "entity_profile"]);
-export const TITAN_KEYS = new Set(["level", "shape", "tier", "modes", "evidence", "elevation", "watchdog", "budget", "personas"]);
+export const TITAN_KEYS = new Set(["level", "shape", "tier", "modes", "evidence", "elevation", "watchdog", "budget", "personas", "parent_run"]);
+export const MIMEOGRAPH_KEYS = new Set(["personas", "models", "judge", "criteria"]);
 export const TITAN_EVIDENCE_KEYS = new Set(["require", "dir"]);
 export const TITAN_WATCHDOG_KEYS = new Set(["enabled", "model", "thinking", "cadence_tools", "stalemate_repeats", "on_compaction", "inspector_timeout_ms"]);
 export const TITAN_BUDGET_KEYS = new Set(["usd", "tokens", "max_concurrent_children", "context_budget"]);

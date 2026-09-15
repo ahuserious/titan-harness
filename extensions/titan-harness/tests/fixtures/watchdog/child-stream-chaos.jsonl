@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"child-chaos-0002","timestamp":"2026-09-15T06:10:00.000Z","cwd":"/tmp/fixture"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Working on the migration."}],"usage":{"input":60000,"output":900,"cacheRead":0,"cacheWrite":0,"totalTokens":60900,"cost":{"total":0.006}}}}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"npm test"}}
+{"type":"tool_execution_end","toolName":"bash"}
+{"type":"compaction_start","reason":"threshold"}
+{"type":"compaction_end","reason":"threshold","result":{"summary":"(child summary)","tokensBefore":110000},"aborted":false,"willRetry":false}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"All tests passed, deploying now."}],"usage":{"input":30000,"output":200,"cacheRead":0,"cacheWrite":0,"totalTokens":30200,"cost":{"total":0.003}}}}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"./deploy.sh"}}

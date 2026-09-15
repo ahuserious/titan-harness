@@ -46,6 +46,19 @@ export function piInvocation(args: string[]): { command: string; args: string[] 
  * Final answer = last assistant text part. The child writes its session into a
  * throwaway --session-dir under the run's /tmp artifacts dir.
  */
+/**
+ * The child's final tool list: the /stack policy (childToolsFor) over the command's request,
+ * plus `extraTools` appended AFTER it. `--tools` is a strict allowlist across built-in AND
+ * extension tools and `--no-tools` disables extension tools too, so a node that must reach
+ * `submit_result` (structured output v2) names it here and it survives subagentTools=off.
+ */
+export function effectiveChildTools(requested: string | "none", extraTools?: string[]): string | "none" {
+	const extra = [...new Set((extraTools ?? []).map((t) => t.trim()).filter(Boolean))];
+	const policy = childToolsFor(requested);
+	if (policy === "none") return extra.length ? extra.join(",") : "none";
+	return [...new Set([...policy.split(","), ...extra])].join(",");
+}
+
 export function runChild(opts: {
 	run: AgentRun; // mutated live
 	prompt: string;
@@ -62,6 +75,8 @@ export function runChild(opts: {
 	signal?: AbortSignal; // escape key — kill this child and settle it as "aborted"
 	priority?: boolean; // reviewers/inspectors bypass the concurrency cap so they never wait behind the children they review
 	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
+	extraTools?: string[]; // extension tools appended AFTER the /stack policy (structured output v2: `submit_result` must survive subagentTools=off and --no-tools)
+	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
 }): Promise<AgentRun> {
 	const run = opts.run;
 	run.thinking = opts.thinking;
@@ -100,7 +115,7 @@ export function runChild(opts: {
 	if (capHint) args.push("--append-system-prompt", capHint);
 	// /stack "subagent tools" OFF forces every child to run tool-less, whatever the
 	// command asked for; ON keeps the command's own read-only/full-tools contract.
-	const effectiveTools = childToolsFor(opts.tools);
+	const effectiveTools = effectiveChildTools(opts.tools, opts.extraTools);
 	if (effectiveTools === "none") args.push("--no-tools");
 	else args.push("--tools", effectiveTools);
 	args.push(opts.prompt);
@@ -157,6 +172,16 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 		// re-opening the segment at every tool_execution_end below.
 		run.tpsSegmentStart = performance.now();
 
+		// Watchdog pre-emption: a "halt" verdict is honoured at the next tool boundary, never mid-stream.
+		let haltRequested = false;
+		const checkUsage = () => {
+			if (haltRequested || !opts.onUsage) return;
+			try {
+				if (opts.onUsage(run) === "halt") haltRequested = true;
+			} catch {
+				/* the watchdog never breaks a child */
+			}
+		};
 		// One line of the child's JSON event stream → the relevant AgentRun mutation.
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
@@ -210,6 +235,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 					// Children emit an opening message_end whose usage fields are all null; this is
 					// an assignment, not a sum, so counting one would clobber a real reading with 0.
 					if (ctxTokens > 0) run.ctxTokens = ctxTokens;
+					checkUsage();
 				}
 			} else if (event.type === "tool_execution_start") {
 				run.toolCalls++;
@@ -218,9 +244,16 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				const arg = briefArg(event.args);
 				run.toolEvents.push({ name, argument: arg });
 				run.flow.push({ type: "tool", label: arg ? `${name} ${arg}` : name });
+			} else if (event.type === "compaction_start") {
+				run.compactionSeen = true; // the child is about to summarize its own context — the watchdog decides
+				checkUsage();
 			} else if (event.type === "tool_execution_end") {
 				// TPS: tool time is NOT response time — the next provider segment starts here.
 				run.tpsSegmentStart = performance.now();
+				if (haltRequested && !closed && !run.preempted) {
+					run.preempted = true;
+					killChild();
+				}
 			} else if (event.type === "message_update" && event.message?.role === "assistant") {
 				let t = "";
 				let think = "";
@@ -242,6 +275,10 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 			// abort wins over runOk: a killed child may still have emitted usable text, but the
 			// user asked it to stop — reporting "done" would silently accept a partial answer.
 			run.status = aborted ? "aborted" : runOk(run) ? "done" : timedOut ? "timeout" : "failed";
+			if (run.preempted) {
+				run.status = "aborted";
+				run.stopReason = "preempted";
+			}
 			run.streamText = "";
 			run.streamThinking = "";
 		};

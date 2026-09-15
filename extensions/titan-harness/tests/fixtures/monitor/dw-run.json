@@ -1,0 +1,68 @@
+{
+  "agents": [
+    {
+      "endedAt": "2026-09-15T06:01:00.000Z",
+      "id": 1,
+      "label": "review:bugs",
+      "model": "xai/grok-4.6",
+      "phase": "Review",
+      "prompt": "…",
+      "startedAt": "2026-09-15T06:00:00.000Z",
+      "status": "done",
+      "tokenUsage": {
+        "cost": 0.2,
+        "input": 10000,
+        "output": 2000,
+        "total": 12000
+      },
+      "tokens": 12000
+    },
+    {
+      "endedAt": "2026-09-15T06:00:30.000Z",
+      "error": "provider timeout",
+      "id": 2,
+      "label": "review:perf",
+      "model": "xai/grok-4.6",
+      "phase": "Review",
+      "prompt": "…",
+      "startedAt": "2026-09-15T06:00:00.000Z",
+      "status": "error",
+      "tokens": 300
+    },
+    {
+      "id": 3,
+      "label": "verify:src/a.ts",
+      "model": "antigravity/gemini-3.8-flash",
+      "phase": "Verify",
+      "prompt": "…",
+      "startedAt": "2026-09-15T06:01:01.000Z",
+      "status": "running"
+    },
+    {
+      "id": 4,
+      "label": "verify:src/b.ts",
+      "phase": "Verify",
+      "prompt": "…",
+      "status": "queued"
+    }
+  ],
+  "currentPhase": "Verify",
+  "logs": [],
+  "phases": [
+    "Review",
+    "Verify"
+  ],
+  "runId": "run-dw-20260915-0001",
+  "script": "export const meta = {}",
+  "sessionId": "s1",
+  "startedAt": "2026-09-15T06:00:00.000Z",
+  "status": "running",
+  "tokenUsage": {
+    "cost": 0.21,
+    "input": 10300,
+    "output": 2000,
+    "total": 12300
+  },
+  "updatedAt": "2026-09-15T06:01:30.000Z",
+  "workflowName": "review-changes"
+}

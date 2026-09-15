@@ -1,0 +1,34 @@
+{
+  "agentId": "implement#2",
+  "callsign": "forge-1",
+  "model": "antigravity/claude-opus-4-6",
+  "role": "builder",
+  "state": "dispatched-working",
+  "stateHistory": [
+    {
+      "seq": 16,
+      "state": "queued",
+      "ts": "2026-09-15T06:02:20.000Z"
+    },
+    {
+      "seq": 16,
+      "state": "dispatched-working",
+      "ts": "2026-09-15T06:02:21.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 50,
+    "seconds": 2
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.005,
+    "input": 500,
+    "output": 50
+  }
+}

@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"child-clean-0001","timestamp":"2026-09-15T06:00:00.000Z","cwd":"/tmp/fixture"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Starting the task."}],"usage":{"input":20000,"output":500,"cacheRead":0,"cacheWrite":0,"totalTokens":20500,"cost":{"total":0.002}}}}
+{"type":"tool_execution_start","toolName":"read","args":{"path":"src/app.ts"}}
+{"type":"tool_execution_end","toolName":"read"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Edited src/app.ts; tests pass."}],"usage":{"input":98000,"output":1200,"cacheRead":0,"cacheWrite":0,"totalTokens":99200,"cost":{"total":0.01}}}}

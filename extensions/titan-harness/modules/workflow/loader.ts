@@ -163,7 +163,8 @@ export function resourceRoots(workflowDir: string, cwd: string, overrides?: Work
 /** A ValidateContext for a workflow directory: dir + the resource roots above; workflowNames = every installed workflow. */
 export function defaultValidateContext(workflowDir: string, cwd: string, overrides?: WorkflowDirOverrides): ValidateContext {
 	const roots = resourceRoots(workflowDir, cwd, overrides);
-	return { dir: path.resolve(workflowDir), commandDirs: roots, scriptDirs: roots, personaDirs: roots, workflowNames: listWorkflows(cwd, overrides).map((entry) => entry.name) };
+	// Personas also resolve from the package root (<pkg>/personas/*.md ships the eight defaults; personas.ts).
+	return { dir: path.resolve(workflowDir), commandDirs: roots, scriptDirs: roots, personaDirs: [...roots, packageRoot()], workflowNames: listWorkflows(cwd, overrides).map((entry) => entry.name) };
 }
 
 /** Read the bytes of a workflow file: text, sha256 of the bytes, parsed document. Throws on a YAML syntax error. */

@@ -1,0 +1,34 @@
+{
+  "agentId": "tests",
+  "callsign": "forge-2",
+  "model": "cerebras/qwen-3.8-27b",
+  "role": "builder",
+  "state": "edit-round-n",
+  "stateHistory": [
+    {
+      "seq": 3,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:03.000Z"
+    },
+    {
+      "seq": 13,
+      "state": "edit-round-n",
+      "ts": "2026-09-15T06:00:13.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "xhigh"
+  },
+  "tps": {
+    "outputTokens": 300,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.03,
+    "input": 3000,
+    "output": 300
+  }
+}

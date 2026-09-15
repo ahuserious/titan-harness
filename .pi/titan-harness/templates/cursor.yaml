@@ -1,0 +1,11 @@
+# cursor.yaml — the Cursor cloud lane for titan's cursor-cloud verify runner.
+# Copy to <project>/.titan/cursor.yaml. Values only: the API key stays in the
+# environment under the NAME below and is never written here or into a run.
+env:
+  type: ubuntu-22.04        # Cursor background-agent environment kind
+  name: default             # environment name in the Cursor dashboard
+repo: ""                    # origin URL; empty = `git remote get-url origin`
+startingRef: titan/<runId>  # the branch the builder pushed; <runId> is substituted per run
+api_base: https://api.cursor.com
+credentials:
+  api_key_env: CURSOR_API_KEY   # name only — export it before launching Pi

@@ -26,8 +26,10 @@ Node by node:
 - **`classify`** — `prompt: "Classify this issue: $fetch-issue.output"`, `model:
   cerebras/qwen-3.8-27b`, `allowed_tools: []`, `output_format` with
   `issue_type: enum [bug, feature]`. Cheap model, no tools, structured answer: the
-  child gets a `submit_result` tool whose parameters are that schema; the result is
-  validated and re-asked up to 3 times. This is the only node `when:` may read.
+  runtime exports the schema to the child (`TITAN_NODE_SCHEMA` + `TITAN_NODE_RESULT_PATH`)
+  and adds a terminating `submit_result` tool whose parameters are that schema; its
+  recorded object (or, as the fallback, the JSON in the answer text) is validated and
+  re-asked up to 3 times. This is the only node `when:` may read.
 - **`investigate`** — `when: "$classify.output.issue_type == 'bug'"`, `context: fresh`.
   Skipped (not failed) on a feature. Gets the issue inline (`$fetch-issue.output`, the
   parsed JSON) — it has no memory of the classify node — and is told to write its

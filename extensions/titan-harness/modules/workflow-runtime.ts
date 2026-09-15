@@ -10,6 +10,15 @@
  *                                TITAN_NODE_HOOKS (child-hooks.ts hooksEnv); the thinking
  *                                level is normalized to the provider ceiling; reviewer
  *                                roles (auditor, verifier, watchdog) get the priority lease.
+ *                                Structured output v2 (plan D12): a request with
+ *                                `outputSchema` exports TITAN_NODE_SCHEMA (refs resolved)
+ *                                and TITAN_NODE_RESULT_PATH (<runDir>/results/<node>-<n>.json),
+ *                                names `submit_result` as an extra child tool (it survives
+ *                                --no-tools and the /stack subagentTools=off policy), ends the
+ *                                prompt with SUBMIT_RESULT_INSTRUCTION, and reads the file the
+ *                                child's terminating tool wrote back as `AgentResult.value`
+ *                                (nodes/ai.ts validates it and skips the text parse). No file
+ *                                → the v1 prompt-suffix path stays the fallback.
  *   runProcess(command, args)    a subprocess with separate stdout/stderr, a timeout, an
  *                                AbortSignal and process-group kill — what `bash:` and
  *                                `script:` nodes run through.
@@ -26,7 +35,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import { hooksEnv } from "./child-hooks.ts";
+import { hooksEnv, SUBMIT_RESULT_INSTRUCTION, SUBMIT_RESULT_TOOL, schemaEnv } from "./child-hooks.ts";
 import type { runChild as RunChild } from "./child-runner.ts";
 import type { ModelSlot, Thinking } from "./model-stack.ts";
 import type { RunStore } from "./run-store.ts";
@@ -35,7 +44,8 @@ import type { StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
-import type { NodeDoc, SlotRole } from "./workflow/schema.ts";
+import { resolveRef } from "./workflow/json-schema.ts";
+import type { JsonSchema, NodeDoc, SlotRole } from "./workflow/schema.ts";
 
 // ═══ Agents over runChild ═══════════════════════════════════════════════════
 
@@ -49,7 +59,36 @@ export interface AgentRunnerHost {
 	slotFor?(req: AgentRequest): ModelSlot | undefined;
 	/** Host bookkeeping after every call (slot perf, the session ledger); never throws into the run. */
 	onRun?(run: AgentRun, req: AgentRequest): void;
+	/** Where `submit_result` files land (structured output v2); default <sessionsDir>/../results. */
+	resultsDir?: string;
 }
+
+/** An AgentResult that may carry the typed object a child's `submit_result` recorded (structured output v2). */
+export interface StructuredAgentResult extends AgentResult {
+	value?: unknown;
+	/** The result file the child was told to write (set whenever `outputSchema` was requested). */
+	resultPath?: string;
+}
+
+/** The schema as the child sees it: every `titan://schemas/*` $ref resolved (a child has no registry). */
+export function resolveSchemaRefs(schema: JsonSchema, depth = 0): JsonSchema {
+	if (!schema || typeof schema !== "object" || depth > 32) return schema;
+	if (typeof schema.$ref === "string") {
+		const resolved = resolveRef(schema.$ref);
+		if (resolved) {
+			const { $ref: _ref, ...rest } = schema;
+			return resolveSchemaRefs({ ...resolved, ...rest }, depth + 1);
+		}
+		return schema; // unknown ref: the child degrades it to "any" (child-hooks.ts)
+	}
+	const out: JsonSchema = { ...schema };
+	if (schema.properties) out.properties = Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => [key, resolveSchemaRefs(value, depth + 1)]));
+	if (schema.items) out.items = resolveSchemaRefs(schema.items, depth + 1);
+	if (schema.additionalProperties && typeof schema.additionalProperties === "object") out.additionalProperties = resolveSchemaRefs(schema.additionalProperties, depth + 1);
+	return out;
+}
+
+const safeSegment = (text: string): string => text.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "") || "node";
 
 /** Workflow role → the transcript role the model bar and ledger know. */
 export function transcriptRole(role: SlotRole): Role {
@@ -87,8 +126,10 @@ export function resultOf(run: AgentRun): AgentResult {
 	};
 }
 
-export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) => Promise<AgentResult> {
+export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) => Promise<StructuredAgentResult> {
 	fs.mkdirSync(host.sessionsDir, { recursive: true, mode: 0o700 });
+	const resultsDir = host.resultsDir ?? path.join(host.sessionsDir, "..", "results");
+	const resultCounters = new Map<string, number>();
 	return async (req) => {
 		if (!req.model) {
 			return { ok: false, text: "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 }, error: `${req.nodeId}: no model resolved for role ${req.role}`, toolCalls: 0 };
@@ -97,10 +138,26 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 		const run = newRun(transcriptRole(req.role), req.model, slot);
 		const thinking = normalizeThinking(req.model, asThinking(req.thinking)).effective;
 		const resume = typeof req.context === "object" && req.context ? req.context.resume : undefined;
+		// Structured output v2: the schema and the result file travel as env, submit_result as an extra tool.
+		let prompt = req.prompt;
+		let resultPath: string | undefined;
+		let schemaEnvironment: Record<string, string> = {};
+		const extraTools: string[] = [];
+		if (req.outputSchema) {
+			const n = (resultCounters.get(req.nodeId) ?? 0) + 1;
+			resultCounters.set(req.nodeId, n);
+			resultPath = path.join(resultsDir, `${safeSegment(req.nodeId)}-${n}.json`);
+			try {
+				fs.rmSync(resultPath, { force: true });
+			} catch {}
+			schemaEnvironment = schemaEnv(resolveSchemaRefs(req.outputSchema), resultPath);
+			extraTools.push(SUBMIT_RESULT_TOOL);
+			if (!prompt.trimEnd().endsWith(SUBMIT_RESULT_INSTRUCTION)) prompt = `${prompt}\n\n${SUBMIT_RESULT_INSTRUCTION}`;
+		}
 		try {
 			await host.runChild({
 				run,
-				prompt: req.prompt,
+				prompt,
 				systemPrompt: req.systemPrompt,
 				appendSystemPrompts: req.appendSystemPrompts,
 				tools: req.tools,
@@ -111,18 +168,34 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 				timeoutMs: req.timeoutMs,
 				signal: req.signal,
 				priority: PRIORITY_ROLES.includes(req.role),
-				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks) },
+				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks), ...schemaEnvironment },
+				...(extraTools.length ? { extraTools } : {}),
 			});
 		} catch (error) {
 			run.status = "failed";
 			run.errorMessage = error instanceof Error ? error.message : String(error);
+		}
+		// The typed object the child's terminating submit_result wrote, when it did.
+		let value: unknown;
+		if (resultPath && run.status !== "aborted") {
+			try {
+				value = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+				run.text = JSON.stringify(value);
+				// A child that ended right after submit_result has no closing prose: the file is its answer.
+				if (run.status === "failed" && run.exitCode === 0 && run.stopReason !== "error" && run.stopReason !== "aborted") run.status = "done";
+			} catch {
+				value = undefined; // no file (v1 path) or unreadable JSON (treated as no result; the text parse decides)
+			}
 		}
 		try {
 			host.onRun?.(run, req);
 		} catch {
 			/* bookkeeping never fails a node */
 		}
-		return resultOf(run);
+		const result: StructuredAgentResult = resultOf(run);
+		if (resultPath) result.resultPath = resultPath;
+		if (value !== undefined) result.value = value;
+		return result;
 	};
 }
 

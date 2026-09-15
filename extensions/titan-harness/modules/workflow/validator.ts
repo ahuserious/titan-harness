@@ -52,14 +52,18 @@ import {
 	ISOLATION_MODES,
 	LOOP_KEYS,
 	MCP_TOOL_KEYS,
+	MIMEOGRAPH_KEYS,
 	MODEL_RE,
 	NAME_RE,
 	NODE_EVIDENCE_KEYS,
 	NODE_KEYS,
+	nodeTypesOf,
 	ON_COMPACTION_MODES,
 	ON_FAIL_ACTIONS,
 	ON_FAIL_KEYS,
 	ON_REJECT_KEYS,
+	outputRefs,
+	parseWhen,
 	PHASE_KEYS,
 	RETRY_KEYS,
 	REVIEW_POLICIES,
@@ -74,17 +78,14 @@ import {
 	TOP_LEVEL_KEYS,
 	TRIGGER_KEYS,
 	TRIGGER_RULES,
-	VERIFY_RUNNERS,
-	WATCHDOG_POLICIES,
-	WORKFLOW_NODE_KEYS,
-	WRITE_TOOLS,
-	nodeTypesOf,
-	outputRefs,
-	parseWhen,
 	type JsonSchema,
 	type NodeType,
 	type WhenAst,
 	type WorkflowDoc,
+	VERIFY_RUNNERS,
+	WATCHDOG_POLICIES,
+	WORKFLOW_NODE_KEYS,
+	WRITE_TOOLS,
 } from "./schema.ts";
 
 // The when-grammar parser lives in schema.ts (pure, dependency-free); re-exported here so
@@ -378,6 +379,7 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 			}
 			if (titan.modes !== undefined && !isStringList(titan.modes)) issues.error("titan", `titan.modes must be a list of strings; found ${show(titan.modes)}`);
 			if (titan.personas !== undefined && !isStringList(titan.personas)) issues.error("titan", `titan.personas must be a list of persona names; found ${show(titan.personas)}`);
+			if (titan.parent_run !== undefined && !isText(titan.parent_run)) issues.error("titan", `titan.parent_run must be the run id this workflow repairs or elevates; found ${show(titan.parent_run)}`);
 			if (titan.elevation !== undefined && titan.elevation !== "default" && !isMapping(titan.elevation)) issues.error("titan", `titan.elevation must be "default" or a ladder mapping {fail_1, fail_2, fail_3}; found ${show(titan.elevation)}`);
 			if (titan.evidence !== undefined) {
 				if (!isMapping(titan.evidence)) issues.error("titan", `titan.evidence must be a mapping {require: [kinds], dir}`);
@@ -550,8 +552,24 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 			if (!isText(node.persona)) issues.error("persona", `persona must be a persona name; found ${show(node.persona)}`, id);
 			else if (ctx.personaDirs && !findPersonaFile(node.persona, ctx.personaDirs)) issues.error("persona", `persona ${show(node.persona)} not found as personas/${node.persona}.md under ${list(ctx.personaDirs)}`, id);
 		}
-		for (const key of ["mimeograph", "tier", "output_type", "system_prompt"] as const) {
+		for (const key of ["tier", "output_type", "system_prompt"] as const) {
 			if (node[key] !== undefined && typeof node[key] !== "string") issues.error("type", `${key} must be a string; found ${show(node[key])}`, id);
+		}
+		if (node.mimeograph !== undefined) {
+			// A comma-separated persona list, or {personas, models?, judge?, criteria?} (plan A12; personas.ts).
+			const mimeo = node.mimeograph as unknown;
+			if (isText(mimeo)) {
+				if (ctx.personaDirs) for (const name of mimeo.split(",").map((n) => n.trim()).filter(Boolean)) if (!findPersonaFile(name, ctx.personaDirs)) issues.error("persona", `mimeograph persona ${show(name)} not found as personas/${name}.md under ${list(ctx.personaDirs)}`, id);
+			} else if (isMapping(mimeo)) {
+				for (const key of Object.keys(mimeo)) if (!MIMEOGRAPH_KEYS.has(key)) issues.warn("unknown-key", `mimeograph.${key} is unknown and ignored`, id);
+				if (!isStringList(mimeo.personas) || !mimeo.personas.length) issues.error("type", `mimeograph.personas must be a non-empty list of persona names; found ${show(mimeo.personas)}`, id);
+				else if (ctx.personaDirs) for (const name of mimeo.personas) if (!findPersonaFile(name, ctx.personaDirs)) issues.error("persona", `mimeograph persona ${show(name)} not found as personas/${name}.md under ${list(ctx.personaDirs)}`, id);
+				if (mimeo.models !== undefined) {
+					if (!isStringList(mimeo.models) || !mimeo.models.length) issues.error("type", `mimeograph.models must be a non-empty list of provider/id models; found ${show(mimeo.models)}`, id);
+					else for (const model of mimeo.models) if (!MODEL_RE.test(model)) issues.error("model", `mimeograph model ${show(model)} is not provider/id`, id);
+				}
+				for (const key of ["judge", "criteria"] as const) if (mimeo[key] !== undefined && typeof mimeo[key] !== "string") issues.error("type", `mimeograph.${key} must be a string; found ${show(mimeo[key])}`, id);
+			} else issues.error("type", `mimeograph must be a comma-separated persona list or a mapping {personas, models, judge, criteria}; found ${show(mimeo)}`, id);
 		}
 		if (node.append_system_prompt !== undefined && typeof node.append_system_prompt !== "string" && !isStringList(node.append_system_prompt)) issues.error("type", `append_system_prompt must be a string or a list of strings`, id);
 		if (node.evidence !== undefined) {

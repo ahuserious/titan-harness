@@ -1,0 +1,34 @@
+{
+  "agentId": "w2",
+  "callsign": "waiting-5",
+  "model": "antigravity/claude-opus-4-6",
+  "role": "worker",
+  "state": "waiting-architect",
+  "stateHistory": [
+    {
+      "seq": 5,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:05.000Z"
+    },
+    {
+      "seq": 15,
+      "state": "waiting-architect",
+      "ts": "2026-09-15T06:00:15.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 500,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.05,
+    "input": 5000,
+    "output": 500
+  }
+}

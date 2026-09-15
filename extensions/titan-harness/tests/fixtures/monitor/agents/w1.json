@@ -1,0 +1,29 @@
+{
+  "agentId": "w1",
+  "callsign": "queued-4",
+  "model": "xai/grok-4.6",
+  "role": "verifier",
+  "state": "queued",
+  "stateHistory": [
+    {
+      "seq": 4,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:04.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 400,
+    "seconds": 0
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.04,
+    "input": 4000,
+    "output": 400
+  }
+}

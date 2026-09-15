@@ -1,0 +1,34 @@
+{
+  "agentId": "w12",
+  "callsign": "held-15",
+  "model": "cerebras/qwen-3.8-27b",
+  "role": "worker",
+  "state": "held-spend",
+  "stateHistory": [
+    {
+      "seq": 15,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:15.000Z"
+    },
+    {
+      "seq": 25,
+      "state": "held-spend",
+      "ts": "2026-09-15T06:00:25.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "xhigh"
+  },
+  "tps": {
+    "outputTokens": 1500,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.15,
+    "input": 15000,
+    "output": 1500
+  }
+}

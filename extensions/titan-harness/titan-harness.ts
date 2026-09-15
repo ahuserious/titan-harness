@@ -51,8 +51,19 @@ import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { registerAutoValidateCommand, registerCollaborateCommand } from "./modules/cmd-build.ts";
 import { registerFusionCommand } from "./modules/cmd-fusion.ts";
 import { registerReadonlyCommands } from "./modules/cmd-readonly.ts";
-import { registerWorkflowCommands } from "./modules/cmd-workflow.ts";
-import { createWorkflowRuntime } from "./modules/workflow-runtime.ts";
+import { currentWorkflowRun, registerWorkflowCommands } from "./modules/cmd-workflow.ts";
+import { createWorkflowRuntime, findBinary, runProcess } from "./modules/workflow-runtime.ts";
+import { registerMonitorCommand } from "./modules/cmd-monitor.ts";
+import { renderBarRow } from "./modules/monitor/frame.ts";
+import { buildRunView, latestRuns, type RunView } from "./modules/monitor/rows.ts";
+import { createWatchdog, type Watchdog, type WatchdogDeps } from "./modules/watchdog/index.ts";
+import type { LedgerNote } from "./modules/watchdog/compaction.ts";
+import { stateBlockMessage } from "./modules/watchdog/state-block.ts";
+import { createPlanMode, type PlanModeState } from "./modules/plan-mode.ts";
+import { registerUltraplanCommand, type ResolvedUltraplanStack } from "./modules/cmd-ultraplan.ts";
+import { createMcpToolBridge, type McpToolBridge } from "./modules/mcp-client.ts";
+import { registerCloudSimCommand } from "./modules/cmd-cloud-sim.ts";
+import { registerCreateWorkflowCommand } from "./modules/cmd-create-workflow.ts";
 import { loadWorkflow } from "./modules/workflow/loader.ts";
 import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult } from "./modules/workflow/executor.ts";
 import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
@@ -104,6 +115,7 @@ import {
 import { auditBuilderRun as runAuditGate, hasWorkingTreeChanges } from "./modules/audit.ts";
 import {
 	BUILDER_FANOUT_CYCLE,
+	WATCHDOG_ON_COMPACTION_MODES,
 	EXA_TOOL_NAMES,
 	isStackChild,
 	LEVEL_CYCLE,
@@ -116,7 +128,7 @@ import {
 	SUBAGENT_FANOUT_CYCLE,
 	writeStackSettings,
 } from "./modules/stack-config.ts";
-import { auditorCellStr, cellStr, exaCellStr, fanOutCellStr, levelCellStr, shapeCellStr, subagentCellStr, totalsCellStr } from "./modules/tui.ts";
+import { auditorCellStr, cellStr, exaCellStr, fanOutCellStr, levelCellStr, monitorCellStr, shapeCellStr, subagentCellStr, totalsCellStr, type WatchdogCell, watchdogCellStr } from "./modules/tui.ts";
 import { acquireWriterLease, type WriterLease } from "./modules/writer-lease.ts";
 
 // ═══ 1. Defaults ═════════════════════════════════════════════════════════════
@@ -1040,6 +1052,10 @@ export default function (pi: ExtensionAPI) {
 						rows.unshift(truncateToWidth(totalsCellStr(theme, sessionTotalsText(), liveRuns.length > 0), width));
 						// LEVEL row: which harness level (or plain shape) is live, its lane pools, the plan default.
 						rows.push(truncateToWidth(levelCellStr(theme, levelSnapshot(ctx)), width));
+						try {
+							rows.push(truncateToWidth(monitorCellStr(theme, monitorBarText(ctx), !!currentWorkflowRun()), width));
+						} catch {}
+						if (readStackSettings().watchdog.enabled || watchdog) rows.push(truncateToWidth(watchdogCellStr(theme, watchdogCell()), width));
 						// FAN-OUT row: how many children are running right now, out of how many this
 						// command spawned, against the configured stack size.
 						rows.push(truncateToWidth(fanOutCellStr(theme, fanOutSnapshot()), width));
@@ -1087,9 +1103,19 @@ export default function (pi: ExtensionAPI) {
 
 	// /stack toggles the bar through this hook (and persists the choice itself).
 	(globalThis as any)[STACK_MODEL_BAR_HOOK] = (visible: boolean) => setFooterVisible(visible);
+	/** In-process subscribers to shape/level changes (the authoring status line refreshes through this). */
+	const shapeListeners = new Set<() => void>();
+	const notifyShapeListeners = () => {
+		for (const cb of shapeListeners) {
+			try {
+				cb();
+			} catch {}
+		}
+	};
 	(globalThis as any)[STACK_SHAPE_HOOK] = () => {
 		renderFooterWidget();
 		paintShapeStatus();
+		notifyShapeListeners();
 	};
 
 	// Boot: without --titan-config, load the persisted shape (settings.shape) as the session stack.
@@ -1393,6 +1419,12 @@ export default function (pi: ExtensionAPI) {
 		["/titan-level [0-3|next|status]", "harness level 0-3 (Shift+Tab after rebind · Alt+L)"],
 		["/titan-doctor [--json]", "models, credentials, tools, pins, decisions"],
 		["/workflow run|validate|list|status|stop|graph <name>", "YAML DAG workflows (.titan/workflows/<name>/<name>.yaml)"],
+		["/workflow-monitor [runId|list|--split|close]", "store-driven run monitor: overlay, runs table, side pane"],
+		["/titan-watchdog [status|on|off|model|thinking|compaction|resume]", "titan-native watchdog: compaction state block, child pre-emption, stalemate"],
+		["/plan [brief]", "read-only plan mode; routes to /ultraplan when the shape says so"],
+		["/ultraplan <brief> | answer | fuse | done | abort", "grilling round, anonymous fusion seats, judge, fused plan with ACKs"],
+		["/cloud-simulated-users [probe|setup|run|advice]", "cloud sim-user lanes: probe matrix, setup agent, recorded runs"],
+		["/create-workflow <goal> [--from-plan|--from-findings|--elevate]", "clean-context workflow architect authors .titan/workflows/<name>; host persists"],
 		["/titan [on|off|toggle]", "this list; model bar on/off (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
@@ -1696,6 +1728,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {}
 		renderFooterWidget();
 		paintShapeStatus(ctx);
+		notifyShapeListeners();
 	};
 	const cycleShape = async (ctx: any, wanted?: string) => {
 		const shapes = listShapes();
@@ -2002,7 +2035,8 @@ export default function (pi: ExtensionAPI) {
 			loaded,
 			store: runStore(),
 			settings: readStackSettings(),
-			runChild,
+			runChild: watchdogRunChild,
+			mcpTool: (server: string, tool: string, args: Record<string, unknown>) => mcpBridge().mcpTool(server, tool, args),
 			resolveRole: resolveWorkflowRole,
 			// Ladder step 2: the strongest usable model of the same family (never a cross-family jump).
 			familyMax: (model: string) => {
@@ -2045,5 +2079,513 @@ export default function (pi: ExtensionAPI) {
 		notify: (ctx: any, text: string, level?: string) => announce(ctx, text, (level as "info" | "warning" | "error") ?? "info"),
 		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow", ok: !/FAILED|CANCELLED/.test(title), title: title.replace(/^◆ WORKFLOW\s*/, "") }, markdown),
 		validateContext: (_cwd: string, ctx: any) => workflowValidateContext(ctx) as ValidateContext,
+	});
+
+	// ── 2.15 Watchdog + compaction (plan §5.5, D3; P5). The machine is pure (modules/watchdog); this is its host. ──
+	const recentRuns = new Map<string, AgentRun>(); // agentId → the last child run (transcript tails for inspections)
+	let watchdog: Watchdog | undefined;
+	let lastCompaction: Awaited<ReturnType<Watchdog["beforeCompact"]>> | undefined;
+	const watchdogRunDir = (): string | undefined => currentWorkflowRun()?.dir ?? sessionRun?.dir;
+	const contextWindowOf = (model: string): number => {
+		try {
+			const slash = model.indexOf("/");
+			const found = hostCtx?.modelRegistry?.find?.(model.slice(0, slash), model.slice(slash + 1));
+			return Number(found?.contextWindow) || 0;
+		} catch {
+			return 0;
+		}
+	};
+	/** Inspectors are read-only children on the watchdog model (compaction) or the architect's model (pre-emption), priority lease, fresh session. */
+	const inspectorSpawn: WatchdogDeps["inspect"] = async (prompt, opts) => {
+		const run = newRun("AUDITOR", opts.model);
+		const dir = path.join(watchdogRunDir() ?? os.tmpdir(), "sessions", "watchdog");
+		try {
+			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			await runChild({ run, prompt, systemPrompt: opts.systemPrompt, tools: READONLY_TOOLS, thinking: normalizeThinking(opts.model, opts.thinking as Thinking).effective, sessionDir: dir, sessionId: randomUUID(), cwd: currentCwd(), timeoutMs: opts.timeoutMs, signal: opts.signal, priority: true });
+		} catch (error) {
+			run.status = "failed";
+			run.errorMessage = error instanceof Error ? error.message : String(error);
+		}
+		const ok = run.status === "done" && runOk(run);
+		return { ok, text: run.text, usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds }, error: ok ? undefined : runError(run) };
+	};
+	/** The entries Pi is about to summarize, as bounded text for the inspector. */
+	const entriesText = (entries: unknown[] | undefined): string => {
+		if (!Array.isArray(entries)) return "";
+		const lines: string[] = [];
+		for (const entry of entries as any[]) {
+			const message = entry?.message ?? entry;
+			const role = message?.role ?? entry?.type ?? "entry";
+			const content = message?.content;
+			let text = "";
+			if (typeof content === "string") text = content;
+			else if (Array.isArray(content)) text = content.map((part: any) => (part?.type === "text" ? String(part.text ?? "") : part?.type === "toolCall" ? `[tool ${part.name ?? "?"}]` : part?.type === "toolResult" ? "[tool result]" : "")).filter(Boolean).join(" ");
+			if (text.trim()) lines.push(`${role}: ${text.trim().slice(0, 2000)}`);
+		}
+		return lines.join("\n").slice(-24_000);
+	};
+	const watchdogLedger = (row: LedgerNote): void => {
+		try {
+			const run = sessionRunFor(currentCwd());
+			if (!run) return;
+			const r = newRun("AUDITOR", row.model);
+			r.tokensIn = row.tokensIn;
+			r.tokensOut = row.tokensOut;
+			r.costUsd = row.costUsd;
+			r.tpsSeconds = row.tpsSeconds ?? 0;
+			r.status = row.ok ? "done" : "failed";
+			r.text = row.ok ? "inspection" : "";
+			r.exitCode = row.ok ? 0 : 1;
+			ledger(rowFromAgentRun(r, run.runId, row.origin, readStackSettings().watchdog.thinking as Thinking, row.agentId ?? row.origin));
+		} catch {
+			/* observational */
+		}
+	};
+	const getWatchdog = (): Watchdog => {
+		if (watchdog) return watchdog;
+		const s = readStackSettings();
+		let architect: { model: string; thinking: string } | undefined;
+		try {
+			const stack = modelStack();
+			architect = { model: stack.architect.model, thinking: stack.architect.thinking };
+		} catch {}
+		watchdog = createWatchdog({
+			settings: s.watchdog,
+			store: runStore(),
+			runDir: watchdogRunDir(),
+			ledger: watchdogLedger,
+			entriesText,
+			transcriptTail: (agentId, maxChars) => {
+				const r = recentRuns.get(agentId);
+				if (!r) return "";
+				const tail = r.flow
+					.slice(-40)
+					.map((item: any) => (item.type === "tool" ? `[tool] ${item.label}` : item.type === "text" ? String(item.text) : `[thinking] ${item.text}`))
+					.join("\n");
+				return tail.slice(-maxChars);
+			},
+			architectModel: architect?.model ?? s.watchdog.model,
+			architectThinking: architect?.thinking ?? "high",
+			inspect: inspectorSpawn,
+		});
+		return watchdog;
+	};
+	const resetWatchdog = () => {
+		watchdog = undefined;
+	};
+	const watchdogCell = (): WatchdogCell => {
+		const s = readStackSettings().watchdog;
+		if (!s.enabled) return { enabled: false, state: "off", model: s.model, inspections: 0, spendUsd: 0, findings: 0, stalemate: `0/${s.stalemateRepeats}`, onCompaction: s.onCompaction };
+		const st = getWatchdog().status();
+		return { enabled: true, state: st.state, model: st.model, inspections: st.inspections, spendUsd: st.spendUsd, findings: st.findings, stalemate: `${st.lastIdentityRun}/${st.stalemateRepeats}`, onCompaction: st.onCompaction };
+	};
+	const sessionSpendUsd = (): number => ledgerRows.reduce((sum, row) => sum + (Number(row.costUsd) || 0), 0);
+	/**
+	 * runChild for workflow children: refuses spawns past `budgetUsd` (held-spend), watches
+	 * context usage for the watchdog and, when a child is pre-empted, inspects it and either
+	 * logically clears it (same model, fresh checkpoint session) or resumes it fresh on the
+	 * architect's model with the resume prompt. One pre-emption per request; never a replay.
+	 */
+	const watchdogRunChild: typeof runChild = async (opts) => {
+		const s = readStackSettings();
+		if (s.budgetUsd !== null && sessionSpendUsd() > s.budgetUsd) {
+			opts.run.status = "failed";
+			opts.run.errorMessage = `held-spend: this session's ledger ($${sessionSpendUsd().toFixed(2)}) is over budgetUsd ($${s.budgetUsd}); raise it with /stack budget`;
+			opts.run.startedAt = Date.now();
+			opts.run.endedAt = opts.run.startedAt;
+			opts.run.exitCode = 1;
+			try {
+				if (s.watchdog.enabled) getWatchdog().spend(sessionSpendUsd(), s.budgetUsd);
+			} catch {}
+			return opts.run;
+		}
+		const wd = s.watchdog.enabled ? getWatchdog() : undefined;
+		const agentId = opts.run.slot?.id ?? opts.run.role.toLowerCase();
+		const window = contextWindowOf(opts.run.model);
+		const first = await runChild({
+			...opts,
+			onUsage: wd && window > 0 ? (run) => wd.childUsage({ agentId, ctxTokens: run.ctxTokens, contextWindow: window, compactionSeen: run.compactionSeen }) : undefined,
+		});
+		recentRuns.set(agentId, first);
+		if (!first.preempted || !wd) return first;
+		const decision = await wd.preempted(agentId, { signal: opts.signal });
+		recordEvent("watchdog.preempt", { agentId, model: first.model, ctxTokens: first.ctxTokens, contextWindow: window, action: decision.action, note: decision.note }, agentId);
+		if (decision.action === "failed") {
+			first.errorMessage = `pre-empted at ${window ? Math.round((100 * first.ctxTokens) / window) : "?"} % of context; ${decision.note}`;
+			return first;
+		}
+		const resumeFresh = decision.action === "resume-fresh";
+		const retry = newRun(first.role, resumeFresh ? decision.model : first.model, first.slot);
+		const prompt = resumeFresh ? decision.resumePrompt : `${opts.prompt}\n\n[titan watchdog] Your previous session was logically cleared at ${window ? Math.round((100 * first.ctxTokens) / window) : "?"} % of the context window. Carry-over from the inspector: ${decision.carry}`;
+		const second = await runChild({
+			...opts,
+			run: retry,
+			prompt,
+			fork: undefined,
+			resume: undefined,
+			sessionId: resumeFresh ? randomUUID() : decision.checkpointSessionId,
+			thinking: resumeFresh ? normalizeThinking(decision.model, decision.thinking as Thinking).effective : opts.thinking,
+			onUsage: undefined,
+		});
+		recentRuns.set(agentId, second);
+		// The caller holds `opts.run`: settle it with the second attempt plus the pre-empted turn's spend.
+		Object.assign(opts.run, second, { tokensIn: first.tokensIn + second.tokensIn, tokensOut: first.tokensOut + second.tokensOut, costUsd: first.costUsd + second.costUsd, tpsSeconds: first.tpsSeconds + second.tpsSeconds, preempted: undefined });
+		return opts.run;
+	};
+	pi.on("session_before_compact", async (event: any, ctx: any) => {
+		try {
+			if (!readStackSettings().watchdog.enabled) return undefined;
+			const wd = getWatchdog();
+			const dir = watchdogRunDir();
+			if (dir) wd.arm(dir);
+			const outcome = await wd.beforeCompact({ reason: event.reason, willRetry: event.willRetry, signal: event.signal, preparation: event.preparation, branchEntries: event.branchEntries, customInstructions: event.customInstructions });
+			lastCompaction = outcome;
+			if (outcome.badge) announce(ctx, `titan watchdog: ${outcome.note} (${outcome.badge})`, "warning");
+			renderFooterWidget();
+			if (outcome.mode === "default" || !outcome.summary) return undefined;
+			return { compaction: { summary: outcome.summary, firstKeptEntryId: outcome.firstKeptEntryId ?? event.preparation?.firstKeptEntryId, tokensBefore: outcome.tokensBefore ?? event.preparation?.tokensBefore } };
+		} catch {
+			return undefined; // the watchdog never blocks a compaction
+		}
+	});
+	pi.on("session_compact", async (event: any) => {
+		try {
+			if (!watchdog) return;
+			const outcome = watchdog.afterCompact({ reason: event.reason, fromExtension: event.fromExtension, willRetry: event.willRetry, compactionEntry: event.compactionEntry });
+			// A Pi-authored narrative still gets the run's state block into context (custom messages participate in the LLM context).
+			if (lastCompaction && lastCompaction.mode === "default" && lastCompaction.stateBlock) {
+				pi.sendMessage({ customType: `${CUSTOM_TYPE}-state-block`, content: stateBlockMessage(lastCompaction.stateBlock, lastCompaction.badge), display: false });
+			}
+			lastCompaction = undefined;
+			recordEvent("compaction.done", { summaryHash: outcome.summaryHash ?? null, fromExtension: !!event.fromExtension, reason: event.reason });
+			renderFooterWidget();
+		} catch {}
+	});
+	pi.on("session_compact_failed", async (event: any) => {
+		try {
+			lastCompaction = undefined;
+			if (watchdog) watchdog.compactFailed({ reason: event.reason, errorMessage: event.errorMessage, aborted: event.aborted, willRetry: event.willRetry, fromExtension: event.fromExtension });
+		} catch {}
+	});
+	pi.on("input", async () => {
+		try {
+			if (watchdog) watchdog.userInput(); // cancels an in-flight inspection (pi-subagents semantics)
+		} catch {}
+		return { action: "continue" as const };
+	});
+	pi.registerCommand("titan-watchdog", {
+		description: "Titan-native watchdog: /titan-watchdog [status|on|off|model <provider/id>|thinking <level>|compaction halt-inspect|summary-only|off|resume]",
+		getArgumentCompletions: (prefix: string) => {
+			const verbs = ["status", "on", "off", "model", "thinking", "compaction", "resume"];
+			const items = verbs.filter((verb) => verb.startsWith(prefix.trim().toLowerCase())).map((verb) => ({ value: verb, label: verb }));
+			return items.length ? items : null;
+		},
+		handler: async (args: string, ctx: any) => {
+			noteHost(ctx);
+			const [verb = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const value = rest.join(" ").trim();
+			switch (verb.toLowerCase()) {
+				case "on":
+				case "off": {
+					writeStackSettings({ watchdog: { enabled: verb === "on" } });
+					resetWatchdog();
+					return announce(ctx, `titan watchdog: ${verb} (${verb === "on" ? "compaction state block + inspector, child pre-emption at " + Math.round(readStackSettings().watchdog.preemptAtContextFraction * 100) + " %, stalemate detection" : "Pi's default compaction; children run unwatched"})`);
+				}
+				case "model": {
+					if (!value.includes("/")) return announce(ctx, "usage: /titan-watchdog model <provider/id>", "warning");
+					if (!modelUsable(value)) return announce(ctx, `titan watchdog: ${value} is not usable (not in catalog or not authed)`, "warning");
+					writeStackSettings({ watchdog: { model: value } });
+					resetWatchdog();
+					return announce(ctx, `titan watchdog: model ${value}`);
+				}
+				case "thinking": {
+					if (!THINKING_LEVELS.includes(value as Thinking)) return announce(ctx, `usage: /titan-watchdog thinking <${THINKING_LEVELS.join("|")}>`, "warning");
+					writeStackSettings({ watchdog: { thinking: value } });
+					resetWatchdog();
+					return announce(ctx, `titan watchdog: thinking ${value} (${normalizeThinking(readStackSettings().watchdog.model, value as Thinking).effective} effective)`);
+				}
+				case "compaction": {
+					if (!(WATCHDOG_ON_COMPACTION_MODES as string[]).includes(value)) return announce(ctx, `usage: /titan-watchdog compaction <${WATCHDOG_ON_COMPACTION_MODES.join("|")}>`, "warning");
+					writeStackSettings({ watchdog: { onCompaction: value as (typeof WATCHDOG_ON_COMPACTION_MODES)[number] } });
+					resetWatchdog();
+					return announce(ctx, `titan watchdog: on compaction → ${value}`);
+				}
+				case "resume": {
+					getWatchdog().resumeAfterStalemate();
+					return announce(ctx, "titan watchdog: re-armed after the stalemate gate");
+				}
+				default: {
+					const s = readStackSettings();
+					if (!s.watchdog.enabled) return announce(ctx, `titan watchdog: off · model ${s.watchdog.model} (${s.watchdog.thinking}) · compaction ${s.watchdog.onCompaction} · pre-empt at ${Math.round(s.watchdog.preemptAtContextFraction * 100)} % — /titan-watchdog on`);
+					const st = getWatchdog().status();
+					return announce(ctx, `titan watchdog: ${st.state}${st.armedRun ? ` · run ${path.basename(st.armedRun)}` : ""} · ${st.model} (${st.thinking}) · compaction ${st.onCompaction} · pre-empt at ${Math.round(st.preemptAt * 100)} % · ${st.inspections} inspections · $${st.spendUsd.toFixed(4)} · findings ${st.findings} · stalemate ${st.lastIdentityRun}/${st.stalemateRepeats} · ${st.lastTransition}`);
+				}
+			}
+		},
+	});
+
+	// ── 2.16 /workflow-monitor (plan D4, §5.4; P6): overlay + the ◫ MONITOR bar row + the --split pane ──
+	let monitorBarCache: { at: number; text: string } = { at: 0, text: "" };
+	const monitorBarText = (ctx: any): string => {
+		if (Date.now() - monitorBarCache.at < 1_000) return monitorBarCache.text;
+		let text = renderBarRow(undefined);
+		try {
+			const store = runStore();
+			const live = currentWorkflowRun();
+			const view: RunView | undefined = live ? buildRunView(store, live.dir) : latestRuns(store, RunStore.projectSlug(ctx?.cwd ?? currentCwd()), 1)[0];
+			text = renderBarRow(view);
+		} catch {}
+		monitorBarCache = { at: Date.now(), text };
+		return text;
+	};
+	registerMonitorCommand(pi, {
+		store: () => runStore(),
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow-monitor", ok: true, title: title.replace(/^◆\s*/, "") }, markdown),
+		currentRunDir: () => currentWorkflowRun()?.dir,
+		color: (hex: string, text: string) => fgHex(hex as HexColor, text),
+		openOverlay: (ctx: any, render, onClose) => {
+			if (!ctx?.hasUI || typeof ctx.ui?.custom !== "function") return undefined;
+			let tick = 0;
+			let tuiRef: any;
+			let doneRef: ((value: unknown) => void) | undefined;
+			let closed = false;
+			const height = () => Math.max(8, Math.floor(Number(tuiRef?.terminal?.rows ?? process.stdout.rows ?? 40) * 0.85));
+			const promise: Promise<unknown> = ctx.ui.custom(
+				(tui: any, _theme: any, _keybindings: any, done: (value: unknown) => void) => {
+					tuiRef = tui;
+					doneRef = done;
+					return {
+						render: (width: number) => render(tick, { width, height: height() }).map((line) => truncateToWidth(line, width)),
+						handleInput: (data: string) => {
+							if (matchesKey(data, "escape") || data === "q") done(undefined);
+						},
+						invalidate: () => {},
+					};
+				},
+				{
+					overlay: true,
+					overlayOptions: { anchor: "right-center", width: "50%", minWidth: 44, maxHeight: "90%", margin: { right: 1 } },
+					onHandle: (handle: any) => {
+						try {
+							handle.unfocus(); // the editor keeps input; the overlay is a live view
+						} catch {}
+					},
+				},
+			);
+			promise.then(
+				() => {
+					closed = true;
+					onClose();
+				},
+				() => {
+					closed = true;
+					onClose();
+				},
+			);
+			return {
+				close: () => {
+					if (!closed) doneRef?.(undefined);
+				},
+				refresh: () => {
+					tick += 1;
+					try {
+						tuiRef?.requestRender?.();
+					} catch {}
+				},
+			};
+		},
+		spawnSplit: async (_ctx: any, argv: string[]) => {
+			const cmd = argv.map((arg) => (/[\s"'$`\\]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg)).join(" ");
+			const orca = findBinary("orca", [path.join(os.homedir(), "Dev Tools", "bin")]);
+			if (orca) {
+				const result = await runProcess(orca, ["terminal", "split", "--direction", "horizontal", "--command", cmd], { cwd: currentCwd(), timeoutMs: 15_000 });
+				if (result.code === 0) return { ok: true, how: "orca" as const, detail: result.stdout.trim().slice(0, 200) || "pane opened" };
+			}
+			if (process.env.TMUX) {
+				const result = await runProcess("tmux", ["split-window", "-h", cmd], { cwd: currentCwd(), timeoutMs: 15_000 });
+				if (result.code === 0) return { ok: true, how: "tmux" as const, detail: "tmux pane opened" };
+			}
+			return { ok: false, how: "none" as const, detail: `no Orca terminal or tmux here — run by hand: ${cmd}` };
+		},
+	});
+
+	// ── 2.17 Plan mode, /plan, /ultraplan and the MCP bridge (plan H6, A13, D14; P7) ──
+	const PLAN_ENTRY = "titan-plan-mode";
+	const planMode = createPlanMode({
+		getActiveTools: () => pi.getActiveTools(),
+		setActiveTools: (names) => pi.setActiveTools(names),
+		notify: (text, level) => {
+			try {
+				hostCtx?.ui?.notify?.(text, level ?? "info");
+			} catch {}
+		},
+		setStatus: (key, text) => {
+			try {
+				hostCtx?.ui?.setStatus?.(key, text);
+			} catch {}
+		},
+		setWidget: (key, lines) => {
+			try {
+				hostCtx?.ui?.setWidget?.(key, lines);
+			} catch {}
+		},
+		persist: (state: PlanModeState) => {
+			try {
+				pi.appendEntry(PLAN_ENTRY, state);
+			} catch {}
+		},
+		planCommand: () => {
+			try {
+				const stack = modelStack();
+				return stack.version === 2 ? stack.plan_command : undefined;
+			} catch {
+				return undefined;
+			}
+		},
+		runUltraplan: async (args, ctx) => {
+			await ultraplan.run(args, ctx);
+		},
+	});
+	pi.registerCommand("plan", {
+		description: "Read-only plan mode (edit/write off, bash allowlisted, Plan: steps tracked); at a shape with plan_command /ultraplan, bare /plan <brief> routes there. /plan [brief|on|off|toggle]",
+		handler: async (args: string, ctx: any) => {
+			noteHost(ctx);
+			await planMode.handlePlanCommand(args ?? "", ctx);
+		},
+	});
+	pi.registerCommand("todos", {
+		description: "Show the current plan's steps and their completion",
+		handler: async (_args: string, ctx: any) => {
+			const text = planMode.todosText();
+			ctx.ui.notify(text || "No plan steps yet. /plan, then ask for a numbered plan under a `Plan:` header.", "info");
+		},
+	});
+	pi.on("tool_call", async (event: any) => planMode.onToolCall({ toolName: event.toolName, input: event.input ?? {} }));
+	pi.on("before_agent_start", async () => planMode.onBeforeAgentStart());
+	pi.on("context", async (event: any) => ({ messages: planMode.onContext(event.messages ?? []) }));
+	pi.on("message_end", async (event: any) => {
+		try {
+			const message = event.message;
+			if (message?.role !== "assistant") return;
+			const text = Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => String(part.text ?? "")).join("\n") : "";
+			if (text.trim()) planMode.onAssistantMessage(text);
+		} catch {}
+	});
+	pi.on("session_start", async (_ev: any, ctx: any) => {
+		try {
+			let last: Partial<PlanModeState> | undefined;
+			for (const entry of ctx.sessionManager?.getEntries?.() ?? []) {
+				if (entry?.type === "custom" && entry.customType === PLAN_ENTRY && entry.data) last = entry.data as Partial<PlanModeState>;
+			}
+			if (last) planMode.restore(last, ctx);
+		} catch {}
+	});
+	/** The ultraplan roster with today's fallbacks: vacant seats are flagged, never silently dropped. */
+	const resolveUltraplanStack = (): ResolvedUltraplanStack => {
+		const base = cloneStack(loadModelStack(path.join(STACK_DIR, "model-stack-ultraplan.yaml")));
+		const vacant = base.slots.filter((slot) => !modelUsable(slot.model) && !(slot.fallback && modelUsable(slot.fallback))).map((slot) => slot.name);
+		const notes = resolveFallbacks(base);
+		for (const slot of base.slots) if (!modelUsable(slot.model)) (slot as any).vacant = true;
+		return { stack: base, notes, vacant };
+	};
+	const ultraplan = registerUltraplanCommand(pi, {
+		resolveStack: () => {
+			noteHost(hostCtx);
+			return resolveUltraplanStack();
+		},
+		runChild: watchdogRunChild,
+		store: () => runStore(),
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "ultraplan", ok: !/ABORT|FAILED/.test(title), title: title.replace(/^◆\s*/, "") }, markdown),
+		planMode,
+		childTimeoutMs,
+		recordRun: (run: AgentRun) => {
+			if (run.slot) bumpSlotPerf(run.slot.id, run.tokensOut, run.tpsSeconds, run.costUsd);
+			recordRun(run);
+			renderFooterWidget();
+		},
+		opinionFallback: async (prompt: string, ctx: any) => {
+			announce(ctx, `ultraplan: fewer than three live fusion seats — run the read-only fan-out instead: /titan-opinion ${prompt}`, "warning");
+		},
+	});
+	let mcpBridgeInstance: McpToolBridge | undefined;
+	/** One stdio MCP client per catalog server, started lazily for workflow `mcp_tool` nodes and the InfraNodus stage. */
+	const mcpBridge = (): McpToolBridge => (mcpBridgeInstance ??= createMcpToolBridge({ cwd: currentCwd() }));
+	const mcpServerEnabled = (server: string): boolean => {
+		try {
+			const cfg = mcpBridge()
+				.catalog()
+				.find((entry) => entry.name === server);
+			return !!cfg && !cfg.disabled;
+		} catch {
+			return false;
+		}
+	};
+
+	// ── 2.19 /create-workflow (plan H2, Appendix B.5; P7): a read-only workflow-architect child emits; the host persists ──
+	registerCreateWorkflowCommand(pi, {
+		runChild: watchdogRunChild,
+		store: () => runStore(),
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "create-workflow", ok: !/FAILED/.test(title), title: title.replace(/^◆\s*/, "") }, markdown),
+		architectSeat: (ctx: any) => {
+			noteHost(ctx);
+			const seat = modelStack().architect;
+			return { model: seat.model, thinking: seat.thinking, callsign: seat.name, systemPrompt: seat.systemPrompt, appendSystemPrompts: [...(seat.appendSystemPrompts ?? [])], substitutedFrom: (seat as any).substitutedFrom };
+		},
+		levelInfo: (ctx: any) => {
+			const snapshot = levelSnapshot(ctx);
+			let tier: string | undefined;
+			try {
+				tier = modelStack().verification?.default_tier;
+			} catch {}
+			return { level: snapshot.level, shape: shapeName(), tier };
+		},
+		setStatus: (ctx: any, text: string | undefined) => {
+			try {
+				ctx.ui.setStatus("titan", text);
+			} catch {}
+		},
+		childTimeoutMs,
+		onShapeChanged: (cb) => {
+			shapeListeners.add(cb);
+			return () => shapeListeners.delete(cb);
+		},
+		validateContext: (_cwd: string, ctx: any) => workflowValidateContext(ctx),
+	});
+
+	// ── 2.18 /cloud-simulated-users (plan H9; P8): provider probe matrix, setup agent, recorded runs ──
+	registerCloudSimCommand(pi, {
+		cwd: (ctx: any) => ctx.cwd,
+		store: () => runStore(),
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "cloud-simulated-users", ok: !/FAILED|VACANT/.test(title), title: title.replace(/^◆\s*/, "") }, markdown),
+		runtime: (ctx: any, loaded, runId, runDir) => {
+			noteHost(ctx);
+			return makeWorkflowRuntime(ctx, loaded, runId, runDir);
+		},
+		confirm: async (ctx: any, title: string, body: string) => {
+			try {
+				return ctx?.hasUI ? !!(await ctx.ui.confirm(title, body)) : false;
+			} catch {
+				return false;
+			}
+		},
+		which: (binary: string) => findBinary(binary, [path.join(os.homedir(), ".local", "bin"), path.join(os.homedir(), ".bun", "bin"), path.join(os.homedir(), "Dev Tools", "bin")]),
+		env: (name: string) => typeof process.env[name] === "string" && process.env[name]!.length > 0,
+		mcpEnabled: mcpServerEnabled,
+		runChild: watchdogRunChild,
+		workerSeat: () => resolveWorkflowRole("worker", { id: "cloud-sim-setup", prompt: "" } as NodeDoc),
+		childTimeoutMs,
+	});
+	pi.on("session_shutdown", async () => {
+		try {
+			await mcpBridgeInstance?.close();
+		} catch {}
+		mcpBridgeInstance = undefined;
 	});
 }

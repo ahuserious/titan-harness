@@ -13,7 +13,16 @@
  *                                   workflow run for this project; the live run when one
  *                                   is in flight
  *   /workflow stop                  abort the in-flight run (its AbortController)
- *   /workflow graph <name|path>     Mermaid `flowchart TD` of nodes and depends_on
+ *   /workflow graph <name|path> [--html [--out <path>]]
+ *                                   Mermaid `flowchart TD` of nodes and depends_on; --html
+ *                                   writes the offline inspector .titan/plans/graph-<name>.html
+ *   /workflow schedule [list|arm <name>|disarm <name>|recipe <name>]
+ *                                   `trigger:` workflows: arm the in-process scheduler (fires
+ *                                   under the run lock while this session is open), or print
+ *                                   the `orca automations create` recipe for firing it without one
+ *   /workflow export --dw <name> [--out <path>]
+ *                                   a pi-dynamic-workflows 3.10.1 script (JavaScript envelope,
+ *                                   never YAML) at .titan/plans/<name>.dw.mjs
  *   /workflow help
  *
  * One run per session at a time: `run` refuses while another is in flight. The module
@@ -32,14 +41,19 @@ import { formatTotals, readLedger, totalsFor } from "./ledger.ts";
 import { EVENTS_FILE, type RunMeta, RunStore, type RunStatus } from "./run-store.ts";
 import { fmtSecs } from "./runtime.ts";
 import { executeWorkflow, type NodeResult, type RunResult, type WorkflowRuntimeDeps } from "./workflow/executor.ts";
+import { readStackSettings, STACK_SETTINGS_PATH, writeStackSettings } from "./stack-config.ts";
+import { exportDynamicWorkflow } from "./workflow/export-dw.ts";
+import { graphHtml } from "./workflow/graph.ts";
 import { defaultValidateContext, type LoadedWorkflow, listWorkflows, loadWorkflow, resolveWorkflow } from "./workflow/loader.ts";
 import { layers } from "./workflow/scheduler.ts";
 import { type NodeDoc, type NodeType, nodeType, type WorkflowDoc } from "./workflow/schema.ts";
+import { createScheduler, DEFAULT_LOCK_ROOT, orcaAutomationRecipe, type Scheduler, schedulePlan, type TriggerSpec } from "./workflow/trigger.ts";
 import { formatIssues, type ValidateContext, validateFile } from "./workflow/validator.ts";
 
 /** The status-line key every /workflow message uses (one line, replaced in place). */
 export const STATUS_KEY = "titan-workflow";
-export const SUBCOMMANDS = ["run", "validate", "list", "status", "stop", "graph", "help"] as const;
+export const SUBCOMMANDS = ["run", "validate", "list", "status", "stop", "graph", "schedule", "export", "help"] as const;
+export const SCHEDULE_VERBS = ["list", "arm", "disarm", "recipe"] as const;
 const EVENT_TAIL = 20;
 
 export interface WorkflowCommandDeps {
@@ -49,6 +63,12 @@ export interface WorkflowCommandDeps {
 	notify(ctx: any, text: string, level?: string): void;
 	panel(ctx: any, title: string, markdown: string): void;
 	validateContext(cwd: string, ctx: any): Partial<ValidateContext>;
+	/** Where `/workflow schedule` keeps its armed/lastRun state (default: the titan settings file). */
+	settingsPath?: string;
+	/** Where run locks live (default ~/.pi/titan-harness/locks). */
+	lockRoot?: string;
+	/** The scheduler's tick in ms (default 30 s). */
+	tickMs?: number;
 }
 
 export interface RunArgs {
@@ -192,6 +212,33 @@ export function parseRunArgs(args: string): RunArgs {
 	return out;
 }
 
+/** `<bare…> [--flag]... [--key value|--key=value]...` for the graph/export subcommands; unknown flags are errors. */
+export function parseFlagArgs(args: string, booleans: string[], values: string[]): { bare: string[]; flags: Record<string, boolean>; values: Record<string, string>; errors: string[] } {
+	const out = { bare: [] as string[], flags: {} as Record<string, boolean>, values: {} as Record<string, string>, errors: [] as string[] };
+	const tokens = tokenize(args);
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (!token.startsWith("--")) {
+			out.bare.push(token);
+			continue;
+		}
+		const eq = token.indexOf("=");
+		const flag = eq >= 0 ? token.slice(2, eq) : token.slice(2);
+		if (booleans.includes(flag)) {
+			out.flags[flag] = true;
+			continue;
+		}
+		if (values.includes(flag)) {
+			const value = eq >= 0 ? token.slice(eq + 1) : tokens[++i];
+			if (value === undefined) out.errors.push(`--${flag} expects a value`);
+			else out.values[flag] = value;
+			continue;
+		}
+		out.errors.push(`unknown flag --${flag}`);
+	}
+	return out;
+}
+
 // ═══ Rendering (pure) ════════════════════════════════════════════════════════
 
 const mermaidId = (id: string): string => `n_${id.replace(/[^A-Za-z0-9_]/g, "_")}`;
@@ -330,7 +377,9 @@ export function helpText(): string {
 		"/workflow list                                                       workflows visible from this project (project › user › package)",
 		"/workflow status [runId]                                             run.json + the last 20 events (latest run by default)",
 		"/workflow stop                                                       abort the in-flight run",
-		"/workflow graph <name|path>                                          Mermaid flowchart of nodes and depends_on",
+		"/workflow graph <name|path> [--html [--out <path>]]                  Mermaid flowchart of nodes and depends_on; --html writes .titan/plans/graph-<name>.html",
+		"/workflow schedule [list|arm <name>|disarm <name>|recipe <name>]     trigger: workflows — in-process scheduler (this session) or the orca automations recipe",
+		"/workflow export --dw <name> [--out <path>]                          pi-dynamic-workflows 3.10.1 script (JavaScript, never YAML) at .titan/plans/<name>.dw.mjs",
 		"/workflow help",
 		"Workflows live in .titan/workflows/<name>/<name>.yaml (project) or ~/.pi/titan-harness/workflows/ (user); see skill titan-workflow-authoring.",
 	].join("\n");
@@ -370,8 +419,15 @@ const runTotals = (result: RunResult): RunMeta["totals"] => {
 	return { tokens, costUsd, agents };
 };
 
+let liveRunGetter: () => { runId: string; dir: string; name: string } | undefined = () => undefined;
+/** The in-flight `/workflow run` of this process (the monitor prefers it), or undefined. */
+export function currentWorkflowRun(): { runId: string; dir: string; name: string } | undefined {
+	return liveRunGetter();
+}
+
 export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommandDeps): void {
 	let current: LiveRun | undefined;
+	liveRunGetter = () => (current ? { runId: current.runId, dir: current.dir, name: current.name } : undefined);
 
 	const setStatus = (ctx: any, text: string | undefined) => {
 		try {
@@ -530,8 +586,10 @@ export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommand
 	};
 
 	const graph = (ctx: any, rest: string) => {
-		const ref = tokenize(rest)[0];
-		if (!ref) return deps.notify(ctx, "Usage: /workflow graph <name|path>", "warning");
+		const parsed = parseFlagArgs(rest, ["html"], ["out"]);
+		const ref = parsed.bare[0];
+		if (parsed.errors.length) return deps.notify(ctx, `Not drawn: ${parsed.errors.join("; ")}\nUsage: /workflow graph <name|path> [--html [--out <path>]]`, "warning");
+		if (!ref) return deps.notify(ctx, "Usage: /workflow graph <name|path> [--html [--out <path>]]", "warning");
 		const cwd = deps.cwd(ctx);
 		const resolved = resolveWorkflow(ref, cwd);
 		if (!resolved) return deps.notify(ctx, `No workflow named ${ref}.`, "error");
@@ -542,11 +600,144 @@ export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommand
 			return deps.notify(ctx, `${resolved.path}: ${errorText(error)}`, "error");
 		}
 		if (!doc || typeof doc !== "object" || !Array.isArray((doc as WorkflowDoc).nodes)) return deps.notify(ctx, `${resolved.path}: no nodes: array to draw.`, "error");
-		deps.panel(ctx, `◆ WORKFLOW ${resolved.name} — GRAPH`, `\`\`\`mermaid\n${mermaidFor(doc as WorkflowDoc)}\n\`\`\``);
+		const mermaid = mermaidFor(doc as WorkflowDoc);
+		if (!parsed.flags.html) return deps.panel(ctx, `◆ WORKFLOW ${resolved.name} — GRAPH`, `\`\`\`mermaid\n${mermaid}\n\`\`\``);
+		const out = path.resolve(cwd, parsed.values.out ?? path.join(".titan", "plans", `graph-${resolved.name}.html`));
+		try {
+			fs.mkdirSync(path.dirname(out), { recursive: true });
+			fs.writeFileSync(out, graphHtml({ ...(doc as WorkflowDoc), name: (doc as WorkflowDoc).name ?? resolved.name }, { mermaid }), "utf8");
+		} catch (error) {
+			return deps.notify(ctx, `graph.html not written: ${errorText(error)}`, "error");
+		}
+		deps.panel(ctx, `◆ WORKFLOW ${resolved.name} — GRAPH`, `Offline inspector written: \`${out}\` — open it in a browser; click a node for its fields.\n\n\`\`\`mermaid\n${mermaid}\n\`\`\``);
+	};
+
+	// ── /workflow export --dw <name> [--out <path>] ──
+	const exportDw = (ctx: any, rest: string) => {
+		const parsed = parseFlagArgs(rest, ["dw"], ["out"]);
+		const ref = parsed.bare[0];
+		if (parsed.errors.length) return deps.notify(ctx, `Not exported: ${parsed.errors.join("; ")}\nUsage: /workflow export --dw <name> [--out <path>]`, "warning");
+		if (!parsed.flags.dw || !ref) return deps.notify(ctx, "Usage: /workflow export --dw <name> [--out <path>] (only the pi-dynamic-workflows target exists)", "warning");
+		const cwd = deps.cwd(ctx);
+		let loaded: LoadedWorkflow;
+		try {
+			loaded = loadWorkflow(ref, cwd, deps.validateContext(cwd, ctx));
+		} catch (error) {
+			return deps.notify(ctx, `Not exported: ${errorText(error)}`, "error");
+		}
+		const exported = exportDynamicWorkflow(loaded);
+		const out = path.resolve(cwd, parsed.values.out ?? path.join(".titan", "plans", `${loaded.name}.dw.mjs`));
+		try {
+			fs.mkdirSync(path.dirname(out), { recursive: true });
+			fs.writeFileSync(out, exported.script, "utf8");
+		} catch (error) {
+			return deps.notify(ctx, `Export not written: ${errorText(error)}`, "error");
+		}
+		const lines = [
+			`**${loaded.name}** → \`${out}\` (pi-dynamic-workflows 3.10.1 script; run it with \`/workflows run\` after \`/workflows save\`, or paste it as the workflow tool's script)`,
+			exported.unsupported.length ? `TODO blocks: ${exported.unsupported.join(", ")}` : "",
+			exported.warnings.length ? `**warnings**\n${exported.warnings.map((text) => `- ${text}`).join("\n")}` : "_no warnings_",
+		].filter(Boolean);
+		deps.panel(ctx, `◆ WORKFLOW ${loaded.name} — EXPORT --dw`, lines.join("\n\n"));
+	};
+
+	// ── /workflow schedule [list|arm <name>|disarm <name>|recipe <name>] ──
+	const settingsPath = deps.settingsPath ?? STACK_SETTINGS_PATH;
+	const lockRoot = deps.lockRoot ?? DEFAULT_LOCK_ROOT;
+	const triggerOf = (name: string, cwd: string): { trigger?: TriggerSpec; path?: string; error?: string } => {
+		const resolved = resolveWorkflow(name, cwd);
+		if (!resolved) return { error: `No workflow named ${name}.` };
+		try {
+			const doc = parseYaml(fs.readFileSync(resolved.path, "utf8")) as WorkflowDoc | undefined;
+			const trigger = doc && typeof doc === "object" && doc.trigger && typeof doc.trigger === "object" ? doc.trigger : undefined;
+			return { trigger, path: resolved.path };
+		} catch (error) {
+			return { error: `${resolved.path}: ${errorText(error)}` };
+		}
+	};
+	let scheduler: Scheduler | undefined;
+	let schedulerCtx: any;
+	const armedWorkflows = (cwd: string): Array<{ workflow: string; trigger: TriggerSpec }> =>
+		Object.entries(readStackSettings(settingsPath).schedules)
+			.filter(([, state]) => state.armed)
+			.map(([workflow]) => ({ workflow, trigger: triggerOf(workflow, cwd).trigger }))
+			.filter((entry): entry is { workflow: string; trigger: TriggerSpec } => !!entry.trigger);
+	const ensureScheduler = (ctx: any): Scheduler => {
+		schedulerCtx = ctx;
+		scheduler ??= createScheduler({
+			list: () => armedWorkflows(deps.cwd(schedulerCtx)),
+			lastRun: (workflow) => {
+				const at = readStackSettings(settingsPath).schedules[workflow]?.lastRun;
+				return at ? new Date(at) : undefined;
+			},
+			run: async (workflow) => {
+				if (current) throw new Error(`a workflow run is already in flight (${current.name})`);
+				await run(schedulerCtx, workflow);
+			},
+			recordRun: (workflow, at) => {
+				writeStackSettings({ schedules: { [workflow]: { lastRun: at.toISOString() } } }, settingsPath);
+			},
+			lockRoot,
+			tickMs: deps.tickMs,
+			log: (text) => deps.notify(schedulerCtx, text, "info"),
+		});
+		return scheduler;
+	};
+	const schedule = async (ctx: any, rest: string) => {
+		const tokens = tokenize(rest);
+		const verb = (tokens[0] ?? "list").toLowerCase();
+		const name = tokens[1];
+		const cwd = deps.cwd(ctx);
+		const settings = readStackSettings(settingsPath);
+		if (verb === "list") {
+			const armed = Object.entries(settings.schedules).filter(([, state]) => state.armed);
+			const rows = ["| workflow | armed | trigger | last run | next | note |", "|---|---|---|---|---|---|"];
+			const seen = new Set<string>();
+			const now = new Date();
+			for (const [workflow, state] of Object.entries(settings.schedules)) {
+				seen.add(workflow);
+				const info = triggerOf(workflow, cwd);
+				const plan = info.trigger ? schedulePlan([{ workflow, trigger: info.trigger, lastRun: state.lastRun ? new Date(state.lastRun) : undefined }], now)[0] : undefined;
+				rows.push(`| ${cell(workflow)} | ${state.armed ? "yes" : "no"} | ${cell(info.trigger ? JSON.stringify(info.trigger) : (info.error ?? "no trigger:"))} | ${cell(state.lastRun ?? "never")} | ${cell(plan?.next?.toISOString() ?? "")} | ${cell(plan?.due ? (plan.catchUp ? "due (catch-up)" : "due") : (plan?.note ?? ""))} |`);
+			}
+			for (const entry of listWorkflows(cwd)) {
+				if (seen.has(entry.name)) continue;
+				const info = triggerOf(entry.name, cwd);
+				if (!info.trigger) continue;
+				rows.push(`| ${cell(entry.name)} | no | ${cell(JSON.stringify(info.trigger))} | never | | not armed |`);
+			}
+			const tail = scheduler?.running() ? `scheduler running (tick ${deps.tickMs ?? 30_000} ms) · ${armed.length} armed · locks in \`${lockRoot}\`` : `scheduler idle · arm a workflow to start it (locks in \`${lockRoot}\`)`;
+			return deps.panel(ctx, "◆ WORKFLOW — SCHEDULE", rows.length > 2 ? `${rows.join("\n")}\n\n${tail}` : `_no trigger: workflows visible from ${cwd}_\n\n${tail}`);
+		}
+		if (verb === "arm" || verb === "disarm" || verb === "recipe") {
+			if (!name) return deps.notify(ctx, `Usage: /workflow schedule ${verb} <name>`, "warning");
+			const info = triggerOf(name, cwd);
+			if (info.error) return deps.notify(ctx, info.error, "error");
+			if (!info.trigger) return deps.notify(ctx, `${name} has no trigger: block; add trigger: { cron | every | event } to ${info.path}.`, "warning");
+			if (verb === "recipe") {
+				let recipe: string;
+				try {
+					recipe = orcaAutomationRecipe(name, info.trigger, cwd);
+				} catch (error) {
+					return deps.notify(ctx, `No recipe: ${errorText(error)}`, "error");
+				}
+				return deps.panel(ctx, `◆ WORKFLOW ${name} — SCHEDULE RECIPE`, `Run this once to fire \`/workflow run ${name}\` on its trigger without a Pi session (the precheck skips a fire while a run lock is live):\n\n\`\`\`bash\n${recipe}\n\`\`\`\n\nRemove it later with \`orca automations remove titan-${name}\`.`);
+			}
+			if (verb === "arm") {
+				writeStackSettings({ schedules: { [name]: { armed: true } } }, settingsPath);
+				const plan = schedulePlan([{ workflow: name, trigger: info.trigger, lastRun: settings.schedules[name]?.lastRun ? new Date(settings.schedules[name].lastRun!) : undefined }], new Date())[0];
+				ensureScheduler(ctx).start();
+				return deps.notify(ctx, `titan schedule: ${name} armed (${JSON.stringify(info.trigger)}) — ${plan.due ? "due now, fires on the next tick" : plan.next ? `next ${plan.next.toISOString()}` : (plan.note ?? "")}. Fires only while this session is open; /workflow schedule recipe ${name} for an Orca automation.`, "info");
+			}
+			writeStackSettings({ schedules: { [name]: { armed: false } } }, settingsPath);
+			if (scheduler && !armedWorkflows(cwd).length) scheduler.stop();
+			return deps.notify(ctx, `titan schedule: ${name} disarmed.`, "info");
+		}
+		return deps.notify(ctx, `Unknown schedule verb "${verb}". Usage: /workflow schedule [list|arm <name>|disarm <name>|recipe <name>]`, "warning");
 	};
 
 	pi.registerCommand("workflow", {
-		description: "titan workflow engine: run | validate | list | status | stop | graph | help (YAML DAGs under .titan/workflows)",
+		description: "titan workflow engine: run | validate | list | status | stop | graph | schedule | export | help (YAML DAGs under .titan/workflows)",
 		getArgumentCompletions: (prefix: string) => {
 			const items = SUBCOMMANDS.filter((verb) => verb.startsWith(prefix.trim().toLowerCase())).map((verb) => ({ value: verb, label: verb }));
 			return items.length ? items : null;
@@ -570,6 +761,10 @@ export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommand
 					return stop(ctx);
 				case "graph":
 					return graph(ctx, rest);
+				case "schedule":
+					return schedule(ctx, rest);
+				case "export":
+					return exportDw(ctx, rest);
 				case "":
 				case "help":
 					return deps.panel(ctx, "◆ WORKFLOW — HELP", `\`\`\`\n${helpText()}\n\`\`\``);

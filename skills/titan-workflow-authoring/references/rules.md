@@ -81,10 +81,27 @@ with `continue: false` terminates at the next matching tool call (Pi has no canc
 stop event). `submit_result` is exempt from hooks.
 
 ## 10. Structured output
-`output_format` is a JSON schema (or `$ref: titan://schemas/audit-verdict`). The node's
-prompt gets the schema appended; the child gets a terminating `submit_result` tool whose
-parameters are the schema; the result is validated and re-asked up to 3 times with the
-errors before the node fails. Only nodes with `output_format` may be read by `when:`.
+`output_format` is a JSON schema (or `$ref: titan://schemas/audit-verdict`). The runtime
+exports the schema to the child as `TITAN_NODE_SCHEMA` with a result path
+(`TITAN_NODE_RESULT_PATH`, under the run's `results/`), the child's narrow extension
+registers a terminating `submit_result` tool whose parameters are that schema, and the
+prompt ends with "Call submit_result exactly once with the final answer; after it, stop."
+The object the tool records is validated directly (v2). When the child answered in prose
+instead, the last JSON object in the text is parsed (v1 fallback). Either way an invalid
+answer is re-asked up to 3 times with the errors, resuming the same session, before the
+node fails. `submit_result` is added to the child's tool list even for
+`allowed_tools: []`. Only nodes with `output_format` may be read by `when:`.
+
+## 10a. Personas and mimeographs
+`persona: <name>` appends `personas/<name>.md` (project `.titan/personas/`, user
+`~/.pi/titan-harness/personas/`, then the package's eight: implementer, test-author,
+evidence-auditor, contrarian, cursor-cloud-swe, sim-user, workflow-architect, researcher)
+to the child's system prompt — a lens, bias and style, never a model name; a persona's
+own `model:`/`thinking:` override the seat but not the node's own. `mimeograph:` on a
+prompt node — `"implementer,contrarian"` or `{ personas: [...], models: [provider/id, ...],
+judge?, criteria? }` — runs the same brief once per persona × model in fresh sessions
+(callsigns `mg-1..n`), archives every answer under `artifacts/nodes/<id>/mimeograph/`, and
+an anonymous judge picks the winner (the node output). All cells failing fails the node.
 
 ## 11. Keep it small
 Ids: `^[a-z0-9][a-z0-9-_]{0,31}$`, unique. Names: `^[a-z0-9][a-z0-9-]{0,63}$`, equal to

@@ -61,7 +61,7 @@ describe("workflow directories", () => {
     expect(ctx.dir).toBe(wf);
     expect(ctx.commandDirs).toEqual(resourceRoots(wf, cwd, roots));
     expect(ctx.scriptDirs).toEqual(ctx.commandDirs);
-    expect(ctx.personaDirs).toEqual(ctx.commandDirs);
+    expect(ctx.personaDirs).toEqual([...ctx.commandDirs, packageRoot()]); // + <pkg>/personas/*.md (personas.ts)
     expect(ctx.workflowNames).toEqual([]);
     expect(resourceRoots(wf, cwd)[2].endsWith(join(".pi", "titan-harness"))).toBe(true);
     expect(resourceRoots(wf, cwd)[3]).toBe(join(packageRoot(), ".pi", "titan-harness"));

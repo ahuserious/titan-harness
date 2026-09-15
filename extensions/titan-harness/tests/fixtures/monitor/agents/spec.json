@@ -1,0 +1,34 @@
+{
+  "agentId": "spec",
+  "callsign": "rune",
+  "model": "antigravity/claude-opus-4-6",
+  "role": "architect",
+  "state": "done-verified",
+  "stateHistory": [
+    {
+      "seq": 1,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:01.000Z"
+    },
+    {
+      "seq": 11,
+      "state": "done-verified",
+      "ts": "2026-09-15T06:00:11.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 100,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.01,
+    "input": 1000,
+    "output": 100
+  }
+}

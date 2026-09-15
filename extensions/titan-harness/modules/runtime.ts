@@ -102,6 +102,8 @@ export interface AgentRun {
 	exitCode: number;
 	stopReason?: string;
 	errorMessage?: string;
+	preempted?: boolean; // the watchdog halted this child at ≥ preemptAtContextFraction (or a child compaction); settled as aborted + stopReason "preempted"
+	compactionSeen?: boolean; // a compaction_start event appeared on the child's JSON stream
 	stderr: string;
 }
 

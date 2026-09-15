@@ -1,0 +1,34 @@
+{
+  "agentId": "w11",
+  "callsign": "resuming-14",
+  "model": "antigravity/gemini-3.8-flash",
+  "role": "verifier",
+  "state": "resuming",
+  "stateHistory": [
+    {
+      "seq": 14,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:14.000Z"
+    },
+    {
+      "seq": 24,
+      "state": "resuming",
+      "ts": "2026-09-15T06:00:24.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 1400,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.14,
+    "input": 14000,
+    "output": 1400
+  }
+}

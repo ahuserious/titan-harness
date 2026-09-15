@@ -1,0 +1,22 @@
+{
+  "command": "workflow",
+  "currentPhase": "build",
+  "cwd": "/tmp/fixture-project",
+  "level": 3,
+  "phases": [
+    "plan",
+    "build",
+    "verify",
+    "ship"
+  ],
+  "projectSlug": "fixture-project-0123456789ab",
+  "runId": "run-20260915T060000Z-f1x7u3",
+  "shape": "level-3",
+  "startedAt": "2026-09-15T06:00:00.000Z",
+  "status": "running",
+  "tier": "prototype-analytics",
+  "workflow": {
+    "name": "proto-analytics-dashboard",
+    "sha256": "abababababababababababababababababababababababababababababababab"
+  }
+}

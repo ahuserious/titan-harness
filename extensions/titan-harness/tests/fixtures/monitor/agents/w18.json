@@ -1,0 +1,34 @@
+{
+  "agentId": "w18",
+  "callsign": "cancelled-21",
+  "model": "antigravity/claude-opus-4-6",
+  "role": "worker",
+  "state": "cancelled",
+  "stateHistory": [
+    {
+      "seq": 21,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:21.000Z"
+    },
+    {
+      "seq": 31,
+      "state": "cancelled",
+      "ts": "2026-09-15T06:00:31.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "xhigh",
+    "requested": "xhigh"
+  },
+  "tps": {
+    "outputTokens": 2100,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.21,
+    "input": 21000,
+    "output": 2100
+  }
+}

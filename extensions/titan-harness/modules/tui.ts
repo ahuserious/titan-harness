@@ -159,3 +159,46 @@ export const shapeCellStr = (theme: any, s: ShapeSnapshot): string => {
 	const c = (t: string) => theme.fg("accent", t);
 	return c(theme.bold("⬡ SHAPE")) + sep + c(s.shape) + sep + c(`builders ${s.builders}`) + sep + c(s.subagentCap > 0 ? `subagents ≤${s.subagentCap}` : "subagents off") + sep + c(`auditor ${s.auditor ? "on" : "off"}`) + sep + c(s.anonymize ? "callsigns only" : "models visible");
 };
+
+// ── ⌗ WATCHDOG and ◫ MONITOR rows (plan §5.5, D4) ──
+export interface WatchdogCell {
+	enabled: boolean;
+	state: string;
+	model: string;
+	inspections: number;
+	spendUsd: number;
+	findings: number;
+	stalemate: string; // "0/3"
+	onCompaction: string;
+}
+
+/** `⌗ WATCHDOG | armed · qwen-3.8-27b · halt-inspect · 2 inspections · $0.0100 · findings 1 · stalemate 0/3` */
+export function watchdogCellStr(theme: any, w: WatchdogCell): string {
+	const color = w.enabled ? (w.state === "halted-stalemate" || w.state === "failed" ? "#DC2626" : w.state === "inspecting" ? "#6366F1" : "#0D9488") : "#6B7280";
+	const sep = theme.fg("dim", " · ");
+	const label = fgHex(color, theme.bold("⌗ WATCHDOG")) + theme.fg("dim", " | ");
+	if (!w.enabled) return label + fgHex(color, "off") + sep + theme.fg("dim", "/titan-watchdog on");
+	return (
+		label +
+		fgHex(color, w.state) +
+		sep +
+		fgHex(color, shortModel(w.model)) +
+		sep +
+		fgHex(color, w.onCompaction) +
+		sep +
+		fgHex(color, `${w.inspections} inspection${w.inspections === 1 ? "" : "s"}`) +
+		sep +
+		fgHex(color, `$${w.spendUsd.toFixed(4)}`) +
+		sep +
+		fgHex(color, `findings ${w.findings}`) +
+		sep +
+		fgHex(color, `stalemate ${w.stalemate}`)
+	);
+}
+
+/** `◫ MONITOR | smoke-two · running · 1/2 agents working · verified 0/2 · /workflow-monitor` (text from modules/monitor renderBarRow). */
+export function monitorCellStr(theme: any, barRow: string, live: boolean): string {
+	const color = live ? "#2563EB" : "#64748B";
+	const body = barRow.replace(/^◫ MONITOR \| /, "");
+	return fgHex(color, theme.bold("◫ MONITOR")) + theme.fg("dim", " | ") + fgHex(color, body) + theme.fg("dim", " · /workflow-monitor");
+}

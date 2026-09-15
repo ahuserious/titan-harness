@@ -44,6 +44,8 @@
  *                    derived index).
  *   monitor          /workflow-monitor surface: "bar" | "overlay" | "split".
  *   shiftTabHintShown  the one-time "shift+tab is reserved by Pi" notify has been shown.
+ *   schedules        per-workflow trigger state for /workflow schedule: { [workflow]: { armed, lastRun? } }
+ *                    (armed = the in-process scheduler fires its `trigger:`; lastRun = ISO time of the last fire).
  *
  * UI
  *   modelBar         the belowEditor status bar.
@@ -108,6 +110,12 @@ export interface MonitorSettings {
 	mode: MonitorMode;
 }
 
+/** /workflow schedule state for one workflow (settings.schedules[workflow]). */
+export interface ScheduleState {
+	armed: boolean;
+	lastRun?: string;
+}
+
 /** What a level overwrote, kept so leaving the level (loading a plain shape) restores it. */
 export interface LevelRestore {
 	builderFanOut: number;
@@ -147,13 +155,16 @@ export interface StackSettings {
 	monitor: MonitorSettings;
 	shiftTabHintShown: boolean;
 	levelRestore: LevelRestore | null;
+	schedules: Record<string, ScheduleState>;
 }
 
 /** A settings patch: top-level keys are optional and the nested objects may be partial (they deep-merge). */
-export type StackSettingsPatch = Partial<Omit<StackSettings, "watchdog" | "store" | "monitor">> & {
+export type StackSettingsPatch = Partial<Omit<StackSettings, "watchdog" | "store" | "monitor" | "schedules">> & {
 	watchdog?: Partial<WatchdogSettings>;
 	store?: Partial<StoreSettings>;
 	monitor?: Partial<MonitorSettings>;
+	/** Per-workflow merge: a partial entry updates that workflow, `null` removes it. */
+	schedules?: Record<string, Partial<ScheduleState> | null>;
 };
 
 export const DEFAULT_STACK_SETTINGS: StackSettings = {
@@ -196,6 +207,7 @@ export const DEFAULT_STACK_SETTINGS: StackSettings = {
 	},
 	shiftTabHintShown: false,
 	levelRestore: null,
+	schedules: {},
 };
 
 export function isStackChild(): boolean {
@@ -237,7 +249,19 @@ function readMonitor(raw: unknown, d: MonitorSettings): MonitorSettings {
 	};
 }
 
-const copyDefaults = (d: StackSettings): StackSettings => ({ ...d, watchdog: { ...d.watchdog }, store: { ...d.store }, monitor: { ...d.monitor } });
+function readSchedules(raw: unknown): Record<string, ScheduleState> {
+	const out: Record<string, ScheduleState> = {};
+	if (!isMapping(raw)) return out;
+	for (const [workflow, entry] of Object.entries(raw)) {
+		if (!isMapping(entry) || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(workflow)) continue;
+		const state: ScheduleState = { armed: entry.armed === true };
+		if (typeof entry.lastRun === "string" && Number.isFinite(Date.parse(entry.lastRun))) state.lastRun = entry.lastRun;
+		out[workflow] = state;
+	}
+	return out;
+}
+
+const copyDefaults = (d: StackSettings): StackSettings => ({ ...d, watchdog: { ...d.watchdog }, store: { ...d.store }, monitor: { ...d.monitor }, schedules: { ...d.schedules } });
 
 /** Read the settings file (default: ~/.pi/agent/titan-harness.json); missing or malformed → defaults, never rewritten here. */
 export function readStackSettings(settingsPath: string = STACK_SETTINGS_PATH): StackSettings {
@@ -272,6 +296,7 @@ export function readStackSettings(settingsPath: string = STACK_SETTINGS_PATH): S
 				monitor: readMonitor(raw.monitor, d.monitor),
 				shiftTabHintShown: typeof raw.shiftTabHintShown === "boolean" ? raw.shiftTabHintShown : d.shiftTabHintShown,
 				levelRestore: readLevelRestore(raw.levelRestore),
+				schedules: readSchedules(raw.schedules),
 			};
 		}
 	} catch {
@@ -297,13 +322,19 @@ function readLevelRestore(raw: any): LevelRestore | null {
 /** Atomic merge-write (temp file + rename, mode 0600); nested objects deep-merge. Returns the new settings. */
 export function writeStackSettings(patch: StackSettingsPatch, settingsPath: string = STACK_SETTINGS_PATH): StackSettings {
 	const current = readStackSettings(settingsPath);
-	const { watchdog, store, monitor, ...flat } = patch;
+	const { watchdog, store, monitor, schedules, ...flat } = patch;
+	const mergedSchedules: Record<string, ScheduleState> = { ...current.schedules };
+	for (const [workflow, entry] of Object.entries(schedules ?? {})) {
+		if (entry === null) delete mergedSchedules[workflow];
+		else mergedSchedules[workflow] = { ...(mergedSchedules[workflow] ?? { armed: false }), ...entry };
+	}
 	const next: StackSettings = {
 		...current,
 		...flat,
 		watchdog: { ...current.watchdog, ...(watchdog ?? {}) },
 		store: { ...current.store, ...(store ?? {}) },
 		monitor: { ...current.monitor, ...(monitor ?? {}) },
+		schedules: mergedSchedules,
 	};
 	fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 	const tmp = `${settingsPath}.${process.pid}.tmp`;

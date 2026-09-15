@@ -1,0 +1,34 @@
+{
+  "agentId": "w3",
+  "callsign": "in-6",
+  "model": "antigravity/gemini-3.8-flash",
+  "role": "verifier",
+  "state": "in-review",
+  "stateHistory": [
+    {
+      "seq": 6,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:06.000Z"
+    },
+    {
+      "seq": 16,
+      "state": "in-review",
+      "ts": "2026-09-15T06:00:16.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "xhigh"
+  },
+  "tps": {
+    "outputTokens": 600,
+    "seconds": 5
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.06,
+    "input": 6000,
+    "output": 600
+  }
+}

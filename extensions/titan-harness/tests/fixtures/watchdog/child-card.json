@@ -1,0 +1,13 @@
+{
+  "customType": "subagent_watchdog_warning",
+  "details": {
+    "severity": "concern",
+    "category": "unverified-claim",
+    "summary": "The agent reports tests passing but no test log was captured",
+    "evidence": ["src/app.test.ts", "the claim appears in the last assistant message"],
+    "recommendedAction": "run the suite and attach the log",
+    "confidence": 0.8,
+    "source": "cadence",
+    "state": "warning"
+  }
+}

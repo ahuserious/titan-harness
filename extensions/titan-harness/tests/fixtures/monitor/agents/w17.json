@@ -1,0 +1,34 @@
+{
+  "agentId": "w17",
+  "callsign": "failed-20",
+  "model": "xai/grok-4.6",
+  "role": "verifier",
+  "state": "failed",
+  "stateHistory": [
+    {
+      "seq": 20,
+      "state": "queued",
+      "ts": "2026-09-15T06:00:20.000Z"
+    },
+    {
+      "seq": 30,
+      "state": "failed",
+      "ts": "2026-09-15T06:00:30.000Z"
+    }
+  ],
+  "thinking": {
+    "effective": "high",
+    "requested": "high"
+  },
+  "tps": {
+    "outputTokens": 2000,
+    "seconds": 0
+  },
+  "usage": {
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.2,
+    "input": 20000,
+    "output": 2000
+  }
+}
