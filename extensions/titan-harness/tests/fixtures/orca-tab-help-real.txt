@@ -1,0 +1,12 @@
+Usage: orca tab <command>
+
+Manage browser tabs
+
+Commands:
+  list      List open tabs
+  show      Show a tab
+  current   Print the current tab
+  switch    Switch to a tab
+  create    Create a tab
+  profile   Tab profile
+  close     Close a tab

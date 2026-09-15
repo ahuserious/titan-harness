@@ -455,7 +455,8 @@ describe("executor: retry and on_fail", () => {
     expect(text).toContain("partial diff");
     expect(text).toContain(`- artifact: ${join(h.runDir, "artifacts", "nodes", "implement.md")}`);
     expect(events(h).find((r) => r.type === "elevation.report")!.data).toMatchObject({ nodeId: "implement", action: "elevate", attempts: 2, path: report, sha256: sha256(text) });
-    expect(h.store.readRun(h.runDir).status).toBe("failed");
+    expect(h.store.readRun(h.runDir).status).toBe("reauthored"); // P4: an elevation freezes the run for re-authoring (plan §5.3 c); RunResult.status stays "failed"
+    expect(result.frozen).toMatchObject({ kind: "mechanical", nodeId: "implement", report });
     expect(h.notices.some((n) => n.level === "error" && n.text.includes("elevate →"))).toBe(true);
   });
 
@@ -648,23 +649,7 @@ describe("executor: process nodes, mcp_tool, workflow and P4 stubs", () => {
     expect(failed.nodes.w).toMatchObject({ status: "failed", attempts: 1, error: expect.stringContaining("deps.runWorkflow is absent") });
   });
 
-  test("verify / best_of / interleave / hypothesis are P4 stubs: failed, not retried, nothing called", async () => {
-    const h = harness();
-    const result = await run(h, [
-      { id: "v", verify: { runner: "kane", objective: "o" }, evidence: { require: ["screenshot"] } } as NodeDoc,
-      { id: "b", best_of: { n: 3, prompt: "p" } } as NodeDoc,
-      { id: "i", interleave: { segments: 4, prompt: "p" } } as NodeDoc,
-      { id: "h", hypothesis: { hypotheses: [{ id: "h1", claim: "c" }], decide_by: "evidence" } } as NodeDoc,
-    ]);
-    expect(result.status).toBe("failed");
-    expect(result.nodes.v.error).toBe("verify kane: not implemented until P4");
-    expect(result.nodes.b.error).toBe("best_of: not implemented until P4");
-    expect(result.nodes.i.error).toBe("interleave: not implemented until P4");
-    expect(result.nodes.h.error).toBe("hypothesis: not implemented until P4");
-    for (const id of ["v", "b", "i", "h"]) expect(result.nodes[id]).toMatchObject({ status: "failed", attempts: 1 });
-    expect(h.agentCalls).toHaveLength(0);
-    expect(h.bashCalls).toHaveLength(0);
-  });
+  // verify / best_of / interleave / hypothesis stopped being stubs in P4: see tests/runners.test.ts and tests/patterns.test.ts.
 });
 
 describe("executor: inputs, parallelism, dry run and abort", () => {

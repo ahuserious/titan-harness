@@ -30,8 +30,27 @@ import * as path from "node:path";
 import { type LedgerOrigin, appendLedger, rowFromAgentRun } from "../ledger.ts";
 import type { Thinking } from "../model-stack.ts";
 import type { RunStatus, RunStore } from "../run-store.ts";
-import { sha256 } from "../hash-chain.ts";
+import { canonicalJson, sha256 } from "../hash-chain.ts";
 import type { StackSettings } from "../stack-config.ts";
+import {
+	AUDIT_FAILURES_BEFORE_ELEVATION,
+	type EscalationKind,
+	type EvidenceStatus,
+	type Finding,
+	freezeRun,
+	isFailedVerdict,
+	isReviewedNode,
+	normalizeVerdict,
+	recordReviewFrame,
+	REVIEWER_ROLES,
+	requiredKindsFor,
+	type ReviewFrame,
+	reviewedNodeFor,
+	type Verdict,
+	type VerificationState,
+	verificationOf,
+	writeEscalationReport as writeEscalation,
+} from "./elevation.ts";
 import { THINKING_ORDER, normalizeThinking } from "../thinking.ts";
 import type { LoadedWorkflow } from "./loader.ts";
 import type { HooksDoc, JsonSchema, NodeDoc, NodeType, SlotRole, WorkflowDoc } from "./schema.ts";
@@ -130,6 +149,8 @@ export interface WorkflowRuntimeDeps {
 	resolveRole(role: SlotRole, node: NodeDoc): ResolvedRole;
 	mcpTool?(server: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
 	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
+	/** The max-reasoning model of `model`'s family for the mechanical ladder's third step (plan §5.3 b); undefined = same model. */
+	familyMax?(model: string): string | undefined;
 }
 
 export interface NodeResult {
@@ -157,6 +178,13 @@ export interface RunResult {
 	plan?: string[][];
 	/** artifacts/escalation-report.md when on_fail elevate|reauthor ended the run. */
 	escalationReport?: string;
+	/** Review-before-report (P4): the state of every reviewed (builder/worker) node that succeeded. */
+	verification?: Record<string, VerificationState>;
+	verified?: { verified: number; unverified: number; failedReview: number };
+	/** True when any reviewed node is not done-verified. */
+	unverified?: boolean;
+	/** Set when the run froze for re-authoring (run.json status "reauthored"). */
+	frozen?: { kind: EscalationKind; nodeId: string; report: string; reviewedNodeId?: string; verdict?: Verdict };
 }
 
 export interface ExecuteOptions {
@@ -214,6 +242,8 @@ export interface NodeContext {
 	timeoutMs(kind: "ai" | "process"): number;
 	notify(text: string, level?: "info" | "warning" | "error"): void;
 	log(type: string, data: Record<string, unknown>): void;
+	/** Direct dependencies that are reviewed nodes without a passing review frame (review-before-report). */
+	unverifiedUpstream(): string[];
 }
 
 export type NodeHandler = (ctx: NodeContext) => Promise<NodeOutcome>;
@@ -410,7 +440,31 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 	const agentCalls = new Map<string, number>();
 	let halt: { status: RunResult["status"]; error: string } | undefined;
 	let escalationReport: string | undefined;
+	let frozen: RunResult["frozen"];
 	let currentPhase: string | undefined;
+	// Review-before-report: the latest frame per reviewed node, its state, and failed audits per reviewed node.
+	const frames = new Map<string, ReviewFrame>();
+	const verification: Record<string, VerificationState> = {};
+	const auditFailures = new Map<string, number>();
+	const lastCallsign = new Map<string, string>();
+	const isRecordValue = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+	const stateOf = (id: string): VerificationState => verification[id] ?? verificationOf(frames.get(id), requiredKindsFor(doc, byId.get(id)!));
+	/** Evidence the verify nodes among `node`'s dependencies produced: combined status, first path, every path as an id. */
+	const evidenceFromDeps = (node: NodeDoc): { status?: EvidenceStatus; path?: string; ids: string[] } => {
+		const statuses: string[] = [];
+		const paths: string[] = [];
+		for (const dep of node.depends_on ?? []) {
+			const r = results[dep];
+			if (!r || r.type !== "verify") continue;
+			const out = isRecordValue(r.output) ? r.output : undefined;
+			if (out && typeof out.evidence === "string") statuses.push(out.evidence);
+			else statuses.push(r.status === "success" ? "matched" : "unavailable");
+			if (out && typeof out.evidencePath === "string") paths.push(out.evidencePath);
+		}
+		if (!statuses.length) return { ids: [] };
+		const status: EvidenceStatus = statuses.every((s) => s === "matched") ? "matched" : statuses.includes("unavailable") ? "unavailable" : "current-unverified";
+		return { status, path: paths[0], ids: paths };
+	};
 
 	const log = (type: string, data: Record<string, unknown>, agentId?: string): void => {
 		store.appendEvent(runDir, type, data, agentId);
@@ -456,6 +510,7 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		const requested = req.thinking ?? "";
 		const effective = THINKING_ORDER.includes(requested as Thinking) && req.model ? normalizeThinking(req.model, requested as Thinking).effective : requested;
 		const callsign = req.callsign ?? agentId;
+		lastCallsign.set(node.id, callsign);
 		store.upsertAgent(runDir, { agentId, callsign, role: req.role, model: req.model ?? "", thinking: { requested, effective }, state: "dispatched-working" });
 		log("agent.start", { nodeId: node.id, agentId, role: req.role, model: req.model, thinking: effective, tools: req.tools, context: req.context, label: req.label }, agentId);
 		let result: AgentResult;
@@ -489,7 +544,7 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		return result;
 	};
 
-	const makeContext = (node: NodeDoc, type: NodeType, attempt: number): NodeContext => {
+	const makeContext = (node: NodeDoc, type: NodeType, attempt: number, extraSubstitution: Partial<SubstitutionContext> = {}): NodeContext => {
 		const warned = new Set<string>();
 		const env: Record<string, string> = {
 			ARTIFACTS_DIR: deps.artifactsDir,
@@ -511,7 +566,7 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			results,
 			signal,
 			env,
-			substitution: (extra) => ({ ...baseSubstitution(), ...extra }),
+			substitution: (extra) => ({ ...baseSubstitution(), ...extraSubstitution, ...extra }),
 			subst: (text, mode, extra) =>
 				substitute(text, ctx.substitution(extra), mode, (ref) => {
 					// `$HOME`, `$1` in a shell body and `$5` in prose are not references; a dotted token always is
@@ -534,35 +589,57 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			timeoutMs: (kind) => (kind === "ai" ? (node.idle_timeout ?? node.timeout ?? AI_TIMEOUT_MS) : (node.timeout ?? PROCESS_TIMEOUT_MS)),
 			notify: (text, level) => deps.notify(text, level),
 			log: (type, data) => log(type, { nodeId: node.id, ...data }),
+			unverifiedUpstream: () => (node.depends_on ?? []).filter((dep) => {
+				const upstream = byId.get(dep);
+				return !!upstream && isReviewedNode(upstream) && results[dep]?.status === "success" && stateOf(dep) !== "done-verified";
+			}),
 		};
 		return ctx;
 	};
 
-	const writeEscalationReport = (node: NodeDoc, result: NodeResult, action: string): string => {
-		const body = [
-			"# Escalation report",
-			"",
-			`- workflow: ${deps.workflowId}`,
-			`- run: ${runId}`,
-			`- node: ${node.id} (${result.type})`,
-			`- verdict: ${action}`,
-			`- attempts: ${result.attempts}`,
-			`- error: ${result.error ?? "—"}`,
-			`- artifact: ${result.artifactPath ?? "—"}`,
-			`- generated: ${new Date().toISOString()}`,
-			"",
-			"## Output",
-			"",
-			"```",
-			(result.text ?? (result.output === undefined ? "" : typeof result.output === "string" ? result.output : JSON.stringify(result.output, null, 2))).trimEnd(),
-			"```",
-			"",
-		].join("\n");
-		fs.mkdirSync(deps.artifactsDir, { recursive: true, mode: 0o700 });
-		const file = path.join(deps.artifactsDir, ESCALATION_REPORT);
-		fs.writeFileSync(file, body, { mode: 0o600 });
-		log("elevation.report", { nodeId: node.id, action, attempts: result.attempts, path: file, sha256: sha256(body) });
-		return file;
+	/** The findings package + freeze (elevation.ts). Returns the report path; keeps the P3 `elevation.report` event shape. */
+	const escalate = async (node: NodeDoc, type: NodeType, final: NodeOutcome, result: NodeResult, action: string, kind: EscalationKind, verdict?: { verdict: Verdict; findings: Finding[]; reviewedNodeId?: string }): Promise<string> => {
+		const evidence = evidenceFromDeps(node);
+		const meta = final.meta ?? {};
+		const input = {
+			runId,
+			workflowId: deps.workflowId,
+			nodeId: node.id,
+			nodeType: type,
+			kind,
+			action,
+			attempts: result.attempts,
+			verdict: verdict?.verdict,
+			findings: verdict?.findings ?? [],
+			evidenceIds: evidence.ids,
+			error: result.error,
+			outputExcerpt: artifactBody(final),
+			artifactPath: result.artifactPath,
+			level: doc.titan?.level,
+			tier: node.tier ?? doc.titan?.tier,
+			reviewedNodeId: verdict?.reviewedNodeId,
+			iterations: typeof meta.iterations === "number" ? meta.iterations : undefined,
+			ladder: Array.isArray(meta.ladder) ? (meta.ladder as string[]) : undefined,
+		};
+		const written = writeEscalation(deps.artifactsDir, input);
+		log("elevation.report", { nodeId: node.id, action, kind, attempts: result.attempts, path: written.path, sha256: written.sha256, verdict: verdict?.verdict, reviewedNodeId: verdict?.reviewedNodeId });
+		freezeRun(store, runDir, { ...input, report: written.path });
+		frozen = { kind, nodeId: node.id, report: written.path, reviewedNodeId: verdict?.reviewedNodeId, verdict: verdict?.verdict };
+		// The P4 stand-in for `/create-workflow --from-findings` (P7): a `cancel` node named `reauthor`
+		// runs with $REJECTION_REASON = the report path, so the workflow author sees the hand-off.
+		const standIn = byId.get("reauthor");
+		if (standIn && nodeType(standIn) === "cancel" && !results[standIn.id]) {
+			const ts = new Date().toISOString();
+			log("node.start", { nodeId: standIn.id, type: "cancel", attempt: 1, standIn: true });
+			let outcome: NodeOutcome;
+			try {
+				outcome = await HANDLERS.cancel(makeContext(standIn, "cancel", 1, { rejectionReason: written.path }));
+			} catch (error) {
+				outcome = { status: "cancelled", output: undefined, error: asString(error) };
+			}
+			finish(standIn, { nodeId: standIn.id, type: "cancel", status: "cancelled", output: outcome.output, text: outcome.text, startedAt: ts, endedAt: new Date().toISOString(), attempts: 1, error: outcome.error ?? outcome.cancelRun });
+		}
+		return written.path;
 	};
 
 	const runNode = async (node: NodeDoc, layerIndex: number): Promise<void> => {
@@ -618,7 +695,45 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			}
 			break;
 		}
-		const final = outcome ?? { status: "failed" as const, output: undefined, error: "node never ran" };
+		let final: NodeOutcome = outcome ?? { status: "failed" as const, output: undefined, error: "node never ran" };
+		// Review-before-report: a reviewer's verdict becomes a frame on the node it reviews; a
+		// failed verdict fails the reviewer node itself (never retried) so `on_fail` applies.
+		let verdictFailure: { verdict: Verdict; findings: Finding[]; reviewedNodeId?: string } | undefined;
+		if (final.status === "success") {
+			const verdict = normalizeVerdict(final.output);
+			const reviewer = !!verdict && ((!!node.role && REVIEWER_ROLES.includes(node.role)) || typeof (node as { reviews?: string }).reviews === "string");
+			if (verdict && reviewer) {
+				final = { ...final, output: { ...(final.output as Record<string, unknown>), verdict: verdict.verdict, status: verdict.verdict } };
+				const reviewedNodeId = reviewedNodeFor(doc, node);
+				const reviewedNode = reviewedNodeId ? byId.get(reviewedNodeId) : undefined;
+				const evidence = evidenceFromDeps(node);
+				const frame: ReviewFrame = {
+					reviewerNodeId: node.id,
+					reviewedNodeId: reviewedNodeId ?? "",
+					reviewerCallsign: lastCallsign.get(node.id),
+					verdict: verdict.verdict,
+					verdictHash: sha256(canonicalJson(final.output)),
+					evidencePath: evidence.path,
+					evidenceStatus: evidence.status,
+					reviewerLedgerRow: (agentCalls.get(node.id) ?? 0) > 0,
+					ts: new Date().toISOString(),
+					summary: verdict.summary,
+					findings: verdict.findings,
+				};
+				const state = verificationOf(frame, reviewedNode ? requiredKindsFor(doc, reviewedNode) : []);
+				recordReviewFrame(store, runDir, frame, state, deps.artifactsDir);
+				if (reviewedNodeId) {
+					frames.set(reviewedNodeId, frame);
+					verification[reviewedNodeId] = state;
+				}
+				if (isFailedVerdict(verdict.verdict)) {
+					const key = reviewedNodeId ?? node.id;
+					auditFailures.set(key, (auditFailures.get(key) ?? 0) + 1);
+					verdictFailure = { verdict: verdict.verdict, findings: verdict.findings, reviewedNodeId };
+					final = { ...final, status: "failed", error: `audit verdict ${verdict.verdict}: ${verdict.summary || "no summary"}`, retryable: false };
+				}
+			}
+		}
 		const endedAt = new Date().toISOString();
 		const result: NodeResult = { nodeId: node.id, type, status: final.status, output: final.output, text: final.text, startedAt, endedAt, attempts: attempt, error: final.error, usage: final.usage, sessionRef: final.sessionRef };
 		const body = artifactBody(final);
@@ -641,15 +756,23 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			controller.abort(new AbortError(halt.error));
 			return;
 		}
-		if (final.status === "failed" && node.on_fail && !halt) {
-			const action = node.on_fail.action;
+		if (final.status === "failed" && !halt) {
+			const action = node.on_fail?.action;
+			const failures = verdictFailure ? (auditFailures.get(verdictFailure.reviewedNodeId ?? node.id) ?? 0) : 0;
+			// The third failed audit for the same reviewed node elevates even without on_fail (plan §5.3 c).
+			const thirdAudit = !!verdictFailure && failures >= AUDIT_FAILURES_BEFORE_ELEVATION;
 			if (action === "cancel") {
 				halt = { status: "cancelled", error: `cancelled by on_fail of ${node.id}: ${final.error ?? "failed"}` };
 				controller.abort(new AbortError(halt.error));
-			} else if (action === "elevate" || action === "reauthor") {
-				escalationReport = writeEscalationReport(node, result, action);
-				halt = { status: "failed", error: `elevation: ${node.id} failed ${attempt} times` };
-				deps.notify(`${node.id}: ${action} → ${escalationReport}`, "error");
+			} else if (action === "elevate" || action === "reauthor" || thirdAudit) {
+				const kind: EscalationKind = thirdAudit ? "elevate" : verdictFailure ? "audit" : type === "loop" || action === "elevate" ? "mechanical" : "audit";
+				const label = action ?? "freeze";
+				escalationReport = await escalate(node, type, final, result, label, kind, verdictFailure);
+				halt = {
+					status: "failed",
+					error: verdictFailure ? `repairing-workflow: ${node.id} audit verdict ${verdictFailure.verdict}${thirdAudit ? ` (failed audit ${failures}/${AUDIT_FAILURES_BEFORE_ELEVATION} → elevate)` : ""} → ${escalationReport}` : `elevation: ${node.id} failed ${attempt} times`,
+				};
+				deps.notify(`${node.id}: ${label} → ${escalationReport}`, "error");
 				controller.abort(new AbortError(halt.error));
 			}
 		}
@@ -691,9 +814,31 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 	const status: RunResult["status"] = halt?.status ?? (firstFailure ? "failed" : "completed");
 	const error = halt?.error ?? (firstFailure ? `${firstFailure.nodeId}: ${firstFailure.error ?? "failed"}` : undefined);
 	const returns = doc.returns && results[doc.returns]?.status === "success" ? outputs[doc.returns] : undefined;
-	log("workflow.end", { status, error, returns: doc.returns, nodes: Object.fromEntries(Object.values(results).map((r) => [r.nodeId, r.status])) });
-	patchRun({ status: runStatusFor(status), endedAt: new Date().toISOString() });
+	// Review-before-report: every reviewed node that succeeded gets a state; no frame → done-unverified.
+	const verified = { verified: 0, unverified: 0, failedReview: 0 };
+	for (const node of doc.nodes) {
+		if (!isReviewedNode(node) || results[node.id]?.status !== "success") continue;
+		const state = (verification[node.id] ??= verificationOf(frames.get(node.id), requiredKindsFor(doc, node)));
+		if (state === "done-verified") verified.verified++;
+		else if (state === "failed-review") verified.failedReview++;
+		else verified.unverified++;
+		if (!frames.has(node.id)) {
+			try {
+				store.upsertAgent(runDir, { agentId: node.id, state });
+			} catch {
+				/* bash/script nodes have no agent record */
+			}
+		}
+	}
+	log("workflow.end", { status, error, returns: doc.returns, nodes: Object.fromEntries(Object.values(results).map((r) => [r.nodeId, r.status])), verification, frozen: frozen?.kind });
+	patchRun({ status: frozen ? "reauthored" : runStatusFor(status), endedAt: new Date().toISOString() });
 	const result: RunResult = { runId, status, nodes: results, returns, error };
 	if (escalationReport) result.escalationReport = escalationReport;
+	if (Object.keys(verification).length || verified.verified + verified.unverified + verified.failedReview > 0) {
+		result.verification = verification;
+		result.verified = verified;
+		result.unverified = verified.unverified + verified.failedReview > 0;
+	}
+	if (frozen) result.frozen = frozen;
 	return result;
 }

@@ -1,0 +1,1 @@
+{"ops":[{"op":"write","table":"signups","rows":3,"ts":"2026-09-15T05:55:00.000Z"},{"op":"read","table":"signups","rows":3,"ts":"2026-09-15T05:55:01.000Z"}],"writes":3,"reads":3,"roundTrip":true}

@@ -1,0 +1,17 @@
+# example content preset — copy to .titan/presets/content/<key>.yaml and edit (README.md explains the fields)
+key: example-saas-blog-post-founder
+industry: saas
+content_type: blog-post
+preference_profile:
+  voice: founder, first person, concrete
+  tone: direct, no hype, no exclamation marks
+  banned_claims: ["guaranteed", "the best", "#1", "10x"]
+  style_guide_ref: .titan/terraform/style.md
+rubric:
+  - { criterion: accuracy, threshold: 4 }
+  - { criterion: clarity, threshold: 4 }
+  - { criterion: brand-fit, threshold: 3 }
+  - { criterion: citations, threshold: 4 }
+reviewers:
+  human_min: 3
+  roles: [editor, founder, legal]

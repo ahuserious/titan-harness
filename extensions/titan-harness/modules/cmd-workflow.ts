@@ -265,20 +265,30 @@ const clip = (text: string, max: number): string => (text.length <= max ? text :
 const jsonBlock = (value: unknown): string => `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
 
 const RESULT_GLYPH: Record<RunResult["status"], string> = { completed: "✓", failed: "✗", cancelled: "⊘", paused: "⏸" };
+const VERIFICATION_GLYPH: Record<string, string> = { "done-verified": "✓", "done-unverified": "○", "failed-review": "✗", "": "" };
 
 /** The final markdown panel: a node table (status/attempts/duration), the `returns` value, the artifacts dir, the error. */
 export function formatRunPanel(result: RunResult, opts: { name?: string; artifactsDir?: string; elapsedMs?: number; inputs?: Record<string, unknown> } = {}): string {
 	const head = [`**${opts.name ?? "workflow"}** · \`${result.runId}\` · ${RESULT_GLYPH[result.status] ?? "•"} ${result.status}${opts.elapsedMs !== undefined ? ` · ${fmtSecs(opts.elapsedMs)}` : ""}`];
 	if (opts.inputs && Object.keys(opts.inputs).length) head.push(`inputs: \`${clip(JSON.stringify(opts.inputs), 200)}\``);
+	// Review-before-report (P4): when the run carries verification states, the headline counts
+	// them and the table shows each reviewed node's state — done-unverified is never folded into verified.
+	const verification = result.verification;
+	if (verification && result.verified) {
+		const total = result.verified.verified + result.verified.unverified + result.verified.failedReview;
+		head[0] += ` · verified ${result.verified.verified}/${total}${result.verified.failedReview ? ` · failed-review ${result.verified.failedReview}` : ""}`;
+	}
 	const nodes = Object.values(result.nodes ?? {}).sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.nodeId.localeCompare(b.nodeId));
-	const table = ["| node | type | status | attempts | duration | note |", "|---|---|---|---|---|---|"];
+	const table = verification ? ["| node | type | status | verified | attempts | duration | note |", "|---|---|---|---|---|---|---|"] : ["| node | type | status | attempts | duration | note |", "|---|---|---|---|---|---|"];
 	for (const node of nodes) {
 		const ms = msBetween(node.startedAt, node.endedAt);
 		const note = node.error ? clip(node.error, 120) : node.status === "success" && node.usage ? `${node.usage.tokensIn + node.usage.tokensOut} tok · $${node.usage.costUsd.toFixed(4)}` : "";
-		table.push(`| ${cell(node.nodeId)} | ${TYPE_GLYPH[node.type] ?? ""} ${cell(node.type)} | ${STATUS_GLYPH[node.status] ?? ""} ${cell(node.status)} | ${node.attempts} | ${ms === undefined ? "" : fmtSecs(ms)} | ${cell(note)} |`);
+		const verifiedCell = verification ? ` ${cell(VERIFICATION_GLYPH[verification[node.nodeId] ?? ""] ?? "")}${verification[node.nodeId] ? ` ${cell(verification[node.nodeId])}` : ""} |` : "";
+		table.push(`| ${cell(node.nodeId)} | ${TYPE_GLYPH[node.type] ?? ""} ${cell(node.type)} | ${STATUS_GLYPH[node.status] ?? ""} ${cell(node.status)} |${verifiedCell} ${node.attempts} | ${ms === undefined ? "" : fmtSecs(ms)} | ${cell(note)} |`);
 	}
 	const sections = [head.join("\n"), nodes.length ? table.join("\n") : "_no nodes ran_"];
-	if (result.returns !== undefined) sections.push(`**returns**\n${jsonBlock(result.returns)}`);
+	if (result.returns !== undefined) sections.push(`**returns**\n${jsonBlock(result.returns)}${result.unverified ? "\n_unverified: at least one reviewed node has no passing review frame_" : ""}`);
+	if (result.frozen) sections.push(`**frozen:** ${result.frozen.kind} at ${result.frozen.nodeId}${result.frozen.verdict ? ` (verdict ${result.frozen.verdict})` : ""} → \`${result.frozen.report}\` · run.json status reauthored`);
 	if (result.error) sections.push(`**error:** ${result.error}`);
 	if (opts.artifactsDir) sections.push(`artifacts: \`${opts.artifactsDir}\``);
 	return sections.join("\n\n");
@@ -422,16 +432,21 @@ export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommand
 		setStatus(ctx, `workflow ${loaded.name}: 0/${total} nodes · starting…`);
 		let result: RunResult | undefined;
 		try {
+			// titan.budget.max_concurrent_children caps this run's layer parallelism; /stack concurrency stays the ceiling.
+			const docCap = doc.titan?.budget?.max_concurrent_children;
+			const maxParallel = typeof docCap === "number" && docCap > 0 ? Math.min(docCap, rt.settings.maxConcurrentChildren) : undefined;
 			result = await executeWorkflow(loaded, rt, {
 				inputs: parsed.inputs,
 				arguments: parsed.arguments,
+				...(maxParallel ? { maxParallel } : {}),
 				onNode: (node) => {
 					done += 1;
 					setStatus(ctx, `workflow ${loaded.name}: ${done}/${total} nodes · ${STATUS_GLYPH[node.status] ?? ""} ${node.nodeId} ${node.status} · ${fmtSecs(Date.now() - startedAt)}`);
 				},
 			});
 			const elapsedMs = Date.now() - startedAt;
-			const patch = { status: RUN_STATUS[result.status] ?? "failed", endedAt: new Date().toISOString(), totals: runTotals(result), result } as Partial<RunMeta> & { result: RunResult };
+			// A frozen run keeps `reauthored` (the executor wrote it) so the monitor and /create-workflow --elevate see the freeze.
+			const patch = { status: result.frozen ? "reauthored" : (RUN_STATUS[result.status] ?? "failed"), endedAt: new Date().toISOString(), totals: runTotals(result), result } as Partial<RunMeta> & { result: RunResult };
 			store.updateRun(dir, patch);
 			store.appendEvent(dir, "run.end", { status: result.status, error: result.error ?? null, elapsedMs });
 			deps.panel(ctx, `◆ WORKFLOW ${loaded.name} — ${result.status.toUpperCase()}`, formatRunPanel(result, { name: loaded.name, artifactsDir: rt.artifactsDir, elapsedMs, inputs: parsed.inputs }));

@@ -1,0 +1,14 @@
+Usage: orca tab <command>
+
+Manage and drive browser tabs
+
+Commands:
+  list        List open tabs
+  create      Create a tab
+  close       Close a tab
+  goto        Navigate a tab to a URL
+  snapshot    Print the accessibility snapshot
+  click       Click an element
+  fill        Fill an input
+  screenshot  Save a screenshot (--path)
+  eval        Evaluate JavaScript in the page

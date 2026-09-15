@@ -1,0 +1,6 @@
+{"type":"run_start","run_id":"kr-7f3a","objective":"Log in and reach the dashboard","device":"default","ts":"2026-09-15T05:50:01.000Z"}
+{"type":"step","index":1,"action":"navigate","target":"https://app.example.test/login","status":"ok","screenshot":".testmuai/evidence/kr-7f3a/step-1.png"}
+{"type":"step","index":2,"action":"fill","target":"#email","status":"ok"}
+{"type":"step","index":3,"action":"click","target":"button[type=submit]","status":"ok","screenshot":".testmuai/evidence/kr-7f3a/step-3.png"}
+{"type":"assertion","text":"Dashboard heading visible","status":"passed"}
+{"type":"run_end","status":"passed","final_state":"Dashboard visible for user qa@example.test","test_url":"https://kaneai.testmu.ai/runs/kr-7f3a","steps":3,"ts":"2026-09-15T05:50:19.000Z"}

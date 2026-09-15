@@ -37,6 +37,11 @@ export interface AgentCallOptions {
 	resume?: string;
 	label?: string;
 	role?: SlotRole;
+	/** Ladder overrides (plan §5.3 b): win over the node's own model/thinking for this call. */
+	model?: string;
+	thinking?: string;
+	/** Force a fresh session for this call (ladder step 3), whatever `context`/`resume` say. */
+	freshSession?: boolean;
 }
 
 export interface AgentCallResult extends AgentResult {
@@ -89,17 +94,21 @@ export function buildAgentRequest(ctx: NodeContext, prompt: string, opts: AgentC
 	const role = opts.role ?? node.role ?? DEFAULT_ROLE;
 	const resolved = ctx.deps.resolveRole(role, node);
 	const callsign = node.callsign && node.callsign !== "pool" ? node.callsign : resolved.callsign;
+	// Review-before-report: an architect sees builder output only through review frames, so an
+	// upstream builder/worker output without a passing frame is named as UNVERIFIED in the prompt.
+	const unverified = role === "architect" && typeof ctx.unverifiedUpstream === "function" ? ctx.unverifiedUpstream() : [];
+	const lead = unverified.length && !prompt.startsWith("[titan] upstream output") ? `[titan] upstream output ${unverified.join(", ")} is UNVERIFIED (no review frame)\n\n` : "";
 	return {
 		nodeId: node.id,
 		role,
 		callsign,
-		model: node.model ?? resolved.model,
-		thinking: node.thinking ?? resolved.thinking,
-		prompt: opts.outputSchema ? `${prompt}${schemaPromptSuffix(opts.outputSchema)}` : prompt,
+		model: opts.model ?? node.model ?? resolved.model,
+		thinking: opts.thinking ?? node.thinking ?? resolved.thinking,
+		prompt: `${lead}${prompt}${opts.outputSchema ? schemaPromptSuffix(opts.outputSchema) : ""}`,
 		systemPrompt: node.system_prompt ?? resolved.systemPrompt,
 		appendSystemPrompts: [...(resolved.appendSystemPrompts ?? []), ...listOf(node.append_system_prompt)],
 		tools: resolveTools(node, role, resolved.tools),
-		context: resolveContext(ctx, opts),
+		context: opts.freshSession ? "fresh" : resolveContext(ctx, opts),
 		hooks: node.hooks,
 		outputSchema: opts.outputSchema,
 		timeoutMs: ctx.timeoutMs("ai"),

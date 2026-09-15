@@ -12,6 +12,8 @@
  *   artifacts/nodes/<id>.md           node output, plus <id>.meta.json {sha256, bytes, ts, …}
  *   blobs/<sha256>                    copies of harvested files, named by content
  *   evidence/<nodeId>/evidence.json   canonical JSON, plus a sha256sum-style sidecar
+ *   notebook.jsonl                    chained research notes (appendNotebook / readNotebook)
+ *   hypotheses.jsonl                  chained hypothesis links + decisions (appendHypothesisLink / readHypothesisLinks)
  *   <root>/index.jsonl                append-only run index {runId, projectSlug, workflow, startedAt}
  *
  * Single writer = the host process; children never write here. Every JSON file is
@@ -21,12 +23,16 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendChained, canonicalJson, canonicalValue, chainTail, type ChainRow, sha256, sha256File } from "./hash-chain.ts";
+import { appendChained, canonicalJson, canonicalValue, chainTail, type ChainRow, readChain, sha256, sha256File } from "./hash-chain.ts";
 
 /** Where runs live unless a RunStore is given another root. */
 export const DEFAULT_RUN_ROOT = path.join(os.homedir(), ".pi", "titan-harness", "runs");
 export const RUN_FILE = "run.json";
 export const EVENTS_FILE = "events.jsonl";
+/** Research notebook rows (plan §6.2): chained `{seq, ts, runId, type: "note"|"link"|"decision", nodeId, …}`. */
+export const NOTEBOOK_FILE = "notebook.jsonl";
+/** Hypothesis evidence links and decisions (plan A11): chained like the notebook, one row per link or decision. */
+export const HYPOTHESES_FILE = "hypotheses.jsonl";
 export const INDEX_FILE = "index.jsonl";
 
 export const RUN_STATUSES = ["pending", "running", "paused", "reauthored", "completed", "failed", "aborted", "stalemate"] as const;
@@ -319,7 +325,54 @@ export class RunStore {
 		return runs;
 	}
 
+	/** Append a chained notebook row (`type` note | link | decision; `runId` from run.json). */
+	appendNotebook(dir: string, row: NotebookRow): ChainRow {
+		return appendChained(path.join(dir, NOTEBOOK_FILE), { runId: this.runIdOf(dir), ...row });
+	}
+
+	/** Append a chained hypothesis row: an evidence link or a decision (`runId` from run.json). */
+	appendHypothesisLink(dir: string, row: HypothesisRow): ChainRow {
+		return appendChained(path.join(dir, HYPOTHESES_FILE), { runId: this.runIdOf(dir), ...row });
+	}
+
 	private runIdOf(dir: string): string {
 		return this.runIds.get(dir) ?? this.readRun(dir).runId;
 	}
+}
+
+/** A notebook row before chaining. */
+export interface NotebookRow {
+	type: "note" | "link" | "decision";
+	nodeId: string;
+	[k: string]: unknown;
+}
+
+/** A hypothesis row before chaining: `link` rows carry the relation, `decision` rows the resolved id and tallies. */
+export type HypothesisRelation = "supports" | "challenges" | "inconclusive" | "context";
+export interface HypothesisRow {
+	type: "link" | "decision";
+	nodeId: string;
+	hypothesis?: string | null;
+	relation?: HypothesisRelation;
+	evidence?: string;
+	weight?: number;
+	source?: string;
+	rule?: string;
+	tallies?: Record<string, unknown>;
+	[k: string]: unknown;
+}
+
+/** Every notebook row of a run (empty when the file is absent). */
+export function readNotebook(dir: string): ChainRow[] {
+	return readChainOrEmpty(path.join(dir, NOTEBOOK_FILE));
+}
+
+/** Every hypothesis row of a run (empty when the file is absent). */
+export function readHypothesisLinks(dir: string): ChainRow[] {
+	return readChainOrEmpty(path.join(dir, HYPOTHESES_FILE));
+}
+
+function readChainOrEmpty(file: string): ChainRow[] {
+	if (!fs.existsSync(file)) return [];
+	return readChain(file);
 }

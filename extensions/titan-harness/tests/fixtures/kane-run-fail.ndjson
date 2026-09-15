@@ -1,0 +1,5 @@
+{"type":"run_start","run_id":"kr-9b21","objective":"Log in and reach the dashboard","device":"iphone-15","ts":"2026-09-15T05:51:01.000Z"}
+{"type":"step","index":1,"action":"navigate","target":"https://app.example.test/login","status":"ok"}
+{"type":"step","index":2,"action":"fill","target":"#email","status":"ok"}
+{"type":"step","index":3,"action":"click","target":"button[type=submit]","status":"error","error":"element not clickable at (120, 640)"}
+{"type":"run_end","status":"failed","final_state":"Stuck on the login form: submit button hidden behind the cookie banner","test_url":"https://kaneai.testmu.ai/runs/kr-9b21","steps":3,"ts":"2026-09-15T05:51:30.000Z"}

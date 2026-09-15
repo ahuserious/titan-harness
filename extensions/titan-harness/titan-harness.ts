@@ -2004,6 +2004,12 @@ export default function (pi: ExtensionAPI) {
 			settings: readStackSettings(),
 			runChild,
 			resolveRole: resolveWorkflowRole,
+			// Ladder step 2: the strongest usable model of the same family (never a cross-family jump).
+			familyMax: (model: string) => {
+				const family = modelFamily(model);
+				const pool = [...BUILDER_POOL, ...AUDITOR_POOL].filter((candidate) => modelFamily(candidate) === family && modelUsable(candidate));
+				return pool[0] && pool[0] !== model ? pool[0] : undefined;
+			},
 			ui: workflowUi(ctx),
 			slotFor: workflowSlotFor,
 			onRun: (run) => {

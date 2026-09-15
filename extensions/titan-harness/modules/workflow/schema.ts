@@ -178,6 +178,8 @@ export interface NodeBase {
 	skills?: string[];
 	subagents?: { enabled?: boolean; tools?: string[]; cap?: number };
 	output_type?: string;
+	/** Reviewer nodes (auditor/verifier/judge): the node this one reviews; default = the nearest builder/worker ancestor. */
+	reviews?: string;
 }
 
 export interface LoopSpec {
@@ -195,6 +197,8 @@ export interface ApprovalSpec {
 	capture_response?: boolean;
 	on_reject?: { prompt: string; max_attempts?: number };
 	preset_key?: string;
+	/** With preset_key: the content the receipt hashes (`$draft.output`); default = the message itself. */
+	content?: string;
 }
 
 export interface VerifySpec {
@@ -258,7 +262,7 @@ export const TITAN_BUDGET_KEYS = new Set(["usd", "tokens", "max_concurrent_child
 export const NODE_BASE_KEYS = new Set([
 	"id", "depends_on", "when", "trigger_rule", "idle_timeout", "timeout", "retry", "phase", "role", "callsign", "persona", "mimeograph", "tier",
 	"evidence", "review", "on_fail", "watchdog", "budget", "context_budget", "isolation", "anonymize", "model", "thinking", "context", "output_format",
-	"allowed_tools", "denied_tools", "system_prompt", "append_system_prompt", "hooks", "mcp", "skills", "subagents", "output_type",
+	"allowed_tools", "denied_tools", "system_prompt", "append_system_prompt", "hooks", "mcp", "skills", "subagents", "output_type", "reviews",
 ]);
 /** Keys that only mean something on an AI node — a loader warning when they sit on bash/script (Archon does the same). */
 export const AI_ONLY_NODE_KEYS = new Set(["model", "thinking", "context", "output_format", "allowed_tools", "denied_tools", "system_prompt", "append_system_prompt", "hooks", "mcp", "skills", "subagents"]);
@@ -268,7 +272,7 @@ export const RETRY_KEYS = new Set(["max_attempts", "delay_ms"]);
 export const ON_FAIL_KEYS = new Set(["action", "max"]);
 export const SUBAGENTS_KEYS = new Set(["enabled", "tools", "cap"]);
 export const LOOP_KEYS = new Set(["prompt", "until", "until_bash", "max_iterations", "fresh_context", "interactive", "gate_message"]);
-export const APPROVAL_KEYS = new Set(["message", "capture_response", "on_reject", "preset_key"]);
+export const APPROVAL_KEYS = new Set(["message", "capture_response", "on_reject", "preset_key", "content"]);
 export const ON_REJECT_KEYS = new Set(["prompt", "max_attempts"]);
 export const BEST_OF_KEYS = new Set(["n", "judge", "criteria", "prompt"]);
 export const INTERLEAVE_KEYS = new Set(["segments", "by", "synthesize", "reauthor", "prompt"]);

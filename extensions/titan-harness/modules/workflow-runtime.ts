@@ -260,6 +260,8 @@ export interface WorkflowRuntimeHost {
 	onRun?(run: AgentRun, req: AgentRequest): void;
 	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
 	mcpTool?: WorkflowRuntimeDeps["mcpTool"];
+	/** The max-reasoning model of a model's family (the mechanical ladder's step 2); undefined → stay on the model. */
+	familyMax?(model: string): string | undefined;
 	signal?: AbortSignal;
 	scripts?: { bun?: string; uv?: string };
 }
@@ -315,5 +317,6 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 	};
 	if (host.mcpTool) deps.mcpTool = host.mcpTool;
 	if (host.runWorkflow) deps.runWorkflow = host.runWorkflow;
+	if (host.familyMax) deps.familyMax = host.familyMax;
 	return deps;
 }
