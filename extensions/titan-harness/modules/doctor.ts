@@ -13,6 +13,7 @@
  * copied file-to-file and never returned or printed. The command handler confirms
  * with the user before calling it.
  */
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -55,6 +56,26 @@ export const DOCTOR_TOOLS: Array<{ tool: string; purpose: string; action: string
 	{ tool: "uvx", purpose: "Python mcp2cli named links", action: "install uv" },
 	{ tool: "gh", purpose: "terraform GitHub connector", action: "install gh" },
 ];
+
+/** The three mcp2cli flavours on this machine: titan's script path, whether the Python one is reachable (binary or uvx), whether the Rust one is on PATH. */
+export function mcp2cliFlavours(): { titan?: string; python: boolean; rust: boolean } {
+	const here = path.dirname(new URL(import.meta.url).pathname);
+	const script = path.resolve(here, "..", "..", "..", "scripts", "mcp2cli.mjs");
+	const titan = fs.existsSync(script) ? script : undefined;
+	let python = !!commandOnPath("uvx");
+	let rust = false;
+	const binary = commandOnPath("mcp2cli");
+	if (binary) {
+		try {
+			const help = spawnSync(binary, ["--help"], { encoding: "utf8", timeout: 5_000 }).stdout ?? "";
+			if (/link create|config init/.test(help)) rust = true;
+			else python = true;
+		} catch {
+			/* a binary that will not answer --help counts as neither */
+		}
+	}
+	return { titan, python, rust };
+}
 
 /** Credential NAMES the plan references; only presence is reported. */
 export const DOCTOR_ENV_NAMES = ["INFRANODUS_API_KEY", "CURSOR_API_KEY", "MOMENTIC_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"];
@@ -195,6 +216,19 @@ export function runDoctor(opts: DoctorOptions = {}): DoctorReport {
 		const where = commandOnPath(entry.tool);
 		items.push({ group: "tools", key: entry.tool, label: entry.tool, status: where ? "ready" : "vacant", detail: where ? `${where} · ${entry.purpose}` : `not on PATH · ${entry.purpose}`, action: where ? undefined : entry.action });
 	}
+	// mcp2cli comes in three flavours (PRD v0.9 R5): titan's own script, the Python one (uvx), the Rust one the Grok plugin uses.
+	try {
+		const flavours = mcp2cliFlavours();
+		const ready = flavours.titan ? "ready" : "vacant";
+		items.push({
+			group: "tools",
+			key: "mcp2cli",
+			label: "mcp2cli",
+			status: ready,
+			detail: `titan ${flavours.titan ? `✓ ${flavours.titan}` : "○ scripts/mcp2cli.mjs missing"} · python (uvx) ${flavours.python ? "✓" : "○"} · rust ${flavours.rust ? "✓" : "○"}`,
+			action: flavours.titan ? undefined : "reinstall titan-harness (scripts/mcp2cli.mjs ships with the package)",
+		});
+	} catch {}
 	for (const name of DOCTOR_ENV_NAMES) {
 		const present = typeof env[name] === "string" && env[name]!.trim().length > 0;
 		items.push({ group: "credentials", key: name, label: name, status: present ? "ready" : "vacant", detail: present ? "present in the environment (value not read)" : "absent from the environment", action: present ? undefined : `export ${name} before launching pi, or add it to the relevant MCP entry` });

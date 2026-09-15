@@ -54,6 +54,9 @@ import { registerReadonlyCommands } from "./modules/cmd-readonly.ts";
 import { currentWorkflowRun, registerWorkflowCommands } from "./modules/cmd-workflow.ts";
 import { createWorkflowRuntime, findBinary, runProcess } from "./modules/workflow-runtime.ts";
 import { registerMonitorCommand } from "./modules/cmd-monitor.ts";
+import { registerSidebarCommand } from "./modules/cmd-sidebar.ts";
+import { registerTitanConfigCommand } from "./modules/cmd-titan-config.ts";
+import { applyRowChange, buildSettingsModel, handleSettingsKey, type PanelColorRole, type PanelDeps, renderSettingsPanel, type SettingsModel } from "./modules/settings-panel.ts";
 import { renderBarRow } from "./modules/monitor/frame.ts";
 import { buildRunView, latestRuns, type RunView } from "./modules/monitor/rows.ts";
 import { createWatchdog, type Watchdog, type WatchdogDeps } from "./modules/watchdog/index.ts";
@@ -996,11 +999,21 @@ export default function (pi: ExtensionAPI) {
 	let footerVisible = readStackSettings().modelBar; // persisted through /stack and /titan on|off
 	let footerCtx: any; // the session ctx — the widget needs its ui + modelRegistry + live model
 	let footerTicker: ReturnType<typeof setInterval> | undefined;
+	let footerTui: any; // captured from the widget factory (pi-tui TUI) for requestRender()
 	// Assigned next to describeShape(); stub so session_start / SHAPE_HOOK can call it before that line.
 	let paintShapeStatus: (ctx?: any) => void = () => {};
 
+	/** TITAN_DEBUG_LOG=<file>: append one line per bar tick / render error (diagnostics only, off by default). */
+	const debugLog = (line: string) => {
+		const file = process.env.TITAN_DEBUG_LOG;
+		if (!file) return;
+		try {
+			fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`);
+		} catch {}
+	};
 	const renderFooterWidget = () => {
 		const ctx = footerCtx;
+		debugLog(`bar tick ctx=${!!ctx} visible=${footerVisible} live=${liveRuns.length}`);
 		if (!ctx || !footerVisible) return;
 		const contextWindow = (model: string): number => {
 			try {
@@ -1020,9 +1033,34 @@ export default function (pi: ExtensionAPI) {
 		try {
 			ctx.ui.setWidget(
 				FOOTER_WIDGET,
-				(_tui: any, theme: any) => ({
+				(tui: any, theme: any) => ({
 					invalidate() {},
 					render(width: number): string[] {
+						footerTui = tui; // the pi-tui instance: the ticker asks it to re-render so the rows below are recomputed (R1: live data)
+						try {
+							const out = renderRows(width);
+							debugLog(`bar render width=${width} rows=${out.length} monitor=${out.find((row) => row.includes("MONITOR"))?.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 80)}`);
+							return out;
+						} catch (error) {
+							debugLog(`bar render error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+							throw error;
+						}
+					},
+				}),
+				{ placement: "belowEditor" },
+			);
+		} catch (error) {
+			debugLog(`bar setWidget error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+			/* the model bar is progressive enhancement — never break the session over it */
+		}
+		// Rows are computed inside render(): without a render pass Pi keeps showing the last frame,
+		// which is what "the TUI needs forced updating" looked like. Ask for one every tick.
+		try {
+			footerTui?.requestRender?.();
+		} catch {}
+		function renderRows(width: number): string[] {
+			const theme = ctx.ui.theme;
+			{
 						const rows = orderedSlots(modelStack()).map((slot) => {
 							const live = liveRuns.filter((run) => run.slot?.id === slot.id && run.model === slot.model);
 							const remembered = slotLast.get(slot.id)?.model === slot.model ? slotLast.get(slot.id) : undefined;
@@ -1053,8 +1091,8 @@ export default function (pi: ExtensionAPI) {
 						});
 						// Σ TOTALS row: the session ledger (token burn, cost, avg tps/agent, completion rate).
 						rows.unshift(truncateToWidth(totalsCellStr(theme, sessionTotalsText(), liveRuns.length > 0), width));
-						// LEVEL row: which harness level (or plain shape) is live, its lane pools, the plan default.
-						rows.push(truncateToWidth(levelCellStr(theme, levelSnapshot(ctx)), width));
+						// LEVEL row on top: which harness preset (level or plain shape) is live, its lane pools, the plan default.
+						rows.unshift(truncateToWidth(levelCellStr(theme, levelSnapshot(ctx)), width));
 						try {
 							rows.push(truncateToWidth(monitorCellStr(theme, monitorBarText(ctx), !!currentWorkflowRun()), width));
 						} catch {}
@@ -1075,12 +1113,7 @@ export default function (pi: ExtensionAPI) {
 							rows.push(truncateToWidth(auditorCellStr(theme, { name: auditor.name, forName, model: auditor.model, thinking: auditor.thinking, authed: modelUsable(auditor.model), state: auditorState.get(auditor.id) ?? "idle", color: auditor.color }), width));
 						}
 						return rows;
-					},
-				}),
-				{ placement: "belowEditor" },
-			);
-		} catch {
-			/* the model bar is progressive enhancement — never break the session over it */
+			}
 		}
 	};
 
@@ -1423,6 +1456,8 @@ export default function (pi: ExtensionAPI) {
 		["/titan-doctor [--json]", "models, credentials, tools, pins, decisions"],
 		["/workflow run|validate|list|status|stop|graph <name>", "YAML DAG workflows (.titan/workflows/<name>/<name>.yaml)"],
 		["/workflow-monitor [runId|list|--split|close]", "store-driven run monitor: overlay, runs table, side pane"],
+		["/workflow-sidebar [runId|expand|collapse|close]", "phased workflow progress sidebar, coloured by role and state (ctrl+w · alt+w)"],
+		["/titan-config [show|list|save|apply|delete|mcp|panel]", "settings panel with MCP toggles and quick configs (ctrl+, · alt+,)"],
 		["/titan-watchdog [status|on|off|model|thinking|compaction|resume]", "titan-native watchdog: compaction state block, child pre-emption, stalemate"],
 		["/plan [brief]", "read-only plan mode; routes to /ultraplan when the shape says so"],
 		["/ultraplan <brief> | answer | fuse | done | abort", "grilling round, anonymous fusion seats, judge, fused plan with ACKs"],
@@ -1702,7 +1737,7 @@ export default function (pi: ExtensionAPI) {
 		return `shape ${shapeName()} · builders ${stack.builders.length} (${stack.builders.map((slot) => slot.name).join(", ")}) · subagents ${s.subagentFanOut > 0 ? `≤${s.subagentFanOut}` : "off"} · auditor ${s.auditor ? "on" : "off"} · ${s.anonymize ? "callsigns only" : "models visible"}`;
 	};
 	/** Idle footer status: current shape (ultraplan H2). Live command activity uses LIVE_STATUS. */
-	const SHAPE_STATUS = "titan";
+	const SHAPE_STATUS = "0-titan"; // Pi sorts status segments by key: a leading digit puts the harness preset first
 	const shapeStatusText = (): string => {
 		try {
 			const stack = modelStack();
@@ -1716,17 +1751,68 @@ export default function (pi: ExtensionAPI) {
 			return `shape ${readStackSettings().shape}`;
 		}
 	};
+	/** The live tail of the status segment: running children, workflow, watchdog, session cost — only what is non-zero. */
+	const liveStatusTail = (): string => {
+		const parts: string[] = [];
+		try {
+			const running = liveRuns.filter((run) => run.status === "working").length + [...recentRuns.values()].filter((run) => run.status === "working" && !liveRuns.includes(run)).length;
+			if (running) parts.push(`${running} running`);
+		} catch {}
+		try {
+			const live = currentWorkflowRun();
+			if (live) parts.push(`workflow ${live.name}`);
+		} catch {}
+		try {
+			if (watchdog && readStackSettings().watchdog.enabled) {
+				const st = watchdog.status();
+				if (st.state !== "idle" && st.state !== "armed") parts.push(`watchdog ${st.state}`);
+			}
+		} catch {}
+		try {
+			const cost = sessionSpendUsd();
+			if (cost > 0) parts.push(`$${cost.toFixed(cost < 0.1 ? 4 : 2)}`);
+		} catch {}
+		return parts.length ? ` · ${parts.join(" · ")}` : "";
+	};
+	let lastStatusText = "";
 	paintShapeStatus = (ctx?: any) => {
-		const ui = ctx?.ui ?? footerCtx?.ui;
+		const ui = ctx?.ui ?? footerCtx?.ui ?? hostCtx?.ui;
 		if (!ui?.setStatus) return;
 		try {
 			const theme = ui.theme;
-			const text = shapeStatusText();
+			const text = `${shapeStatusText()}${liveStatusTail()}`;
+			if (text === lastStatusText) return; // no repaint churn when nothing moved
+			lastStatusText = text;
 			ui.setStatus(SHAPE_STATUS, theme?.fg ? theme.fg("accent", "⬡ ") + theme.fg("dim", text) : `⬡ ${text}`);
 		} catch {
 			/* headless / session teardown */
 		}
 	};
+	// R1 (PRD v0.9): the status segment repaints on its own tick — 1 s while anything runs, 5 s idle —
+	// so it never waits for a command or an announce() to catch up with the store.
+	let liveTicker: ReturnType<typeof setInterval> | undefined;
+	let liveTickCount = 0;
+	const startLiveTicker = (ctx: any) => {
+		if (liveTicker) return;
+		liveTicker = setInterval(() => {
+			liveTickCount += 1;
+			let busy = false;
+			try {
+				busy = liveRuns.some((run) => run.status === "working") || [...recentRuns.values()].some((run) => run.status === "working") || !!currentWorkflowRun();
+			} catch {}
+			if (!busy && liveTickCount % 5 !== 0) return;
+			paintShapeStatus(ctx);
+			if (footerVisible) renderFooterWidget();
+		}, WIDGET_TICK_MS);
+		liveTicker.unref?.();
+	};
+	pi.on("session_start", async (_ev: any, ctx: any) => {
+		if (ctx?.hasUI) startLiveTicker(ctx);
+	});
+	pi.on("session_shutdown", async () => {
+		if (liveTicker) clearInterval(liveTicker);
+		liveTicker = undefined;
+	});
 	const announce = (ctx: any, text: string, level: "info" | "warning" | "error" = "info") => {
 		try {
 			ctx.ui.notify(text, level);
@@ -2354,20 +2440,16 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const store = runStore();
 			const live = currentWorkflowRun();
-			const view: RunView | undefined = live ? buildRunView(store, live.dir) : latestRuns(store, RunStore.projectSlug(ctx?.cwd ?? currentCwd()), 1)[0];
+			// Prefer the newest command/workflow run; the session run (always running while the session is open) only when nothing else exists.
+			const recent = live ? [] : latestRuns(store, RunStore.projectSlug(ctx?.cwd ?? currentCwd()), 5);
+			const view: RunView | undefined = live ? buildRunView(store, live.dir) : (recent.find((candidate) => candidate.command !== "session") ?? recent[0]);
 			text = renderBarRow(view);
 		} catch {}
 		monitorBarCache = { at: Date.now(), text };
 		return text;
 	};
-	registerMonitorCommand(pi, {
-		store: () => runStore(),
-		cwd: (ctx: any) => ctx.cwd,
-		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
-		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow-monitor", ok: true, title: title.replace(/^◆\s*/, "") }, markdown),
-		currentRunDir: () => currentWorkflowRun()?.dir,
-		color: (hex: string, text: string) => fgHex(hex as HexColor, text),
-		openOverlay: (ctx: any, render, onClose) => {
+	/** A right-anchored, non-capturing overlay (the monitor and the sidebar share it): the editor keeps input; `render(tick, size)` runs on every refresh. */
+	const openTitanOverlay = (ctx: any, render: (tick: number, size: { width: number; height: number }) => string[], onClose: () => void) => {
 			if (!ctx?.hasUI || typeof ctx.ui?.custom !== "function") return undefined;
 			let tick = 0;
 			let tuiRef: any;
@@ -2417,7 +2499,15 @@ export default function (pi: ExtensionAPI) {
 					} catch {}
 				},
 			};
-		},
+		};
+	registerMonitorCommand(pi, {
+		store: () => runStore(),
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow-monitor", ok: true, title: title.replace(/^◆\s*/, "") }, markdown),
+		currentRunDir: () => currentWorkflowRun()?.dir,
+		color: (hex: string, text: string) => fgHex(hex as HexColor, text),
+		openOverlay: openTitanOverlay,
 		spawnSplit: async (_ctx: any, argv: string[]) => {
 			const cmd = argv.map((arg) => (/[\s"'$`\\]/.test(arg) ? `'${arg.replace(/'/g, "'\\''")}'` : arg)).join(" ");
 			const orca = findBinary("orca", [path.join(os.homedir(), "Dev Tools", "bin")]);
@@ -2431,6 +2521,118 @@ export default function (pi: ExtensionAPI) {
 			}
 			return { ok: false, how: "none" as const, detail: `no Orca terminal or tmux here — run by hand: ${cmd}` };
 		},
+	});
+
+	// ── 2.16b /workflow-sidebar + ctrl+w (PRD v0.9 R3): phases coloured by role and state, like a todo list ──
+	const sidebar = registerSidebarCommand(pi, {
+		store: () => runStore(),
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "workflow-sidebar", ok: true, title: title.replace(/^◆\s*/, "") }, markdown),
+		currentRunDir: () => currentWorkflowRun()?.dir,
+		color: (hex: string, text: string) => fgHex(hex as HexColor, text),
+		openOverlay: openTitanOverlay,
+	});
+	// ctrl+w is "delete word" in many editors; the Alt twin and ctrl+shift+w always work.
+	bindKey(["ctrl+w", "alt+w", "ctrl+shift+w"], "titan: toggle the workflow progress sidebar", async (ctx) => {
+		noteHost(ctx);
+		sidebar.toggle(ctx);
+	});
+
+	// ── 2.16c Settings panel + /titan-config + ctrl+, (PRD v0.9 R4): every harness setting, MCP toggles, quick configs ──
+	const panelDeps = (ctx: any): PanelDeps => ({
+		cwd: ctx?.cwd ?? currentCwd(),
+		models: (() => {
+			try {
+				return [...new Set([readStackSettings().watchdog.model, ...BUILDER_POOL, ...AUDITOR_POOL, "cerebras/qwen-3.8-27b"])].filter((model) => modelUsable(model));
+			} catch {
+				return [readStackSettings().watchdog.model];
+			}
+		})(),
+		loadShape: (codename: string, level: number | null | undefined) => {
+			if (typeof level === "number") return cycleLevel(ctx, level);
+			return loadShape(codename, ctx);
+		},
+	});
+	const openSettingsPanel = async (ctx: any): Promise<void> => {
+		if (!ctx?.hasUI || typeof ctx.ui?.custom !== "function") return announce(ctx, "titan-config: the settings panel needs the TUI; use /titan-config show|list|save|apply|mcp here.", "warning");
+		const deps = panelDeps(ctx);
+		let model: SettingsModel = buildSettingsModel(deps);
+		let cursor = 0;
+		let note: string | undefined;
+		let needsReload = false;
+		const theme = ctx.ui.theme;
+		const paint = (role: PanelColorRole, text: string): string => {
+			const map: Record<string, string> = { title: "accent", header: "accent", cursor: "accent", on: "success", off: "muted", hint: "dim", footer: "dim", note: "warning", reload: "warning" };
+			try {
+				return theme?.fg ? theme.fg(map[role] ?? "dim", text) : text;
+			} catch {
+				return text;
+			}
+		};
+		await ctx.ui.custom(
+			(tui: any, _theme: any, _keybindings: any, done: (value: unknown) => void) => {
+				let busy = false;
+				const refresh = () => {
+					try {
+						tui.requestRender();
+					} catch {}
+				};
+				return {
+					render: (width: number) => renderSettingsPanel(model, { width, height: Math.max(12, Math.floor(Number(tui?.terminal?.rows ?? process.stdout.rows ?? 40) * 0.9)), cursor, color: paint }).map((line) => truncateToWidth(line, width)),
+					invalidate: () => {},
+					handleInput: (data: string) => {
+						if (busy) return;
+						const key = matchesKey(data, "up") ? "up" : matchesKey(data, "down") ? "down" : matchesKey(data, "left") ? "left" : matchesKey(data, "right") ? "right" : matchesKey(data, "space") ? "space" : matchesKey(data, "return") ? "return" : matchesKey(data, "escape") || matchesKey(data, "ctrl+c") ? "escape" : data === "s" ? "s" : data === "q" ? "escape" : undefined;
+						if (!key) return;
+						busy = true;
+						void (async () => {
+							try {
+								const outcome = await handleSettingsKey(model, cursor, key, deps);
+								model = outcome.model;
+								cursor = outcome.cursor;
+								if (outcome.note) note = outcome.note;
+								if (outcome.needsReload) needsReload = true;
+								if (outcome.prompt === "config-name") {
+									const name = await ctx.ui.input("Save quick config as", "name");
+									if (name?.trim()) {
+										const saved = await applyRowChange(model, "config:save", name.trim(), deps);
+										model = saved.model;
+										note = saved.note;
+									}
+								}
+								if (outcome.close) {
+									done(undefined);
+									return;
+								}
+								model = buildSettingsModel(deps, note, needsReload);
+							} catch (error) {
+								note = `error: ${error instanceof Error ? error.message : String(error)}`;
+							} finally {
+								busy = false;
+								refresh();
+							}
+						})();
+					},
+				};
+			},
+			{ overlay: true, overlayOptions: { anchor: "center", width: "70%", minWidth: 60, maxHeight: "90%" } },
+		);
+		renderFooterWidget();
+		paintShapeStatus(ctx);
+		if (needsReload) announce(ctx, "titan-config: MCP catalog changed — /reload so pi-mcp-adapter picks it up", "warning");
+	};
+	registerTitanConfigCommand(pi, {
+		cwd: (ctx: any) => ctx.cwd,
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "titan-config", ok: true, title: title.replace(/^◆\s*/, "") }, markdown),
+		openPanel: openSettingsPanel,
+		loadShape: (codename: string, level: number | null | undefined, ctx: any) => panelDeps(ctx).loadShape!(codename, level),
+		models: () => panelDeps(hostCtx).models ?? [],
+	});
+	bindKey(["ctrl+,", "alt+,"], "titan: settings panel (MCP toggles, quick configs)", async (ctx) => {
+		noteHost(ctx);
+		await openSettingsPanel(ctx);
 	});
 
 	// ── 2.17 Plan mode, /plan, /ultraplan and the MCP bridge (plan H6, A13, D14; P7) ──

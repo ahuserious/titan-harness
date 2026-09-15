@@ -118,3 +118,59 @@ export const isNeedsInput = (state: AgentState | string): boolean => (NEEDS_INPU
 export function colorOf(state: AgentState | string): string {
 	return STATE_COLORS[state as AgentState] ?? "#94a3b8";
 }
+
+// ── Sidebar vocabulary (PRD v0.9 R3): phase states, role colours, dormancy ──
+
+/** The roles a phase line can carry; the coloured `│` bar takes the role colour. */
+export type SidebarRole = "architect" | "builder" | "worker" | "verifier" | "auditor" | "watchdog" | "fusion" | "judge" | "fuser" | "system";
+export const SIDEBAR_ROLES: SidebarRole[] = ["architect", "builder", "worker", "verifier", "auditor", "watchdog", "fusion", "judge", "fuser", "system"];
+export const ROLE_COLORS: Record<SidebarRole, string> = {
+	architect: "#7c3aed",
+	builder: "#f59e0b",
+	worker: "#22d3ee",
+	verifier: "#16a34a",
+	auditor: "#d97706",
+	watchdog: "#0d9488",
+	fusion: "#f472b6",
+	judge: "#f472b6",
+	fuser: "#f472b6",
+	system: "#94a3b8",
+};
+
+/** A phase's (or node's) state on the sidebar: `redo` carries a round number alongside. */
+export type PhaseState = "queued" | "working" | "in-review" | "redo" | "review-passed" | "done" | "failed" | "skipped";
+export const PHASE_STATES: PhaseState[] = ["queued", "working", "in-review", "redo", "review-passed", "done", "failed", "skipped"];
+export const PHASE_STATE_COLORS: Record<PhaseState, string> = {
+	queued: STATE_COLORS.queued,
+	working: STATE_COLORS["dispatched-working"],
+	"in-review": STATE_COLORS["in-review"],
+	redo: STATE_COLORS["edit-round-n"],
+	"review-passed": STATE_COLORS["done-verified"],
+	done: STATE_COLORS["done-unverified"],
+	failed: STATE_COLORS.failed,
+	skipped: STATE_COLORS.cancelled,
+};
+/** Dormant (terminal and idle ≥ 10 min) lines are dimmed to this, whatever their state. */
+export const DORMANT_COLOR = "#475569";
+export const PHASE_TERMINAL_STATES: PhaseState[] = ["review-passed", "done", "failed", "skipped"];
+
+/** Sidebar glyphs: spinner while working, ● in review / redo / done, ✓ review-passed, ✗ failed, ○ queued, – skipped. */
+export function PHASE_GLYPH(state: PhaseState, tick: number): string {
+	switch (state) {
+		case "working":
+			return SPINNER_FRAMES[((tick % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length];
+		case "review-passed":
+			return "✓";
+		case "failed":
+			return "✗";
+		case "queued":
+			return "○";
+		case "skipped":
+			return "–";
+		default:
+			return "●";
+	}
+}
+
+export const roleColorOf = (role: string): string => ROLE_COLORS[role as SidebarRole] ?? ROLE_COLORS.system;
+export const phaseColorOf = (state: PhaseState, dormant = false): string => (dormant ? DORMANT_COLOR : PHASE_STATE_COLORS[state]);

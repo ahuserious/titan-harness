@@ -1,0 +1,173 @@
+apiVersion: titan.harness/v1
+name: v09-live-tui
+description: "Implement PRD v0.9 live TUI: status line & bar repaint, shift+tab presets, workflow sidebar, settings panel, and mcp2cli"
+version: 1
+returns: report
+
+phases:
+  - { title: plan, detail: "Map PRD v0.9 requirements to architecture, file targets, Bun tests, and PTY smoke scenarios" }
+  - { title: build, detail: "Author unit tests & PTY smokes, implement R1-R5 features, and resolve test failures in loop" }
+  - { title: verify, detail: "Execute test suite, PTY smokes, and cloud sim-user verifiers capturing evidence" }
+  - { title: audit, detail: "Cross-family audit of evidence, test results, and diff against PRD requirements and org rules" }
+  - { title: report, detail: "Author acceptance report with artifact digests, coverage, and delivery verification" }
+
+inputs:
+  prd:
+    default: "docs/PRD-v0.9-live-tui.md"
+    description: "Path to the live TUI PRD document"
+
+titan:
+  level: 3
+  tier: prototype-analytics
+  modes: [spec, test]
+  elevation: default
+  evidence:
+    require: [test-result, log, screenshot, script, result-card, design-match]
+  watchdog:
+    enabled: true
+    stalemate_repeats: 3
+    on_compaction: halt-inspect
+  budget:
+    usd: 25
+    max_concurrent_children: 8
+    context_budget: 120000
+
+nodes:
+  - id: plan-spec
+    role: architect
+    phase: plan
+    context: fresh
+    command: plan-spec
+    allowed_tools: [read, grep, find, ls]
+    output_format:
+      type: object
+      properties:
+        features:
+          type: array
+          items: { type: string }
+        unit_tests:
+          type: array
+          items: { type: string }
+        pty_smokes:
+          type: array
+          items: { type: string }
+      required: [features, unit_tests, pty_smokes]
+
+  - id: build-test-suites
+    role: builder
+    callsign: pool
+    phase: build
+    depends_on: [plan-spec]
+    context: fresh
+    command: build-test-suites
+    review: required
+    evidence:
+      produces: [test-result, log, script]
+
+  - id: build-status-presets
+    role: builder
+    phase: build
+    depends_on: [build-test-suites]
+    context: fresh
+    command: build-status-presets
+    review: required
+    evidence:
+      produces: [log]
+
+  - id: build-sidebar
+    role: builder
+    phase: build
+    depends_on: [build-status-presets]
+    context: fresh
+    command: build-sidebar
+    review: required
+    evidence:
+      produces: [log]
+
+  - id: build-settings-panel
+    role: builder
+    phase: build
+    depends_on: [build-sidebar]
+    context: fresh
+    command: build-settings-panel
+    review: required
+    evidence:
+      produces: [log]
+
+  - id: build-mcp2cli
+    role: builder
+    phase: build
+    depends_on: [build-settings-panel]
+    context: fresh
+    command: build-mcp2cli
+    review: required
+    evidence:
+      produces: [script, log]
+
+  - id: build-verify-loop
+    role: builder
+    phase: build
+    depends_on: [build-mcp2cli]
+    review: required
+    loop:
+      prompt: "Run `bun test` and execute `bash scripts/pty-smoke-acceptance.sh`. Verify all unit tests pass and Acceptance items 1-6 are satisfied. If any test or smoke fails, inspect the diff and fix the implementation until green. When all tests pass: <promise>COMPLETE</promise>"
+      until: COMPLETE
+      until_bash: "bun test"
+      max_iterations: 3
+      fresh_context: true
+    on_fail: { action: elevate, max: 3 }
+    evidence:
+      produces: [test-result, log, result-card]
+
+  - id: smoke-verify
+    phase: verify
+    depends_on: [build-verify-loop]
+    verify:
+      runner: bash
+      command: "bun test > $EVIDENCE_DIR/test-result.log 2>&1 && node scripts/mcp2cli.mjs doctor > $EVIDENCE_DIR/log-mcp2cli.txt 2>&1 && bash scripts/pty-smoke-acceptance.sh > $EVIDENCE_DIR/log-pty-smokes.txt 2>&1"
+      objective: "Execute Bun unit tests, mcp2cli doctor check, and Acceptance PTY smokes"
+    evidence:
+      require: [test-result, log]
+      produces: [test-result, log]
+
+  - id: cursor-verify
+    phase: verify
+    depends_on: [build-verify-loop]
+    verify:
+      runner: cursor-cloud
+      objective: "Exercise live TUI components: status line repaint ticker, shift+tab shape cycling, ctrl+w sidebar overlay, and ctrl+, settings panel with MCP toggles"
+      repo: "."
+      ref: "HEAD"
+    evidence:
+      require: [test-result, screenshot]
+      produces: [screenshot, design-match]
+
+  - id: kane-verify
+    phase: verify
+    depends_on: [build-verify-loop]
+    verify:
+      runner: kane
+      objective: "Simulate end-user interaction: cycle presets with shift+tab, open workflow progress sidebar with ctrl+w, toggle MCP server in ctrl+, settings panel"
+      devices: [desktop]
+      headless: true
+    evidence:
+      require: [screenshot, result-card, design-match]
+      produces: [result-card]
+
+  - id: audit
+    role: auditor
+    phase: audit
+    depends_on: [smoke-verify, cursor-verify, kane-verify]
+    trigger_rule: all_done
+    context: fresh
+    command: audit-verdict
+    output_format: { $ref: "titan://schemas/audit-verdict" }
+    on_fail: { action: reauthor }
+
+  - id: report
+    role: architect
+    phase: report
+    depends_on: [audit]
+    when: "$audit.output.status == 'PASS' || $audit.output.status == 'PASS_WITH_WARNINGS'"
+    allowed_tools: [read, grep, find, ls]
+    command: acceptance-report

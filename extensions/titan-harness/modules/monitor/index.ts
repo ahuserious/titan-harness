@@ -8,3 +8,4 @@ export * from "./state.ts";
 export * from "./rows.ts";
 export * from "./frame.ts";
 export * from "./dw-adapter.ts";
+export * from "./sidebar.ts";

@@ -1,6 +1,6 @@
 {
   "name": "titan-harness",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "description": "Dan's Pi stack: titan-harness (children load extensions, plain-text results), /ctx context picker, /stack settings (subagent tools, fan-out, workflows menu hook), the tps + fan-out status bar, an MCP catalog (Figma, shadcn, Relume, Brandfetch, Higgsfield, Macro, TestMu, Momentic, Framer) and a curated skill pack.",
