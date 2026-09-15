@@ -78,7 +78,8 @@ Node by node:
 - **`test-suite`** (`role: builder`, `callsign: pool`, phase build) — authors the
   failing suite for `$spec-map.output.tests`, one per device; `evidence: { produces:
   [test-log] }` is a promise the store checks by hashing the log. `callsign: pool`
-  takes the next free builder callsign from the shape.
+  leaves the callsign to the shape: the node runs under the seat its role resolves to
+  (the primary builder here) and reports with that seat's callsign.
 - **`implement`** (`role: builder`, `review: required`) — a `loop`: implement the next
   failing feature from `$spec-map.output.features`, run the suite, stop on
   `<promise>COMPLETE</promise>` or when `until_bash: "bun test"` exits 0,

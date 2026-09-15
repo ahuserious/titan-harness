@@ -7,9 +7,10 @@ Dan's Pi package. One install replaces `pi-titan-harness-v2` plus the loose
 
 | Extension | Commands | Notes |
 |---|---|---|
-| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
+| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor`, `/workflow` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
 | `extensions/ctx-picker.ts` | `/ctx [272k\|828k\|1m]`, `/titan-ctx` | Codex 272k / 828k-compact / OpenRouter 1M context presets (hardened: nothing is written unless the model is in the catalog and authed) |
 | `extensions/stack-settings.ts` | `/stack`, `/stack-settings` | subagent tools on/off (harness children + dynamic-workflows agents), subagent model and cap, exa, workflow fan-out, model bar, harness level, child concurrency cap, run budget, watchdog, doctor, opens the workflows navigator |
+| `extensions/titan-child-hooks.ts` | (none) | the narrow child mode: inside a `pi --mode json -p` workflow child it registers only the `tool_call` / `tool_result` handlers for the node's static hooks (`TITAN_NODE_HOOKS`) and, when `TITAN_NODE_SCHEMA` + `TITAN_NODE_RESULT_PATH` are set, the terminating `submit_result` tool; in the host and in every other child it returns immediately, so the recursion guard holds |
 
 Command index (what bare `/titan` prints):
 
@@ -32,6 +33,7 @@ Command index (what bare `/titan` prints):
 | `/titan-audit [on\|off]` | auditors per builder | Ctrl+Shift+A · Alt+A |
 | `/titan-level [0-3\|next\|status\|--claim-shift-tab]` | harness level 0-3 | Ctrl+Shift+L · Alt+L · Shift+Tab after the rebind |
 | `/titan-doctor [--json\|--import-infranodus-key]` | models, credentials, tools, pins, decisions | |
+| `/workflow run\|validate\|list\|status\|stop\|graph <name>` | YAML DAG workflows (`.titan/workflows/<name>/<name>.yaml`) | |
 | `/titan [on\|off\|toggle]` | this list; model bar on/off (alias `/fh`) | |
 
 Settings: `~/.pi/agent/titan-harness.json` (`subagentTools`, `modelBar`, the shape keys,
@@ -146,7 +148,10 @@ on `cerebras/qwen-3.8-27b` medium with `stalemateRepeats` 3, `onCompaction`
 
 Every session opens one run, and every `/titan-*` command's children plus the host's
 own turns land in it as ledger rows — that is what the Σ TOTALS row reads;
-`session_shutdown` marks it completed. Runs live under
+`session_shutdown` marks it completed. A `/workflow run` is a separate run directory
+with its own `runId`: the session run aggregates every child this session spent, the
+workflow run is canonical for that workflow, their rows carry different `runId`s, and
+`verify-ledger.mjs` checks one run directory at a time. Runs live under
 `~/.pi/titan-harness/runs/<projectSlug>/<runId>/` (`settings.store.root`; `projectSlug`
 is the readable tail of the real cwd plus 12 hex of its sha256, `runId` is
 `run-<UTC time>-<6 hex>`):
@@ -172,6 +177,99 @@ totals to cross-check. Files are 0600, directories 0700. Verify any run without 
 harness: `node scripts/verify-ledger.mjs <runDir>` walks events, ledger and (when
 present) provenance and prints `ok <file> <n> rows` or `broken <file> at seq N …`;
 `--json` for machines; exit 0 intact, 1 broken; a single `.jsonl` path works too.
+
+## Workflows (0.4.0)
+
+`/workflow` runs YAML DAGs (Archon's vocabulary, plan D13) as titan children on the same
+shape, ledger and run store as every other command. A workflow is a directory holding
+`<name>.yaml`, optional `commands/<name>.md` prompt bodies for `command:` nodes and
+`scripts/` for named `script:` files. Resolution: project
+`.titan/workflows/<name>/<name>.yaml` › user `~/.pi/titan-harness/workflows/<name>/` ›
+the package's `.pi/titan-harness/workflows/`, which ships `classify-and-fix` (the Archon
+canonical example ported to Pi: bash → structured classify → `when` fork → `one_success`
+join → PR) and `proto-analytics-dashboard` (level 3: spec map → TDD loop → two verifiers
+→ cross-family audit → gated report). Authoring is the `titan-workflow-authoring` skill
+(`references/schema.md`, `rules.md`, `examples.md`); `/workflow validate <name>` before
+`/workflow run`.
+
+| Subcommand | Semantics |
+|---|---|
+| `/workflow run <name> [--input k=v]... [--args "text"] [--dry-run]` | validate + load, open a run in the store, execute the DAG layer by layer, stream `n/N nodes` to the status line, post the final panel (node table, `returns`, artifacts dir). `--dry-run` prints the layer plan and the Mermaid graph without opening a run. One run per session at a time; bare text after the name is `--args`; validator warnings are shown, never blocking |
+| `/workflow validate <name\|path> [--json]` | every validator rule: errors, then warnings |
+| `/workflow list` (`ls`) | workflows visible from this project with source (`project` › `user` › `package`) and path |
+| `/workflow status [runId]` | `run.json`, ledger totals and the last 20 events of the latest (or named) workflow run for this project; the live run while one is in flight |
+| `/workflow stop` | abort the in-flight run: running nodes end `cancelled`, unreached nodes `not reached` |
+| `/workflow graph <name\|path>` | Mermaid `flowchart TD`: one node per id with its type glyph, role, `when` and trigger rule, phases as subgraphs, `depends_on` as edges |
+| `/workflow help` | the list above |
+
+**Document.** `apiVersion: titan.harness/v1`; `name` equals the directory name; then
+`description`, `version`, `inputs` (`$inputs.<key>`; a required input without a default
+comes from `--input`), `returns` (the node whose output is the run's result), `phases`,
+`provider: pi`, default `model` / `thinking`, `trigger` (parsed only) and a `titan:` block
+(`level`, `shape`, `tier`, `modes`, `evidence`, `elevation`, `watchdog`, `budget`,
+`personas`; `budget.max_concurrent_children` is validated ≤ 16, the per-layer
+parallelism today is `/stack concurrency`). Every node has exactly one type key —
+`prompt` · `command` · `bash` · `script` (+ `runtime: bun|uv`, `deps`) · `loop` ·
+`approval` · `cancel` · `mcp_tool` · `workflow` (a child run, optional `fan_out`) — while
+`verify` / `best_of` / `interleave` / `hypothesis` validate and schedule but end `failed`
+with `not implemented until P4` until 0.5.0. Routing: `depends_on`; `when` (comparisons
+`== != < > <= >=` between `$id.output[.field]` and literals, `&&` / `||`, parentheses;
+only over nodes with `output_format`; unresolved → false, node skipped); `trigger_rule`
+`all_success` (default) · `one_success` · `none_failed_min_one_success` · `all_done`.
+
+**Hand-off and roles.** Nodes never see each other's transcripts: every node's output
+lands in `artifacts/nodes/<id>.md` (+ `<id>.meta.json` with sha256, bytes, ts) and
+downstream text reads `$<id>.output[.field]` or the file under `$ARTIFACTS_DIR` (bash
+substitutions are shell-escaped). `context: fresh` (default) is a new session, `shared`
+resumes the previous node's session (rejected in a parallel layer), `{resume: <id>}`
+that node's. `role` maps to the live shape's seats: `architect` → the architect seat,
+read-only; `builder` / `worker` / `fuser` → the primary builder, the first worker, the
+fuser, with full tools; `verifier` / `auditor` / `fusion` / `judge` → read-only seats;
+`watchdog` → the model in `settings.watchdog`; reviewer roles (auditor, verifier,
+watchdog) take the priority lease so they never queue behind the builders they review.
+A node's own `model` / `thinking` / `callsign` / `system_prompt` / `append_system_prompt`
+override; `allowed_tools` is an allowlist (`[]` = no tools), `denied_tools` subtracts,
+and an architect is read-only by construction (write tools rejected by the validator,
+`denied_tools: [write, edit, bash]` injected, write tools dropped in the child).
+`output_format` (a JSON schema or `$ref: titan://schemas/audit-verdict`) appends the
+schema to the prompt, validates the answer and re-asks at most 3 times before the node
+fails (structured output v1; the child-side `submit_result` tool in `titan-child-hooks`
+arms only when the executor exports `TITAN_NODE_SCHEMA`, which 0.4.0 does not yet do).
+
+**Failure.** `retry` (`max_attempts` default 2, `delay_ms` 3000; never on loops,
+approvals or cancels) re-runs a failed node. `loop.max_iterations` (≤ 10, with `until`
+and/or `until_bash`) is the mechanical budget; `on_fail` then decides: `retry`,
+`cancel` (the run ends `cancelled`), or `elevate` / `reauthor`, which write
+`artifacts/escalation-report.md` (workflow, run, node, verdict, attempts, error, last
+output), log `elevation.report` and end the run `failed` with `elevation: <id> failed N
+times` (the elevation ladder itself is 0.5.0). Timeouts: AI nodes 300 s, `bash` /
+`script` 120 s (`timeout`); a `script` runtime missing from PATH fails the node with
+exit 127.
+
+**Hooks and approvals.** `hooks:` takes static `PreToolUse` / `PostToolUse` / `Stop`
+rules (`matcher` = anchored, case-insensitive regex on the tool name; Archon's `Bash`
+matches Pi's `bash`), shipped to the child as `TITAN_NODE_HOOKS` and mapped by
+`extensions/titan-child-hooks.ts` onto Pi's `tool_call` / `tool_result`:
+`permissionDecision: deny` (and `ask`) blocks with the reason, `updatedInput` replaces
+the arguments, `additionalContext` / `systemMessage` ride on the tool result as
+`[hook] …` lines, `continue: false` terminates; a `Stop` rule with `continue: false` is a
+terminating block at the next matching tool call. `approval:` nodes pause on a TUI
+confirm plus one free-text reply when `capture_response` or `on_reject` is set (a reply
+starting with no / reject / cancel / stop is a rejection); rejected with `on_reject`, the
+rework prompt runs with `$REJECTION_REASON` up to `max_attempts` (default 3, ≤ 10) and
+the gate is asked again, otherwise the run ends `cancelled`. A headless session rejects
+every approval.
+
+**On disk.** A workflow run is its own run directory (`command: workflow`,
+`workflow: {name, sha256}`, `parentRunId` on child workflows): `artifacts/nodes/<id>.md`
++ `.meta.json`, `artifacts/escalation-report.md` when elevation fired, `events.jsonl`
+(`run.start/end`, `workflow.start/end`, `phase.start`, `node.start/end`,
+`agent.start/end`, `elevation.report`), `ledger.jsonl` with one row per agent call
+(`origin` by role) and `agents/<nodeId>.json` (`<nodeId>#2` for re-asks and iterations),
+`sessions/` (every node's Pi session, so `shared` / `resume` re-enter it) and `tmp/`
+(inline `script:` text). Every workflow child also lands in the session ledger, so the
+Σ TOTALS row moves while a workflow runs; the workflow run's own ledger is canonical
+for that run.
 
 ## Children and extensions
 
@@ -241,8 +339,9 @@ Codex (or for plain names in Pi). `momentic`, `framer-mcp-plugin`, `figma-deskto
 `BRANDFETCH_MCP_TOKEN`; `/titan-doctor --import-infranodus-key` is the in-Pi route for
 the InfraNodus key).
 
-`skills/` is the curated pack, 17 skills: one per server, three combo workflows
-(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), two harness skills,
+`skills/` is the curated pack, 18 skills: one per server, three combo workflows
+(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), three harness skills
+(`titan-orchestration`, `titan-auditor`, `titan-workflow-authoring`),
 `mcp-cli-bridges` for calling servers from bash with the Python mcp2cli or mcporter,
 and `divmagic-raw` (DivMagic is a Chrome extension, not MCP). Studio rules live in the
 skills: Higgsfield is first-party only, no OpenRouter; the win is 5–8 s looping Framer

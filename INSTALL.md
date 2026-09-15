@@ -15,6 +15,8 @@ PATH, and you never claim one is present unless `command -v <tool>` proves it.
 - Pi coding agent 0.85+ (`pi --version`). If Pi is missing, install it from
   https://pi.dev and run `pi` once so `~/.pi/agent` exists.
 - `git`, and for the Python bridge `uv` (https://docs.astral.sh/uv/).
+- Optional, only for `script:` workflow nodes: bun (`~/.bun/bin/bun` or on PATH) and
+  uv (`~/.local/bin/uv` or on PATH). Nothing else needs them.
 
 ## 1. Install the Pi package
 
@@ -222,9 +224,11 @@ hosts copy the folders:
 - Claude Code: `cp -r skills/* ~/.claude/skills/`
 - Codex: `cp -r skills/* ~/.codex/skills/`
 
-17 skills (`skills/README.md`). Each states its server, auth, playbook, and
+18 skills (`skills/README.md`). Each states its server, auth, playbook, and
 guardrails. Combo skills: `design-to-code-pipeline`, `brand-launch-kit`,
-`ship-and-verify`; bridge: `mcp-cli-bridges`; reference: `divmagic-raw` (DivMagic is a
+`ship-and-verify`; harness skills: `titan-orchestration`, `titan-auditor`,
+`titan-workflow-authoring` (how to write, validate and run a `/workflow` YAML DAG);
+bridge: `mcp-cli-bridges`; reference: `divmagic-raw` (DivMagic is a
 Chrome extension, not MCP). The one-stack rule the combos share: Tailwind + shadcn +
 tokens; Relume / Untitled UI for Framer clients; DivMagic + Brandfetch feed RAW; shadcn
 is what we ship.
@@ -286,9 +290,12 @@ node scripts/verify-ledger.mjs ~/.pi/titan-harness/runs/<projectSlug>/<runId>   
 
 In a TUI session: `/titan-doctor` (every item `ready` or `vacant`, none `unknown`),
 `/titan-level status` (the live level or `shape-driven`, and the shift+tab state),
-`/stack status` (settings), `/titan` (command index + model bar), `/mcp` (server
-status, including the `titan-harness__*` package servers), `/workflows`
-(dynamic-workflows menu with the stack's subagent-tools and fan-out toggles).
+`/workflow list` (shows `classify-and-fix` and `proto-analytics-dashboard` with source
+`package`, plus any project or user workflows), `/workflow validate classify-and-fix`
+(`✓ classify-and-fix is valid`, no errors), `/stack status` (settings), `/titan`
+(command index + model bar), `/mcp` (server status, including the `titan-harness__*`
+package servers), `/workflows` (dynamic-workflows menu with the stack's subagent-tools
+and fan-out toggles).
 
 ## 6. What this package changes on the machine
 
@@ -297,7 +304,11 @@ status, including the `titan-harness__*` package servers), `/workflows`
 - `~/.pi/titan-harness/model-stack-*.yaml` (only when you copy them, step 1a).
 - `~/.pi/titan-harness/runs/` — the run store (one directory per run, hash-chained
   JSONL, files 0600 / directories 0700), created at the first session; `settings.store.root`
-  moves it.
+  moves it. A `/workflow run` gets its own run directory and adds `<runDir>/sessions`
+  (one Pi session per node, so `context: shared` / `{resume}` can re-enter it) and
+  `<runDir>/tmp` (inline `script:` text). bun (`~/.bun/bin/bun` or PATH) and uv
+  (`~/.local/bin/uv` or PATH) are needed only for `script:` nodes; a missing runtime
+  fails that node with exit 127 (`bun not found on PATH …`), nothing else.
 - `~/.pi/agent/keybindings.json` (only via the Shift+Tab rebind, step 1b; backup
   `keybindings.json.bak`).
 - `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs` or
