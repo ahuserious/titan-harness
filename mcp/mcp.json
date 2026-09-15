@@ -53,6 +53,17 @@
     "framer-mcp-plugin": {
       "url": "${FRAMER_MCP_URL}",
       "disabled": true
+    },
+    "infranodus": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "infranodus-mcp-server"
+      ],
+      "env": {
+        "INFRANODUS_API_KEY": "${INFRANODUS_API_KEY}"
+      },
+      "disabled": true
     }
   }
 }

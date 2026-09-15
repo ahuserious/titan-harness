@@ -34,6 +34,24 @@ pi-subagents is untouched: its background children already load ambient
 extensions; its foreground children take an `extensions` allowlist per agent or
 `subagents.defaultExtensions` in Pi settings.
 
+## Version pins
+
+The stack is verified against these companion versions; `modules/pins.ts` reads
+`~/.pi/agent/npm/node_modules/<pkg>/package.json` at session start and reports drift
+or a missing package as vacant (it never installs or upgrades):
+
+| Package | Pin |
+|---|---|
+| `pi-mcp-adapter` | 2.33.0 |
+| `@quintinshaw/pi-dynamic-workflows` | 3.10.1 (+ the menu-hook patch below) |
+| `pi-subagents` | 0.67.0 |
+| `pi-exa` | 0.6.1 |
+| `pi-antigravity` | 0.7.2 |
+| `@raindrop-ai/pi-agent` | 0.2.1 |
+| `@signalridge/pi-codex-compact` | 1.3.1 |
+
+Every bump updates `README.md`, `INSTALL.md`, `skills/README.md`, `mcp/README.md`.
+
 ## The dynamic-workflows menu hook
 
 `~/.pi/agent/npm/node_modules/@quintinshaw/pi-dynamic-workflows/dist/workflow-commands.js`
@@ -41,8 +59,11 @@ carries a small local patch (backup: `workflow-commands.js.orig`): bare `/workfl
 calls `globalThis[Symbol.for("titan-harness:workflows-menu")]` when it exists,
 which shows "Open run navigator / Subagent tools / Fan-out / Stack settings". Without
 the hook it is the stock navigator. `/workflows ui` always opens the navigator
-directly. The package is pinned (`@3.10.1`), so `pi update` keeps the patch; re-apply
-it after a deliberate version bump.
+directly. The package is pinned (`@3.10.1`), so `pi update` keeps the patch.
+`scripts/apply-dw-patch.mjs` owns the file: `--check` (exit 0 applied / 2 pristine /
+1 error), apply (idempotent, saves `.orig` first, refuses anything but 3.10.x) and
+`--restore`; `modules/pins.ts` `dwPatchApplied()` is the boot check. The patch retires
+the day upstream ships a menu hook.
 
 ## Stacks
 
@@ -52,14 +73,36 @@ friends are valid slot models.
 
 ## MCP catalog + skill pack
 
-`mcp/mcp.json` holds nine services (Figma, shadcn, Relume, Brandfetch, Higgsfield,
-Macro, TestMu AI, Momentic, Framer) as a standard `mcpServers` file with OAuth or
-`${ENV_VAR}` placeholders only. `node scripts/install-mcp.mjs` merges it into
-`~/.config/mcp/mcp.json` (Pi via pi-mcp-adapter, Claude Code, Cursor, Codex all read
-that shape). `skills/` is the curated pack: one skill per server, three combo
-workflows (`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), and
-`mcp-cli-bridges` for calling servers from bash with mcp2cli or mcporter. See
-`INSTALL.md` for the agent-facing install steps and `mcp/README.md` for per-server notes.
+`mcp/mcp.json` holds ten services (Figma, shadcn, Relume, Brandfetch, Higgsfield,
+Macro, TestMu AI, Momentic, Framer, InfraNodus) as a standard `mcpServers` file with
+OAuth or `${ENV_VAR}` placeholders only. In Pi it loads by itself: `package.json`
+declares `"pi": { "mcp": "./mcp/mcp.json" }` and pi-mcp-adapter 2.33.0 registers the
+servers as `titan-harness__<server>` (tool namespaces `titan_harness__<server>`), with
+user/project MCP config outranking the package copy. `node scripts/install-mcp.mjs`
+remains the manual merge into `~/.config/mcp/mcp.json` for Claude Code, Cursor and
+Codex (or for plain names in Pi). `momentic`, `framer-mcp-plugin`, `figma-desktop` and
+`infranodus` ship disabled until their machine-specific value or key exists
+(`.env.example` names them: `INFRANODUS_API_KEY`, `MOMENTIC_API_KEY`, `CURSOR_API_KEY`,
+`BRANDFETCH_MCP_TOKEN`).
+
+`skills/` is the curated pack, 17 skills: one per server, three combo workflows
+(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), two harness skills,
+`mcp-cli-bridges` for calling servers from bash with the Python mcp2cli or mcporter,
+and `divmagic-raw` (DivMagic is a Chrome extension, not MCP). Studio rules live in the
+skills: Higgsfield is first-party only, no OpenRouter; the win is 5–8 s looping Framer
+heroes, not films; credit cost stated before any video batch; one stack (Tailwind +
+shadcn + tokens; Relume / Untitled UI for Framer clients; DivMagic + Brandfetch feed
+RAW; shadcn is what we ship). First-party CLIs (Kane CLI, `npx @framer/agent`,
+`@higgsfield/cli`) and the bridges are documented, not installed, not on PATH:
+`docs/named-links.md`, which also explains that the Python `mcp2cli` used here and the
+Rust `mcp2cli` used by the Grok plugin are two different binaries. See `INSTALL.md`
+for the agent-facing install steps and `mcp/README.md` for per-server notes.
+
+## Non-goals
+
+Gap-fill inside this package, nothing more: no mega-CLI, no custom JSON-RPC MCP
+client, no Fusion Drive merge, no neuro-quant dump, no Kane-as-MCP, no Higgsfield
+marketing-skill dump, no Grok Imagine as a pack server, no OpenRouter video servers.
 
 ## Architect / builder / subagents
 

@@ -4,7 +4,10 @@ You are an agent (Claude Code, Codex, Pi, Cursor, or similar) installing this
 package for a human. Follow the numbered steps in order. Every command is
 non-interactive unless marked **(browser)**. Never paste API keys into files
 inside this repository; they go into the shell environment or the host's secret
-store.
+store. Nothing in this package installs a third-party CLI: the tools in
+`docs/named-links.md` (Kane CLI, `npx @framer/agent`, `@higgsfield/cli`, the two
+`mcp2cli` binaries, mcporter, mcp-to-cli) are documented, not installed, not on
+PATH, and you never claim one is present unless `command -v <tool>` proves it.
 
 ## 0. Preconditions
 
@@ -27,18 +30,30 @@ runtime dependency (`yaml`) inside the cloned directory printed by `pi list`:
 cd "<install directory from pi list>" && npm install --omit=dev
 ```
 
-This registers the extensions (`/titan-*`, `/ctx`, `/stack`) and the skill pack
-(`skills/`). Companion packages the stack expects, install if absent:
+This registers the extensions (`/titan-*`, `/ctx`, `/stack`), the skill pack
+(`skills/`) and, through the `pi.mcp` manifest key, the MCP catalog (`mcp/mcp.json`,
+see step 2). Companion packages the stack expects, pinned to the versions this
+package is verified against (`extensions/titan-harness/modules/pins.ts` checks them at
+session start and reports drift; it never upgrades anything):
 
 ```bash
 pi install npm:pi-mcp-adapter@2.33.0
 pi install npm:@quintinshaw/pi-dynamic-workflows@3.10.1
-pi install npm:pi-subagents
-pi install npm:pi-exa@0.6.1                # Exa web search, no key needed
-pi install npm:pi-antigravity@0.7.2        # Gemini via Google Antigravity OAuth (optional)
+pi install npm:pi-subagents@0.67.0
+pi install npm:pi-exa@0.6.1                          # Exa web search, no key needed
+pi install npm:pi-antigravity@0.7.2                  # Gemini via Google Antigravity OAuth (optional)
+pi install npm:@raindrop-ai/pi-agent@0.2.1           # tracing (optional)
+pi install npm:@signalridge/pi-codex-compact@1.3.1   # Codex compaction (optional)
 ```
 
 Keep `pi-dynamic-workflows` pinned at 3.10.1 (3.11.0 fails to load on Pi 0.85).
+After installing or reinstalling it, re-apply the documented `/workflows` menu-hook
+patch; the script refuses any version but 3.10.x and keeps a `.orig` backup:
+
+```bash
+node scripts/apply-dw-patch.mjs --check    # exit 0 = applied, 2 = pristine, 1 = error
+node scripts/apply-dw-patch.mjs            # apply (idempotent); --restore copies .orig back
+```
 
 Verify the load without a TUI (stdin must be closed when run from a tool):
 
@@ -51,6 +66,28 @@ Expect a JSON stream whose `turn_end` carries `pong` and no line containing
 
 ## 2. Install the MCP catalog
 
+### 2.0 Pi: automatic through the package manifest, nothing to run
+
+`package.json` declares `"pi": { "mcp": "./mcp/mcp.json" }`. pi-mcp-adapter 2.33.0
+loads that catalog from every package listed in Pi's `settings.json` `packages`
+(`pi install` adds this one; the adapter never scans `node_modules`) and registers the
+servers as `titan-harness__<server>`; in tool namespaces hyphens become underscores, so
+tools read `titan_harness__<server>…` (`titan_harness__higgsfield`,
+`titan_harness__infranodus`, …). Only server entries are read from the file. A user,
+global or project MCP config (`~/.config/mcp/mcp.json`, `.mcp.json`, `.pi/mcp.json`)
+has higher precedence: a same-named entry there wins, and `/mcp enable <server>` /
+`/mcp disable <server>` persist only the flag into the project's `.pi/mcp.json`. In a
+TUI, `/mcp` lists the package servers after `/reload` or a restart (the headless
+`pi -p "/mcp"` form prints nothing). Check without a TUI (2.33.0 internal path):
+
+```bash
+node -e 'import(process.env.HOME + "/.pi/agent/npm/node_modules/pi-mcp-adapter/dist/package-mcp-loader.js").then(m => console.log(Object.keys(m.loadPackageMcpConfigs().mcpServers).join("\n")))'
+```
+
+Expect `titan-harness__figma` … `titan-harness__infranodus` (eleven names).
+
+### 2.1 Manual merge (other hosts, or plain names in Pi)
+
 ```bash
 cd "$(pi list | grep -A1 titan-harness | tail -1 | tr -d ' ')"   # the installed package dir
 node scripts/install-mcp.mjs            # → ~/.config/mcp/mcp.json (user-global)
@@ -58,13 +95,15 @@ node scripts/install-mcp.mjs            # → ~/.config/mcp/mcp.json (user-globa
 ```
 
 The merge never overwrites existing servers (use `--force` to replace) and
-prints which servers need OAuth and which env vars are unset.
+prints which servers need OAuth and which env vars are unset. Claude Code, Cursor
+and Codex read that file; in Pi a merged copy outranks the package copy and appears
+under its plain name.
 
 ### 2a. OAuth servers **(browser)**
 
 Inside Pi run `/mcp`, pick each of `relume`, `brandfetch`, `higgsfield`,
-`macro`, `testmu` and complete the browser sign-in. The human must do this;
-tell them the list and wait.
+`macro`, `testmu` (as `titan-harness__<name>` when loaded from the package) and
+complete the browser sign-in. The human must do this; tell them the list and wait.
 
 `figma` (remote) may reject dynamic client registration for generic clients.
 If `/mcp` reports HTTP 403 on registration: either ask the human for a Figma
@@ -78,11 +117,21 @@ enable Dev Mode MCP server) and set `"disabled": false` on `figma-desktop`.
 export MOMENTIC_API_KEY=...            # from momentic.ai
 export MOMENTIC_CONFIG=/abs/path/momentic.config.yaml
 export FRAMER_MCP_URL='https://...'    # from the Framer marketplace "MCP" plugin (optional)
+export INFRANODUS_API_KEY=...          # from the human's InfraNodus account; enables `infranodus`
+export BRANDFETCH_MCP_TOKEN=...        # bf1… token, only for the bash bridges (the host uses OAuth)
+export CURSOR_API_KEY=...              # Cursor cloud-agent verify lane (optional; vacant without it)
 ```
 
-Then set `"disabled": false` on `momentic` / `framer-mcp-plugin` in
-`~/.config/mcp/mcp.json`. Put the exports in the human's shell profile, not in
-this repo.
+Then set `"disabled": false` on `momentic` / `framer-mcp-plugin` / `infranodus`
+(in Pi: `/mcp enable <server>` then `/reload`; elsewhere edit the merged
+`mcp.json`). `.env.example` lists every name with an empty value; real values go
+in the human's shell profile, never in this repo.
+
+`infranodus` is InfraNodus's own MCP server (`npx -y infranodus-mcp-server`):
+knowledge graphs, ontology graphs, topical clusters, content gaps, research
+questions, contextual hints and cross-run memory relations, which is the
+reasoning-ontology stage of the workflow plan. It ships `"disabled": true` until
+`INFRANODUS_API_KEY` exists; without the key nothing tries to start it.
 
 ### 2c. Framer, official path (no MCP)
 
@@ -91,6 +140,7 @@ npx @framer/agent setup      # (browser) grants the agent access to a Framer pro
 ```
 
 Then use `/framer` in the agent. The `framer-agent` skill explains the workflow.
+`@framer/agent` is documented, not installed, not on PATH: `npx` fetches it per use.
 
 ### 2d. Kane CLI (TestMu AI browser runs)
 
@@ -98,7 +148,23 @@ Then use `/framer` in the agent. The `framer-agent` skill explains the workflow.
 npm install -g @testmuai/kane-cli
 kane-cli doctor --install
 npx @testmuai/kane-cli-skill          # vendor skill for coding agents
+kane-cli login --username <user> --access-key <key>    # or: kane-cli login --oauth
 ```
+
+Kane CLI is documented, not installed, not on PATH, and it is a CLI, not an MCP
+server (Kane-as-MCP is a non-goal). The human runs the install; you run
+`command -v kane-cli` before relying on it.
+
+### 2e. Higgsfield CLI, as-is
+
+```bash
+npm i -g @higgsfield/cli && higgsfield auth login     # or: npx @higgsfield/cli
+```
+
+Documented, not installed, not wrapped. The hosted MCP (`higgsfield`) is the primary
+path; the studio rules in `skills/higgsfield-media` apply to both: first-party only,
+no OpenRouter; 5–8 s looping Framer heroes, not films; credit cost before any video
+batch.
 
 ## 3. Using the skills
 
@@ -108,12 +174,28 @@ hosts copy the folders:
 - Claude Code: `cp -r skills/* ~/.claude/skills/`
 - Codex: `cp -r skills/* ~/.codex/skills/`
 
-Each skill states its server, auth, playbook, and guardrails. Combo skills:
-`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`.
+17 skills (`skills/README.md`). Each states its server, auth, playbook, and
+guardrails. Combo skills: `design-to-code-pipeline`, `brand-launch-kit`,
+`ship-and-verify`; bridge: `mcp-cli-bridges`; reference: `divmagic-raw` (DivMagic is a
+Chrome extension, not MCP). The one-stack rule the combos share: Tailwind + shadcn +
+tokens; Relume / Untitled UI for Framer clients; DivMagic + Brandfetch feed RAW; shadcn
+is what we ship.
 
 ## 4. Calling MCP servers from bash (token-light)
 
-Use this in scripts, fan-out children, or when the host has no MCP client.
+Use this in scripts, fan-out children, or when the host has no MCP client. Two
+different binaries are called `mcp2cli`; never treat them as one tool:
+
+- **Pi / titan-harness (this package):** the **Python** mcp2cli (knowsuchagency/mcp2cli,
+  `uvx mcp2cli` or `uv tool install mcp2cli`) plus **mcporter** (TypeScript).
+- **Grok / triarc-creative-stack:** the **Rust** mcp2cli (mcp2cli.dev,
+  `curl -fsSL https://mcp2cli.dev/install.sh | sh`, `mcp2cli config init --name …`,
+  `mcp2cli link create --name …`) plus **mcp-to-cli** (Smithery).
+
+If a `mcp2cli` is already on PATH, `mcp2cli --help` tells you which one it is. Prefer a
+named link per server (`higgsfield`, `figma`, `relume`, `brandfetch`, `macro`, `testmu`)
+so bash looks like a CLI, and keep native MCP in the interactive host. All of these
+are documented, not installed, not on PATH: `docs/named-links.md`.
 
 ### mcp2cli (Python)
 
@@ -135,7 +217,7 @@ mcp2cli --mcp-stdio "npx -y momentic mcp --config $MOMENTIC_CONFIG" --env MOMENT
 ```bash
 npx mcporter list https://relume-library-mcp.relume.io/mcp --brief
 npx mcporter call https://relume-library-mcp.relume.io/mcp.<tool> --<arg> <value>
-npx mcporter list ~/.config/mcp/mcp.json     # reads the same mcpServers shape
+npx mcporter list ~/.config/mcp/mcp.json     # reads the same mcpServers shape; server names are the links
 ```
 
 OAuth-only servers need a bearer token the host already obtained (complete
@@ -145,23 +227,28 @@ OAuth-only servers need a bearer token the host already obtained (complete
 
 ```bash
 pi list                                        # package + companions present
+node scripts/apply-dw-patch.mjs --check        # 0 = menu-hook patch applied
 node scripts/install-mcp.mjs --dry-run | tail -5
 PI_OFFLINE=1 pi -p "reply with the single word pong" --no-session --mode json < /dev/null | grep -c pong
+node -e 'JSON.parse(require("fs").readFileSync("mcp/mcp.json","utf8")); console.log("catalog ok")'
 ```
 
 In a TUI session: `/stack status` (settings), `/titan` (command index + model bar),
-`/mcp` (server status), `/workflows` (dynamic-workflows menu with the stack's
-subagent-tools and fan-out toggles).
+`/mcp` (server status, including the `titan-harness__*` package servers), `/workflows`
+(dynamic-workflows menu with the stack's subagent-tools and fan-out toggles).
 
 ## 6. What this package changes on the machine
 
 - `~/.pi/agent/settings.json` packages entry (via `pi install`).
 - `~/.pi/agent/titan-harness.json` (created on first `/stack` change).
-- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs`).
+- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs`; the
+  `pi.mcp` catalog itself is registered in memory and writes no file).
 - `~/.pi/workflows/settings.json` `excludeSubagentTools` / `defaultConcurrency`
   (only when `/stack tools off` or `/stack fanout N` is used).
 - One documented patch to pi-dynamic-workflows' `dist/workflow-commands.js`
-  (bare `/workflows` menu hook). Without it the stock navigator opens; the
+  (bare `/workflows` menu hook), applied and reverted only by
+  `scripts/apply-dw-patch.mjs`, with the pristine file kept as
+  `workflow-commands.js.orig`. Without it the stock navigator opens; the
   toggles remain reachable through `/stack`.
 
 ## 7. Subagent model (pi-subagents) and Cerebras
@@ -211,3 +298,17 @@ The auditor needs a usable cross-family model: with Antigravity and xAI authed t
 auto rule picks Claude Opus 4.6, Gemini 3.8 Flash, or Grok 4.6 depending on the builder.
 `/stack auditor-model <provider/id>` pins one. The subagent cap is also written to
 `~/.pi/agent/extensions/subagent/config.json` (`globalConcurrencyLimit`).
+
+## 9. Non-goals
+
+titan-harness is gap-fill inside one package: one catalog, one skill pack per host,
+mcp2cli/mcporter named links, first-party CLIs used as-is. It will not become:
+
+- a mega-CLI that fronts every server;
+- a custom JSON-RPC MCP client (pi-mcp-adapter and the bridges are the clients);
+- a Fusion Drive merge;
+- a neuro-quant dump;
+- Kane-as-MCP (Kane CLI stays a CLI);
+- a Higgsfield marketing-skill dump (its 27–35 marketing skills are not imported);
+- Grok Imagine as a pack server;
+- an OpenRouter video server of any kind (Higgsfield is first-party only).
