@@ -7,7 +7,7 @@ Dan's Pi package. One install replaces `pi-titan-harness-v2` plus the loose
 
 | Extension | Commands | Notes |
 |---|---|---|
-| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor`, `/titan-watchdog`, `/workflow-monitor`, `/plan`, `/todos`, `/ultraplan`, `/create-workflow`, `/terraform`, `/local-dev-verify`, `/cloud-simulated-users`, `/workflow` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
+| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor`, `/titan-watchdog`, `/workflow-monitor`, `/workflow-sidebar`, `/titan-config`, `/plan`, `/todos`, `/ultraplan`, `/create-workflow`, `/terraform`, `/local-dev-verify`, `/cloud-simulated-users`, `/workflow` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
 | `extensions/ctx-picker.ts` | `/ctx [272k\|828k\|1m]`, `/titan-ctx` | Codex 272k / 828k-compact / OpenRouter 1M context presets (hardened: nothing is written unless the model is in the catalog and authed) |
 | `extensions/stack-settings.ts` | `/stack`, `/stack-settings` | subagent tools on/off (harness children + dynamic-workflows agents), subagent model and cap, exa, workflow fan-out, model bar, harness level, child concurrency cap, run budget, watchdog, doctor, opens the workflows navigator |
 | `extensions/titan-child-hooks.ts` | (none) | the narrow child mode: inside a `pi --mode json -p` workflow child it registers only the `tool_call` / `tool_result` handlers for the node's static hooks (`TITAN_NODE_HOOKS`) and, when `TITAN_NODE_SCHEMA` + `TITAN_NODE_RESULT_PATH` are set, the terminating `submit_result` tool; in the host and in every other child it returns immediately, so the recursion guard holds |
@@ -35,6 +35,8 @@ Command index (what bare `/titan` prints):
 | `/titan-doctor [--json\|--import-infranodus-key]` | models, credentials, tools, pins, decisions | |
 | `/workflow run\|validate\|list\|status\|stop\|graph\|schedule\|export <name>` | YAML DAG workflows (`.titan/workflows/<name>/<name>.yaml`); `schedule` arms `trigger:` workflows, `export --dw` emits a pi-dynamic-workflows script, `graph --html` writes the offline inspector | |
 | `/workflow-monitor [runId\|list\|--split\|close]` | store-driven run monitor: overlay, runs table, side pane | |
+| `/workflow-sidebar [runId\|expand\|collapse\|close]` | phased workflow progress sidebar, coloured by role and state | Ctrl+W · Alt+W · Ctrl+Shift+W |
+| `/titan-config [show\|list\|save <name>\|apply <name>\|delete <name>\|mcp <server> on\|off\|panel]` | settings panel with MCP toggles and quick configs | Ctrl+, · Alt+, |
 | `/titan-watchdog [status\|on\|off\|model\|thinking\|compaction\|resume]` | titan-native watchdog: compaction state block, child pre-emption, stalemate | |
 | `/plan [brief\|on\|off\|toggle]`, `/todos` | read-only plan mode; routes to `/ultraplan` when the shape declares `plan_command` | |
 | `/ultraplan <brief> \| answer <n> <text> \| fuse \| done \| abort \| status` | grilling round, anonymous fusion seats, judge, fused plan with ACKs | |
@@ -56,25 +58,107 @@ since 0.7.0 `schedules` — `{ "<workflow>": { "armed": true, "lastRun": "<iso>"
 the defaults without being rewritten. Workflow fan-out and the tool exclusion list live where pi-dynamic-workflows
 reads them, `~/.pi/workflows/settings.json` (`defaultConcurrency`, `excludeSubagentTools`).
 
+## What changed in 0.9.0
+
+The v0.9 phase implemented [`docs/PRD-v0.9-live-tui.md`](docs/PRD-v0.9-live-tui.md) (R1–R5);
+the state of the work before it is in [`docs/status-report-2026-09-15.md`](docs/status-report-2026-09-15.md).
+The workflow that titan's own `/create-workflow` authored from that PRD is checked in as
+[`.titan/workflows/v09-live-tui/`](.titan/workflows/v09-live-tui/) (five phases: plan → build →
+verify → audit → report; `v09-live-tui.yaml`, `commands/*.md`, `AUTHORING.md`) — it is the
+reference example of what the authoring pipeline produces.
+
+**R1 Live status line and bar.** The harness preset is the first segment of Pi's status
+line (`⬡ L3 engineering · builders 3 · … · plan → /ultraplan`, then any live counters:
+`N running`, `workflow <name>`, `watchdog <state>`, the session cost) — Pi sorts extension
+status segments by key, so titan's key is `0-titan`, which sorts before every letter key.
+The segment and the model bar repaint on their own tick: every second while a child, a
+workflow or a pre-emption is in flight, every 5 s idle, and on every `announce()`. The bar
+requests a TUI render on each tick (its rows are computed inside the widget's `render`),
+and the ⟁ LEVEL row now sits on top, above Σ TOTALS. `TITAN_DEBUG_LOG=<file>` appends one
+line per bar tick and any render error (diagnostics only).
+
+**R2 Shift+Tab cycles the presets.** With `app.thinking.cycle` moved off Shift+Tab in
+`~/.pi/agent/keybindings.json` (`/titan-level --claim-shift-tab` after a confirm, or
+`node scripts/keybindings-rebind.mjs`; then `/reload`), Shift+Tab walks the level shapes
+0 → 1 → 2 → 3 → 0 exactly like `/titan-level next`, with the announcement and the status
+segment updating live; reasoning effort moves to Alt+T. Until the rebind, Shift+Tab keeps
+cycling Pi's reasoning effort (see "Harness levels").
+
+**R3 Workflow progress sidebar.** `/workflow-sidebar [runId|expand|collapse|close]` and
+**Ctrl+W** (Alt+W, Ctrl+Shift+W on terminals that swallow Ctrl+W) toggle a right-anchored
+overlay that lists the phased workflow like a todo list: `│ ⠋ [builder]   build — implement
+the dashboard (redo 2)`, one line per phase with a `│` bar in the owning role's colour, a
+state glyph, the role box and the phase title plus its `detail:` (else the first prompt line);
+`expand` adds `  └ <node> · <state>` lines; the editor keeps input. Phases come from the
+document's `phases:`, else the run's phases, else one per layer. Terminal phases idle for
+10 minutes go **dormant** (dimmed `#475569`), and the sidebar closes itself 10 minutes after
+the run reached a terminal state (`ctrl+w close · 10 min idle → dormant · auto-close in N min`).
+
+| Role bar | hex | | Phase state | glyph | hex |
+|---|---|---|---|---|---|
+| architect | `#7c3aed` | | queued | ○ | `#64748b` |
+| builder | `#f59e0b` | | working | spinner | `#2563eb` |
+| worker | `#22d3ee` | | in-review (auditor/verifier node running) | ● | `#d97706` |
+| verifier | `#16a34a` | | redo n (2nd+ agent call of a node, edit-round-n) | ● `(redo n)` | `#ea580c` |
+| auditor | `#d97706` | | review-passed (done-verified / PASS) | ✓ | `#16a34a` |
+| watchdog | `#0d9488` | | done (unverified) | ● | `#ca8a04` |
+| fusion · judge · fuser | `#f472b6` | | failed | ✗ | `#991b1b` |
+| system (bash, script) | `#94a3b8` | | skipped | – | `#6b7280` |
+
+**R4 Settings panel and quick configs.** **Ctrl+,** (Alt+,) or `/titan-config panel` opens
+one overlay with every harness setting, editable in place: Harness (level, shape, builder /
+worker / watchdog / verifier / exa pools, exa in children, subagents per child, concurrent
+children, budget), Watchdog (enabled, model, thinking, on compaction, stalemate repeats),
+Monitor (mode), Review (auditors, anonymize, audit rounds), Bar (model bar), MCP servers
+(one toggle per server of the merged catalog with its source and reason, e.g. `missing env
+INFRANODUS_API_KEY`), Quick configs (save current as…, apply a saved one). Keys: `↑↓ move ·
+space/enter toggle-or-edit · ←→ change · s save config · esc close`. Level and shape rows go
+through the live loader (`/titan-level` / `/titan-shape` semantics); everything else writes
+`~/.pi/agent/titan-harness.json`. An MCP toggle writes the **user** catalog
+`~/.config/mcp/mcp.json` (or the project `.mcp.json` with `--project`), copying the package
+definition with its `${VAR}` references when the entry is absent, never a credential value,
+and asks for `/reload` (pi-mcp-adapter reads the catalog at start). Quick configs are
+`~/.pi/titan-harness/configs/<name>.json` (`name`, `savedAt`, `note`, `settings`, `shape`,
+`level`, `mcp`), managed by `/titan-config show | list | save <name> [note…] | apply <name> |
+delete <name> | mcp <server> on|off [--project] | panel`.
+
+**R5 mcp2cli.** `node scripts/mcp2cli.mjs list | tools <server> | call <server> <tool>
+[--json '{…}' | key=value …] [--timeout ms] [--text] [--verbose] | doctor` runs over titan's
+own stdio MCP client and the same merged catalog as the runtime bridge (`--cwd <dir>` picks
+the project `.mcp.json`, `--catalog <file>` replaces the merge). Exit codes: 0 ok · 1 tool
+`isError` or RPC error · 2 usage / bad JSON · 3 server missing, disabled (catalog flag,
+missing `${VAR}` named, or `url`-only → pi-mcp-adapter) or failed to start · 4 timeout.
+Credential values never leave the process; `--verbose` redacts `key|token|secret|password`
+values. Workflow `bash:` nodes can call it. `/titan-doctor` prints the three flavours on one
+line — `mcp2cli · titan ✓ <path> · python (uvx) ✓|○ · rust ✓|○` — alongside the Python
+`uvx mcp2cli` and the Rust one the Grok plugin uses (`skills/mcp-cli-bridges`).
+
+**Still Dan's call (the PRD's open questions, defaults chosen):** the sidebar hotkey stays
+Ctrl+W with Alt+W and Ctrl+Shift+W as twins (Ctrl+W is "delete word" in many editors); MCP
+toggles write the user catalog by default with `--project` for the project file; dormancy dims
+phase lines at 10 min idle and the sidebar auto-closes 10 min after a terminal state.
+
 ## Model bar (the "existing tps graphic")
 
-Top row `Σ TOTALS | 1.24M tok · $3.87 · 41 tps/agent · verified 86 % (12/14)`: the
+Top row (since 0.9.0) `⟁ LEVEL | L3 engineering | b3 w5 wd5 v5 exa10 | plan → /ultraplan | shift+tab · alt+l`
+(the live level or `shape <codename>`, its lane pools, the plan default and the hotkey
+that cycles; amber with `run /terraform` at level 3 without a terraform pack). Then
+`Σ TOTALS | 1.24M tok · $3.87 · 41 tps/agent · verified 86 % (12/14)`: the
 session ledger — token burn, cost, average tps per agent and completion rate
 (done-verified over every settled agent); `no runs yet` before the first ledger row,
 accent while a run is live, dim when idle. Then one row per configured slot:
 `◆ ROLE | slot | model (thinking) | [██--------] 12% | 87 tps | $0.0123`; a slot whose
 requested thinking exceeds its provider's ceiling shows `xhi↘hi`, never a fake xhigh.
-Then `⟁ LEVEL | L3 engineering | b3 w5 wd5 v5 exa10 | plan → /ultraplan | shift+tab · alt+l`
-(the live level or `shape <codename>`, its lane pools, the plan default and the hotkey
-that cycles; amber with `run /terraform` at level 3 without a terraform pack),
-`◫ MONITOR | smoke-two · running · 1/2 agents working · verified 0/2 · /workflow-monitor`
-(the in-flight `/workflow run`, else the newest run of this project; blue while live),
+Then `◫ MONITOR | smoke-two · running · 1/2 agents working · verified 0/2 · /workflow-monitor`
+(the in-flight `/workflow run`, else the newest workflow or command run of this project —
+the session run only when nothing else exists; blue while live),
 `⌗ WATCHDOG | armed · qwen-3.8-27b · halt-inspect · 2 inspections · $0.0100 · findings 1 · stalemate 0/3`
 (only when the watchdog is on; `off · /titan-watchdog on` otherwise; red on a stalemate
 or a failed inspector), `⇶ FAN-OUT | 2 running / 3 spawned | stack 3 | /titan-opinion 14s`,
 and the SUBAGENT, EXA, SHAPE and AUDITOR rows. The host's own raw-chat turns are credited to the primary
 slot, so the tps of the model you are chatting with is live even outside `/titan-*`
-commands. `/titan off` or `/stack bar off` hides it.
+commands. The bar and the status segment repaint on a 1 s tick while anything runs and every
+5 s idle (0.9.0); `/titan off` or `/stack bar off` hides the bar.
 
 ## Harness levels (0.3.0)
 
@@ -117,14 +201,21 @@ Entering a level from a plain shape snapshots the pool sizes, `childExa`, `audit
 plain shape again (`/titan-shape consult`, `legacy`) ends the level and restores them,
 so the LEVEL row goes back to `shape consult | b2 …` instead of keeping level 3's pools.
 
-**Shift+Tab** cycles levels only after a rebind, because Pi reserves it for
-`app.thinking.cycle` and silently drops extension bindings on it.
-`/titan-level --claim-shift-tab` asks for a confirm, then moves `app.thinking.cycle` to
-`alt+t` in `~/.pi/agent/keybindings.json` (backup `keybindings.json.bak`);
-`node scripts/keybindings-rebind.mjs` does the same from a shell (`--check` exits 0
-free / 2 reserved, `--dry-run`, `--restore`, `--to <key>`). `/reload` afterwards, and
-titan binds Shift+Tab at the next session start. Until then Alt+L and `/titan-level`
-work, and the LEVEL row says `alt+l · /titan-level`.
+**Shift+Tab.** On a machine that has not been rebound, **Shift+Tab cycles Pi's reasoning
+effort of the main model** (Pi's `app.thinking.cycle`), not the harness presets: Pi reserves
+that chord and silently drops any extension binding on it. To make Shift+Tab cycle the
+levels instead, move `app.thinking.cycle` elsewhere and reload:
+
+1. Inside Pi: `/titan-level --claim-shift-tab` (a confirm dialog, then `app.thinking.cycle`
+   → `alt+t` in `~/.pi/agent/keybindings.json` with a `keybindings.json.bak` backup), or
+   from a shell `node scripts/keybindings-rebind.mjs` (`--check` exits 0 free / 2 reserved,
+   `--dry-run`, `--restore`, `--to <key>`).
+2. `/reload` (or restart Pi). titan binds Shift+Tab at the next session start.
+
+`/titan-level status` and `/titan-doctor` say which state the machine is in. Until the
+rebind, Alt+L (Ctrl+Shift+L on Kitty-protocol terminals) and `/titan-level` cycle the
+levels, the LEVEL row says `alt+l · /titan-level`, and reasoning effort stays on
+Shift+Tab; after it, reasoning effort moves to Alt+T and the row says `shift+tab · alt+l`.
 
 `model-stack-ultraplan.yaml` ships the fusion roster for the later `/ultraplan`:
 architect gpt-6-astra xhigh (fallback grok-4.6); seats fable-5.1 xhigh (fallback

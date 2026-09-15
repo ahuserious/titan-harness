@@ -290,6 +290,8 @@ node scripts/verify-ledger.mjs ~/.pi/titan-harness/runs/<projectSlug>/<runId>   
 node scripts/titan-lock-check.mjs <workflow>   # 0 free · 1 a live run holds the lock · 2 usage
 node scripts/titan-monitor.mjs --list ~/.pi/titan-harness/runs --project <projectSlug>   # the runs table without the TUI
 node scripts/cdp-browser.mjs doctor           # which Chromium /local-dev-verify would drive (exit 3: none)
+node scripts/mcp2cli.mjs doctor               # 0.9.0: catalog servers, env NAME reasons, the three mcp2cli flavours
+node scripts/mcp2cli.mjs list                 # 0.9.0: every catalog server, enabled or disabled (never a value)
 ```
 
 In a TUI session: `/titan-doctor` (every item `ready` or `vacant`, none `unknown`),
@@ -310,6 +312,10 @@ classify-and-fix --html` (write `.titan/plans/classify-and-fix.dw.mjs` and
 source list, the connector table, the automation recipes; nothing spent),
 `/cloud-simulated-users probe` (four lanes, each `ready` or `vacant` with the missing
 names), `/local-dev-verify` in a folder without an app (`unavailable`, never a silent pass).
+Since 0.9.0 also: Ctrl+, (the settings panel; `esc` closes it), Ctrl+W (the workflow
+sidebar; again to close), `/titan-config list` (saved quick configs, `none` at first),
+`/titan-config show` (every setting, MCP server and quick config as text), and after the
+Shift+Tab rebind of step 1b, Shift+Tab cycles the preset in the first status segment.
 
 ## 6. What this package changes on the machine
 
@@ -325,9 +331,13 @@ names), `/local-dev-verify` in a folder without an app (`unavailable`, never a s
   fails that node with exit 127 (`bun not found on PATH …`), nothing else.
 - `~/.pi/agent/keybindings.json` (only via the Shift+Tab rebind, step 1b; backup
   `keybindings.json.bak`).
-- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs` or
-  `/titan-doctor --import-infranodus-key`; the `pi.mcp` catalog itself is registered in
-  memory and writes no file).
+- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs`,
+  `/titan-doctor --import-infranodus-key`, or, since 0.9.0, an MCP toggle in the settings
+  panel / `/titan-config mcp <server> on|off`, which copies the package definition with its
+  `${VAR}` references into the user file — `--project` writes `<project>/.mcp.json` instead;
+  the `pi.mcp` catalog itself is registered in memory and writes no file).
+- `~/.pi/titan-harness/configs/<name>.json` (0.9.0 quick configs; 0600, written by
+  `/titan-config save` or the panel's `s`).
 - `~/.pi/workflows/settings.json` `excludeSubagentTools` / `defaultConcurrency`
   (only when `/stack tools off` or `/stack fanout N` is used).
 - Since 0.5.0–0.8.0: `<runDir>/results/` (structured-output v2 result files),
@@ -397,6 +407,8 @@ foot); the Alt variants work in every terminal:
 | subagent cap 0/2/4/6/8 | Ctrl+Shift+S | Alt+S | `/titan-s [0-16]` |
 | auditors on/off | Ctrl+Shift+A | Alt+A | `/titan-audit [on\|off]` |
 | cycle level 0→3 | Ctrl+Shift+L (and Shift+Tab after the rebind, step 1b) | Alt+L | `/titan-level next` |
+| workflow sidebar (0.9.0) | Ctrl+W (Ctrl+Shift+W where the terminal eats Ctrl+W) | Alt+W | `/workflow-sidebar` |
+| settings panel (0.9.0) | Ctrl+, | Alt+, | `/titan-config panel` |
 
 The auditor needs a usable cross-family model: with Antigravity and xAI authed the
 auto rule picks Claude Opus 4.6, Gemini 3.8 Flash, or Grok 4.6 depending on the builder.
@@ -481,13 +493,53 @@ Chromium is present in the Playwright cache, so `/local-dev-verify` and the `cdp
 runner run; ffmpeg only in that cache, so `video` is recorded when that binary is found and
 `video: unavailable` otherwise.
 
+## 8d. Live TUI, Shift+Tab presets, sidebar, settings panel, mcp2cli (0.9.0)
+
+What 0.9.0 added (spec: [`docs/PRD-v0.9-live-tui.md`](docs/PRD-v0.9-live-tui.md)) and how to
+verify each piece:
+
+- **Live status line and bar (R1).** The harness preset leads Pi's status line and the model
+  bar repaints on a 1 s tick while anything runs (5 s idle). Verify: `/workflow run smoke-two`
+  (or any workflow); within a second of the final panel the ◫ MONITOR row reads `completed`
+  and the status segment drops `workflow <name>`. `TITAN_DEBUG_LOG=/tmp/titan.log pi` logs
+  one line per bar tick if you need to see it move.
+- **Shift+Tab cycles the presets (R2).** Needs step 1b: `~/.pi/agent/keybindings.json` must
+  carry `{ "app.thinking.cycle": "alt+t" }` (`/titan-level --claim-shift-tab` after the
+  confirm, or `node scripts/keybindings-rebind.mjs`; `--check` prints `free`, exit 0), then
+  `/reload`. Verify: press Shift+Tab — the first status segment goes `⬡ L0 ultrafast …` →
+  `⬡ L1 brain-ultrafast …` → `⬡ L2 triggered-ops …` → `⬡ L3 engineering … · plan → /ultraplan`;
+  Alt+T now cycles reasoning effort. Unrebound, Shift+Tab still cycles Pi's reasoning effort.
+- **Workflow sidebar (R3).** Verify: press Ctrl+W (or Alt+W / Ctrl+Shift+W, or
+  `/workflow-sidebar`): a right-anchored overlay `◧ WORKFLOW <name> · <status> · <elapsed>` with
+  one `│ <glyph> [role]  phase — description` line per phase and the footer
+  `ctrl+w close · 10 min idle → dormant`; the editor keeps input; press it again to close;
+  `/workflow-sidebar expand` adds the `└ node · state` lines.
+- **Settings panel and quick configs (R4).** Verify: press Ctrl+, (or Alt+, /
+  `/titan-config panel`): the sections Harness · Watchdog · Monitor · Review · Bar · MCP
+  servers · Quick configs with `↑↓ move · space/enter toggle-or-edit · ←→ change · s save
+  config · esc close`; `s` asks for a name and writes `~/.pi/titan-harness/configs/<name>.json`;
+  `/titan-config list` shows it, `/titan-config apply <name>` re-applies it,
+  `/titan-config mcp momentic on` writes `disabled: false` into `~/.config/mcp/mcp.json`
+  (`--project` targets `.mcp.json`) and asks for `/reload`.
+- **mcp2cli (R5).** Verify: `node scripts/mcp2cli.mjs doctor` (JSON: `catalog` files with
+  their layer and presence, `servers` enabled/disabled with the env NAME reason, `summary`,
+  `binaries` node/npx/uvx/mcp2cli, and `mcp2cli.titan|python|rust` availability), `node scripts/mcp2cli.mjs list`, `node scripts/mcp2cli.mjs tools <server>`,
+  `node scripts/mcp2cli.mjs call <server> <tool> key=value`; exit codes 0 ok · 1 tool error ·
+  2 usage · 3 server missing/disabled/failed to start · 4 timeout. `/titan-doctor` shows
+  `mcp2cli · titan ✓ … · python (uvx) ✓|○ · rust ✓|○`. Node ≥ 22.7 (the script re-executes
+  itself under `--experimental-transform-types`; under bun it loads natively).
+
+The reference example of `/create-workflow` output is checked in at
+`.titan/workflows/v09-live-tui/` (authored from the PRD; `/workflow validate v09-live-tui`
+→ valid).
+
 ## 9. Non-goals
 
 titan-harness is gap-fill inside one package: one catalog, one skill pack per host,
 mcp2cli/mcporter named links, first-party CLIs used as-is. It will not become:
 
 - a mega-CLI that fronts every server;
-- a custom JSON-RPC MCP client (pi-mcp-adapter and the bridges are the clients);
+- a model-facing MCP client of its own (pi-mcp-adapter serves the model; titan's `modules/mcp-client.ts` is the runtime bridge for workflow `mcp_tool` nodes, the InfraNodus stage and, from v0.9, `scripts/mcp2cli.mjs`);
 - a Fusion Drive merge;
 - a neuro-quant dump;
 - Kane-as-MCP (Kane CLI stays a CLI);
