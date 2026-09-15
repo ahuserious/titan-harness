@@ -7,7 +7,7 @@ Dan's Pi package. One install replaces `pi-titan-harness-v2` plus the loose
 
 | Extension | Commands | Notes |
 |---|---|---|
-| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor`, `/workflow` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
+| `extensions/titan-harness/` | `/titan`, `/titan-opinion`, `/titan-debate`, `/titan-fusion`, `/titan-collaborate`, `/titan-auto-validate`, `/titan-only`, `/titan-model`, `/titan-system-prompt`, `/titan-reset`, `/titan-shape`, `/titan-n`, `/titan-s`, `/titan-audit`, `/titan-level`, `/titan-doctor`, `/titan-watchdog`, `/workflow-monitor`, `/plan`, `/todos`, `/ultraplan`, `/create-workflow`, `/terraform`, `/local-dev-verify`, `/cloud-simulated-users`, `/workflow` | disler/fusion-harness v2, edited: children load the host's extensions (no `--no-extensions`), no panels/grids/banner, plain markdown results, one status line while agents run, model bar ON by default with Σ TOTALS, LEVEL and FAN-OUT rows |
 | `extensions/ctx-picker.ts` | `/ctx [272k\|828k\|1m]`, `/titan-ctx` | Codex 272k / 828k-compact / OpenRouter 1M context presets (hardened: nothing is written unless the model is in the catalog and authed) |
 | `extensions/stack-settings.ts` | `/stack`, `/stack-settings` | subagent tools on/off (harness children + dynamic-workflows agents), subagent model and cap, exa, workflow fan-out, model bar, harness level, child concurrency cap, run budget, watchdog, doctor, opens the workflows navigator |
 | `extensions/titan-child-hooks.ts` | (none) | the narrow child mode: inside a `pi --mode json -p` workflow child it registers only the `tool_call` / `tool_result` handlers for the node's static hooks (`TITAN_NODE_HOOKS`) and, when `TITAN_NODE_SCHEMA` + `TITAN_NODE_RESULT_PATH` are set, the terminating `submit_result` tool; in the host and in every other child it returns immediately, so the recursion guard holds |
@@ -33,13 +33,27 @@ Command index (what bare `/titan` prints):
 | `/titan-audit [on\|off]` | auditors per builder | Ctrl+Shift+A · Alt+A |
 | `/titan-level [0-3\|next\|status\|--claim-shift-tab]` | harness level 0-3 | Ctrl+Shift+L · Alt+L · Shift+Tab after the rebind |
 | `/titan-doctor [--json\|--import-infranodus-key]` | models, credentials, tools, pins, decisions | |
-| `/workflow run\|validate\|list\|status\|stop\|graph <name>` | YAML DAG workflows (`.titan/workflows/<name>/<name>.yaml`) | |
+| `/workflow run\|validate\|list\|status\|stop\|graph\|schedule\|export <name>` | YAML DAG workflows (`.titan/workflows/<name>/<name>.yaml`); `schedule` arms `trigger:` workflows, `export --dw` emits a pi-dynamic-workflows script, `graph --html` writes the offline inspector | |
+| `/workflow-monitor [runId\|list\|--split\|close]` | store-driven run monitor: overlay, runs table, side pane | |
+| `/titan-watchdog [status\|on\|off\|model\|thinking\|compaction\|resume]` | titan-native watchdog: compaction state block, child pre-emption, stalemate | |
+| `/plan [brief\|on\|off\|toggle]`, `/todos` | read-only plan mode; routes to `/ultraplan` when the shape declares `plan_command` | |
+| `/ultraplan <brief> \| answer <n> <text> \| fuse \| done \| abort \| status` | grilling round, anonymous fusion seats, judge, fused plan with ACKs | |
+| `/create-workflow <goal> [--name n] [--from-plan id] [--from <report> [--elevate]] [--level 0-3] [--tier t] [--dry-run] [--force]` | clean-context workflow architect authors `.titan/workflows/<name>`; the host persists | |
+| `/terraform [--refresh] [--section s] [--dry-run]` | entity, ontology, roadmap, automations, connectors docs under `.titan/terraform` | |
+| `/local-dev-verify [--url u] [--start "cmd"] [--flows f] [--workers n] [--no-video]` | sim users against the local app: Kane or headless Chromium (CDP), hashed evidence | |
+| `/cloud-simulated-users [probe\|setup <p>\|run <p> --objective "…"\|advice]` | cloud sim-user lanes: probe matrix, setup agent, recorded runs | |
 | `/titan [on\|off\|toggle]` | this list; model bar on/off (alias `/fh`) | |
 
 Settings: `~/.pi/agent/titan-harness.json` (`subagentTools`, `modelBar`, the shape keys,
-and since 0.3.0 `harnessLevel`, the lane pools `workerFanOut` / `watchdogFanOut` /
-`verifierFanOut` / `exaFanOut`, `maxConcurrentChildren`, `budgetUsd`, `watchdog`, `store`,
-`monitor`). Workflow fan-out and the tool exclusion list live where pi-dynamic-workflows
+and since 0.3.0 `harnessLevel`, `levelRestore`, the lane pools `workerFanOut` / `watchdogFanOut` /
+`verifierFanOut` / `exaFanOut`, `maxConcurrentChildren`, `budgetUsd`, `watchdog`
+(`enabled` false, `model` `cerebras/qwen-3.8-27b`, `thinking` medium, `stalemateRepeats` 3,
+`onCompaction` halt-inspect, `inspectorTimeoutMs` 20000, `preemptAtContextFraction` 0.75),
+`store` (`root`, `sqliteIndex` false), `monitor` (`mode` overlay), `shiftTabHintShown`, and
+since 0.7.0 `schedules` — `{ "<workflow>": { "armed": true, "lastRun": "<iso>" } }`, written by
+`/workflow schedule arm|disarm`). Defaults are `DEFAULT_STACK_SETTINGS` in
+`modules/stack-config.ts`; every key is validated on read and a malformed file falls back to
+the defaults without being rewritten. Workflow fan-out and the tool exclusion list live where pi-dynamic-workflows
 reads them, `~/.pi/workflows/settings.json` (`defaultConcurrency`, `excludeSubagentTools`).
 
 ## Model bar (the "existing tps graphic")
@@ -53,8 +67,12 @@ requested thinking exceeds its provider's ceiling shows `xhi↘hi`, never a fake
 Then `⟁ LEVEL | L3 engineering | b3 w5 wd5 v5 exa10 | plan → /ultraplan | shift+tab · alt+l`
 (the live level or `shape <codename>`, its lane pools, the plan default and the hotkey
 that cycles; amber with `run /terraform` at level 3 without a terraform pack),
-`⇶ FAN-OUT | 2 running / 3 spawned | stack 3 | /titan-opinion 14s`, and the SUBAGENT,
-EXA, SHAPE and AUDITOR rows. The host's own raw-chat turns are credited to the primary
+`◫ MONITOR | smoke-two · running · 1/2 agents working · verified 0/2 · /workflow-monitor`
+(the in-flight `/workflow run`, else the newest run of this project; blue while live),
+`⌗ WATCHDOG | armed · qwen-3.8-27b · halt-inspect · 2 inspections · $0.0100 · findings 1 · stalemate 0/3`
+(only when the watchdog is on; `off · /titan-watchdog on` otherwise; red on a stalemate
+or a failed inspector), `⇶ FAN-OUT | 2 running / 3 spawned | stack 3 | /titan-opinion 14s`,
+and the SUBAGENT, EXA, SHAPE and AUDITOR rows. The host's own raw-chat turns are credited to the primary
 slot, so the tps of the model you are chatting with is live even outside `/titan-*`
 commands. `/titan off` or `/stack bar off` hides it.
 
@@ -207,12 +225,12 @@ join → PR) and `proto-analytics-dashboard` (level 3: spec map → TDD loop →
 comes from `--input`), `returns` (the node whose output is the run's result), `phases`,
 `provider: pi`, default `model` / `thinking`, `trigger` (parsed only) and a `titan:` block
 (`level`, `shape`, `tier`, `modes`, `evidence`, `elevation`, `watchdog`, `budget`,
-`personas`; `budget.max_concurrent_children` is validated ≤ 16, the per-layer
-parallelism today is `/stack concurrency`). Every node has exactly one type key —
+`personas`, `parent_run`; `budget.max_concurrent_children` (≤ 16) caps that run's layer
+parallelism, `min` with `/stack concurrency`, since 0.5.0). Every node has exactly one type key —
 `prompt` · `command` · `bash` · `script` (+ `runtime: bun|uv`, `deps`) · `loop` ·
 `approval` · `cancel` · `mcp_tool` · `workflow` (a child run, optional `fan_out`) — while
-`verify` / `best_of` / `interleave` / `hypothesis` validate and schedule but end `failed`
-with `not implemented until P4` until 0.5.0. Routing: `depends_on`; `when` (comparisons
+`verify` / `best_of` / `interleave` / `hypothesis` (real since 0.5.0, see "Verification
+tiers and evidence" and "Patterns" below). Routing: `depends_on`; `when` (comparisons
 `== != < > <= >=` between `$id.output[.field]` and literals, `&&` / `||`, parentheses;
 only over nodes with `output_format`; unresolved → false, node skipped); `trigger_rule`
 `all_success` (default) · `one_success` · `none_failed_min_one_success` · `all_done`.
@@ -233,8 +251,10 @@ and an architect is read-only by construction (write tools rejected by the valid
 `denied_tools: [write, edit, bash]` injected, write tools dropped in the child).
 `output_format` (a JSON schema or `$ref: titan://schemas/audit-verdict`) appends the
 schema to the prompt, validates the answer and re-asks at most 3 times before the node
-fails (structured output v1; the child-side `submit_result` tool in `titan-child-hooks`
-arms only when the executor exports `TITAN_NODE_SCHEMA`, which 0.4.0 does not yet do).
+fails (structured output v1, the fallback). Since 0.7.0 the runtime also exports
+`TITAN_NODE_SCHEMA` and `TITAN_NODE_RESULT_PATH` for every `output_format` node and adds
+`submit_result` to the child's tools, so `titan-child-hooks` registers that terminating
+tool and the typed object comes back with zero re-asks (structured output v2).
 
 **Failure.** `retry` (`max_attempts` default 2, `delay_ms` 3000; never on loops,
 approvals or cancels) re-runs a failed node. `loop.max_iterations` (≤ 10, with `until`
@@ -270,6 +290,361 @@ every approval.
 (inline `script:` text). Every workflow child also lands in the session ledger, so the
 Σ TOTALS row moves while a workflow runs; the workflow run's own ledger is canonical
 for that run.
+
+## Verification tiers and evidence (0.5.0)
+
+A workflow (or a node) names a tier in `titan.tier` / `tier:`; the tier is data in
+`modules/workflow/tiers.ts` and says which evidence kinds must be *observed* before a
+builder's work counts as verified. Hard evidence is `capturedBy: observed` only: the
+harness hashed the bytes itself (a runner artifact, a file a tool wrote). `inferred` rows
+(bash targets, harvest scans) and `declared` rows (a model sentence) are recorded with
+their label and never satisfy a requirement.
+
+| Tier | Required kinds (all observed) | Verifier runners | Review | Sim-user |
+|---|---|---|---|---|
+| `web-general` | `http-status`, `payload-hash`, `screenshot`, `db-op-log` | `bash`, `orca-browser` | optional | no |
+| `research-planning` | `plan-digest`, `source-digests`, `alignment-table` | `verifier` | required | no |
+| `prototype-analytics` | `test-result`, `log`, `screenshot`, `script`, `result-card`, `design-match` | `cursor-cloud`, `kane` | required | no |
+| `production-swe` | prototype-analytics + `console-log`, `network-log`, `schedule-id`, and `video` or `screenshot` from a sim-user source (`kane`, `momentic`, `orca`, `cdp`) | `kane`, `momentic`, `orca-browser` | required | yes |
+| `platform-update` | `diff`, `migration-log`, `coverage-report` (`coverage` 100), `probe`, `rollback-note` | every runner + `approval` | required | yes (1 human approval) |
+| `content` | `payload-hash`, `source-digests`, `screenshot`, `approval-receipt` | `approval`, `judge` | required (3 human approvals) | no |
+
+A `verify:` node runs one runner and writes the package: files under
+`artifacts/evidence/<nodeId>/`, the canonical `evidence/<nodeId>/evidence.json`
+(`schemaVersion` 1, `status` `matched` / `current-unverified` / `unavailable` /
+`excluded`, every artifact with `sha256`, `kind`, `capturedBy`, `source`, degradations
+`unhashed` / `scan-failed` / `truncated` / `missing`, `checks`, `missingInformation`) and its
+`.sha256` sidecar, then logs `evidence.captured`. The node succeeds only when the runner
+passed **and** the package is `matched`; `unavailable` is a non-retryable failure, never
+a silent pass. Runners and their fail-closed rules (`modules/workflow/runners/`):
+
+| Runner | Drives | Fails closed when |
+|---|---|---|
+| `bash` | `command` with `EVIDENCE_DIR` / `ARTIFACTS_DIR`; kinds inferred from file names (`db-op-log*.json`, `http-status*`, `payload-hash*`, `screenshot*`/`*.png`, `coverage*.json`, `probe*`, `rollback*`, `diff*`, `migration*`, else `log`); `checks.coverage`, `rowCounts`, `httpStatuses` parsed | non-zero exit or no artifact written |
+| `kane` | `kane-cli run "<objective>" --agent --headless [--max-steps N] [--remote --device-name D]` per device, NDJSON `run_end`, `.testmuai/evidence/**` hashed | `kane-cli` not on PATH → unavailable; any device without a passing `run_end` → fail |
+| `testmu` | a TestMu MCP tool through titan's MCP bridge, result stored as a `report` | no bridge / server disabled → unavailable |
+| `momentic` | Momentic MCP steps, `.momentic-mcp/**` hashed | skipped unless `enabled: true` **and** `MOMENTIC_API_KEY` (or `MOMENTIC_CONFIG`) is set; enabled without a bridge → unavailable |
+| `cursor-cloud` | preflight `GET /v1/me` with `CURSOR_API_KEY` (read at call time, never stored), branch on the remote required, idempotent agent id `sha256(run + node)`, polled until finished, artifacts downloaded and hashed | no key → unavailable with zero HTTP calls; 401 → unavailable; missing branch → fail; the key string is asserted absent from every artifact |
+| `orca-browser` | probes `orca tab --help` first; drives `orca tab create\|goto\|snapshot\|click\|fill\|screenshot\|eval` only when the usage text has `goto` and `screenshot` | this Orca build has no browser automation (`orca tab` is list/show/create/profile/close) → unavailable after one probe call |
+| `cdp-browser` | a headless Chromium over the DevTools protocol (see `/local-dev-verify`) | no Chromium found → unavailable |
+| `verifier` | an AI verifier (`prompts/SYSTEM_PROMPT_VERIFIER.md`) with the project's `vision.md`, `intent.md` and `.titan/terraform/*.md`; a deterministic citation check runs first | a cited section that does not exist, an execution claim, or a contradicted row fails the lane even when the model says ok |
+
+## Review-before-report, escalation and the ladder (0.5.0)
+
+No builder output reaches the architect or the summary as *verified* until a review
+frame is linked. An auditor-role node's answer (schema `titan://schemas/audit-verdict`;
+`status` is accepted as an alias of `verdict`) becomes a `review.verdict` event and
+`artifacts/reviews/<reviewedNode>.json`; the reviewed node is the node named by
+`reviews:` or the nearest builder/worker ancestor. `done-verified` needs PASS or
+PASS_WITH_WARNINGS **and** a `matched` evidence package for the tier's required kinds
+**and** a ledger row for the reviewer; PASS without matched evidence stays
+`done-unverified`; FAIL, SAFETY or SCOPE_VIOLATION is `failed-review` and fails the
+auditor node so `on_fail` applies. The `/workflow` panel shows a `verified` column and
+`verified k/n`; unverified builder output is prefixed `[titan] upstream output <id> is
+UNVERIFIED (no review frame)` in an architect node's prompt. Control flow, one model
+for every tier:
+
+- **Audit loop.** `on_fail: {action: reauthor}` on the auditor: the findings are written to
+  `artifacts/escalation-report.md` (verdict, findings table, evidence ids, diff hash,
+  attempts, the `/create-workflow --elevate --from <report>` next step), the run freezes
+  as `reauthored` (`elevation.freeze` event, the reviewed agent `failed-review`, an
+  `architect` pseudo-agent `repairing-workflow`), and a `cancel` node named `reauthor`
+  receives the report path as `$REJECTION_REASON`. The builder never resumes on reviewer
+  prose. The third failed audit of the same node (`AUDIT_FAILURES_BEFORE_ELEVATION` 3)
+  freezes with kind `elevate` even without `on_fail`.
+- **Mechanical loop.** A `loop:` with `until_bash` (or `on_fail: elevate`) is the one
+  counter: `loop.max_iterations` is the budget (tiers recommend 3). Iteration 1 runs the
+  seat as declared; iteration 2 bumps thinking one step (ceiling-aware, `high → xhigh↘high`
+  on a capped model) and resumes the same session with the failing log in
+  `$LOOP_USER_INPUT`; iteration 3 moves to the strongest usable model of the same family at
+  `max` in a fresh session (`deps.familyMax`; never a cross-family jump). Exhaustion with
+  `on_fail: elevate` writes the report and freezes the run (`elevation: <id> failed N
+  times`).
+- **Budget.** `titan.budget.max_concurrent_children` caps a run's layer parallelism
+  (`min` with `/stack concurrency`); `budgetUsd` refuses new children once the session
+  ledger is past it (`held-spend`).
+
+## Patterns (0.5.0, 0.7.0)
+
+| Node | What it does | Fail-closed rule |
+|---|---|---|
+| `best_of: {n, judge?, criteria?, prompt}` | `n` (2–8, default 4) fresh candidates `<node>-c1..cn`, then a judge (role `judge`, or `judge: provider/id`) over anonymous "Candidate 1..n" bodies — the judge prompt never carries a model id, callsign or session ref; winner delivered, losers archived under `artifacts/nodes/<id>/candidates/`, `best_of.candidates` / `best_of.verdict` events | all candidates failed → nothing delivered; an out-of-range verdict is re-asked ≤ 3 in the judge's session, then fails |
+| `interleave: {segments, by?, synthesize?, reauthor?, prompt}` | 2–16 fresh segment sessions (each prompt carries only its own segment; `$SEGMENT` / `$SEGMENT_COUNT` are replaced in the handler), archived under `artifacts/nodes/<id>/segments/`, then an architect-role (read-only) synthesis | any failed segment fails the node; with `reauthor: true` it is non-retryable and carries `meta.reauthor` for the escalation path |
+| `hypothesis: {hypotheses[], decide_by}` | tallies `links[]` (`supports` / `challenges` / `inconclusive` / `context`, optional `weight`) found in dependency outputs; `decide_by` is `most_supported` or a comparison over `supports|challenges|inconclusive|context|weight|count_*(id)` with `&& \|\|` and parentheses; every link and the decision are chained into `<runDir>/hypotheses.jsonl` | no links → failed, never retried; a tie or a false rule → undecided failure; decisions never come from prose |
+| `mimeograph: "a, b"` or `{personas, models?}` on an AI node | the same brief across k personas × m models (`mg-n` cells, fresh sessions), archived under `artifacts/nodes/<id>/mimeograph/`, judged like `best_of` | a missing persona fails the node non-retryably |
+| `persona: <name>` on an AI node | appends the persona (`personas/<name>.md` frontmatter `lens`, `bias`, `style`, optional `model`, `thinking`, then the body) to the seat's system prompt; roots `<cwd>/.titan/personas` › `~/.pi/titan-harness/personas` › the package's `personas/` (implementer, test-author, evidence-auditor, contrarian, cursor-cloud-swe, sim-user, workflow-architect, researcher) | prompts never contain a model name; two personas on one model produce different prompt hashes |
+
+## Content presets and approval receipts (0.5.0)
+
+`.titan/presets/content/<key>.yaml` (project) shadows the package's
+`.pi/titan-harness/presets/content/` (`README.md` and
+`example-saas-blog-post-founder.yaml`): `{key, industry, content_type,
+preference_profile: {voice, tone, banned_claims[], style_guide_ref}, rubric:
+[{criterion, threshold}], reviewers: {human_min (default 3, 1–20), roles[]},
+receipts_dir?}`. An `approval:` node with `preset_key` (and optionally `content:
+"$draft.output"`) writes an `approval-receipt` artifact per decision under
+`artifacts/receipts/<presetKey>/` (`{presetKey, reviewer, decision, rubricScores, ts,
+contentSha256}` — the reply `reviewer: Dana; accuracy=5, clarity=4` is parsed) and outputs
+`{approved, receipts, required, presetKey, contentSha256, reviewers, response}`, so a ship
+node's `when: $review.output.receipts >= 3` counts distinct named reviewers of the same
+content hash; a rejection or a duplicate reviewer blocks it.
+
+## Watchdog (0.6.0)
+
+Titan's own watchdog (`modules/watchdog/`, plan §5.5) replaces nothing in pi-subagents:
+that package's watchdog stays off inside titan children by default, its warning cards
+are ingested when an operator enables it, and its limits are mirrored
+(`stalemateRepeats` 3, reviewer input ≤ 24,000 chars, cadence ≥ 5 tools, review timeout
+30 s, compaction inspector 20 s, `WATCHDOG.md` ≤ 8 KB —
+`tests/watchdog-limits.test.ts` pins them against the installed 0.67.0 sources).
+States `idle → armed → inspecting → cleared | steering | resuming | halted-stalemate |
+failed`. Off by default: `/titan-watchdog on`.
+
+| Trigger | Action |
+|---|---|
+| host `session_before_compact` with a titan run active | a deterministic **state block** (run id, phase, node states, agents, evidence ids, open findings, plan digest, the last 20 event hashes) is built in memory, then on `manual` / `threshold` compactions a read-only inspector on the watchdog model (bounded by `inspectorTimeoutMs`, honouring the hook's signal) writes the narrative → the compaction summary is *block + narrative*; on `overflow` or a retried turn the summary is the block alone; inspector timeout or failure → block alone plus a `watchdog-failed` badge, never a cancelled compaction; `onCompaction: summary-only` skips the inspector, `off` leaves compaction to Pi |
+| `session_compact` / `session_compact_failed` | `compaction.done` (summary hash) / `compaction.failed` events; compacting agents go back to work |
+| a workflow child at ≥ `preemptAtContextFraction` (0.75) of its model's context, or a `compaction_start` event on its JSON stream | halted at its next `tool_execution_end`; an inspector on the architect's model reads the transcript tail against the state block: **clean** → logical clear (same model, fresh checkpoint session id, the prior transcript flagged `logicalCleared`, bytes kept); **loss / hallucination** → a fresh session on the architect's model with `prompts/USER_PROMPT_RESUME.md` (state block, diff, findings, carry-over) — never a transcript replay; inspector failure → `watchdog-failed`, the child stays halted; one pre-emption per request |
+| a run ends without a review frame; a builder pings the architect with an unreviewed write; an agent stops without review; PASS without a harvest | `done-unverified` + auditor dispatch; ping queued with `missing-review`; `done-unverified`; forced harvest |
+| the same finding identity (`sha256(category + summary + paths)`) `stalemateRepeats` times | `halted-stalemate`: children are not halted, the turn ends, `/titan-watchdog resume` is the human gate |
+| reviewer model or auth error | `watchdog-failed`, `done-verified` refused |
+| session ledger over `budgetUsd` | `held-spend`: no new children |
+| user input | cancels an in-flight inspection |
+
+Every inspection is a ledger row (`origin` `compaction-inspector` or `watchdog`).
+`/titan-watchdog status | on | off | model <provider/id> | thinking <level> | compaction
+halt-inspect|summary-only|off | resume`; the `⌗ WATCHDOG` bar row shows state, model,
+compaction mode, inspections, spend, findings and the stalemate counter. Prompts:
+`SYSTEM_PROMPT_WATCHDOG.md` (evidence over claims — "tests passed" without a hashed log
+is a blocker), `USER_PROMPT_WATCHDOG_COMPACTION.md`, `USER_PROMPT_RESUME.md`.
+
+## /workflow-monitor (0.6.1)
+
+Pi has no sidebar or pane API, so the monitor is store-driven and in-process first:
+
+- `/workflow-monitor [runId]` opens a right-anchored overlay (`ctx.ui.custom` with
+  `overlay: true`, half the terminal width, the editor keeps input) redrawn every 500 ms
+  from `run.json`, `agents/*.json`, `events.jsonl` and `ledger.jsonl` of the in-flight
+  `/workflow run` (else the newest run of this project, or the given id prefix). Line 1:
+  `◆ MONITOR <workflow> · <runId> · <status> · <totals>`; line 2: the phase rail
+  `[✓ plan]─[● build]─[○ verify]` from `phases:`; one row per agent
+  `<glyph> <callsign> · <role> · <model> (<thinking>) · <state> · <tok> tok · $<cost>[ · <tps> tps][ · wd:n]`
+  (spinner = working, `●` = needs input / terminal, `○` = queued; nested pi-subagents
+  children as indented `└` sub-rows, one level); footer `verified k/n · ↑↓ scroll · q close`.
+  Colours are the §5.4 vocabulary (`queued` #64748b … `done-verified` #16a34a,
+  `done-unverified` #ca8a04, `stalemate` #dc2626, `failed-review` #9f1239); `done-unverified`
+  is never folded into `done-verified`.
+- `/workflow-monitor list` — the runs table (name · phase · roster · progress · result)
+  over titan runs **and** pi-dynamic-workflows runs read from
+  `~/.pi/workflows/projects/<key>/runs/*.json` (`key` = sanitized basename + 12 hex of
+  `sha256(path.resolve(cwd))`, pi-dw's own rule; its runs map to `dispatched-working` /
+  `done-unverified` / `failed` / `cancelled` because pi-dw has no review frames).
+- `/workflow-monitor --split` — the same frame in a side pane: `orca terminal split
+  --command …`, else `tmux split-window -h`, else an explicit "none" with the command to
+  run by hand: `node scripts/titan-monitor.mjs --run <runDir> [--follow] [--interval 1000]
+  [--width N] [--height N]` (or `--list <runsRoot> --project <projectSlug>`), whose output
+  is pinned byte-for-byte to the overlay renderer by a test.
+- `/workflow-monitor close`; the `◫ MONITOR` bar row is always on.
+
+## Plan mode and /ultraplan (0.7.0)
+
+`/plan [brief|on|off|toggle]` is a port of Pi's plan-mode example: `edit` and `write`
+leave the active tools, `bash` is allowlisted (`cat`, `head`, `grep`, `find`, `ls`, `git
+status/log/diff`, …; anything matching `rm`, `mv`, `cp`, `mkdir`, `tee`, redirects, … is
+blocked at `tool_call`), a `[PLAN MODE ACTIVE]` context is injected, numbered steps under
+a `Plan:` header are tracked and `[DONE:n]` markers tick them (`/todos`). State persists
+as a `titan-plan-mode` session entry. When the live shape declares
+`plan_command: /ultraplan` (level 3), bare `/plan` and `/plan <brief>` route to
+`/ultraplan`; `on|off|toggle` never route.
+
+`/ultraplan <brief>` enables plan mode, opens a store run (`command: ultraplan`) and runs
+the fusion team from `~/.pi/titan-harness/model-stack-ultraplan.yaml` with today's
+fallbacks (vacant seats are named, never silently dropped):
+
+1. **Grill** — the architect seat (`rune`) asks numbered frontier questions with a
+   recommendation each (structured output); `/ultraplan answer <n> <text>` records an
+   answer, unanswered questions take the recommendation.
+2. **`/ultraplan fuse`** — every live fusion seat (`quill`, `slate`, `prism`, `lumen`) drafts
+   read-only in a fresh session as an anonymous letter (`seats/A.md` …; no prompt carries
+   a model id), the judge (`gavel`) ranks the drafts as YAML (`judge.yaml`), the fuser
+   (`loom`) merges them into `fused-plan.md`, then each seat ACKs the fused bytes
+   (`ACK FUSION <runId>` + sha256 → `acks.json`, a "Seat ACKs" table in the plan).
+   Invariants: at least 3 live seats (else `/titan-opinion` is suggested and nothing is
+   spawned); the judge model must differ from the fuser model (refused before spawning).
+3. **`/ultraplan done`** leaves plan mode and names the next step,
+   `/create-workflow --from-plan <planId>`; `abort` stops children; `status` prints the
+   phase and paths. Everything lives under `.titan/plans/<planId>/` (`brief.md`,
+   `answers.md`, `seats/`, `judge.yaml`, `fused-plan.md`, `acks.json`); ledger rows carry
+   `origin` `fusion` / `judge` / `fuser`.
+
+## /create-workflow (0.7.0)
+
+`/create-workflow <goal> [--name n] [--from-plan id] [--from <report> [--elevate]]
+[--level 0-3] [--tier t] [--dry-run] [--force]` (`--from-findings` is an alias of `--from`):
+
+- **Context pack**, bounded to 120,000 chars with a `context-manifest.json` (sha256 per
+  source, truncation flags): `.titan/terraform/*.md`, `vision.md`, `intent.md`,
+  `AGENTS.md`, the fused plan (`--from-plan`) or the escalation report (`--from`), a
+  summary of the active shape, the authoring skill's `schema.md` / `rules.md` /
+  `examples.md`, the installed workflow names.
+- **A read-only workflow-architect child** (argv tools `read,grep,find,ls`, fresh session,
+  the level 2/3 architect seat at xhigh — `openai-codex/gpt-6-astra`, today its fallback
+  `xai/grok-4.6`), `prompts/SYSTEM_PROMPT_WORKFLOW_ARCHITECT.md` +
+  `USER_PROMPT_CREATE_WORKFLOW.md`. It answers through **structured output v2**: the
+  runtime exports `TITAN_NODE_SCHEMA` and `TITAN_NODE_RESULT_PATH`
+  (`<runDir>/results/<node>-<n>.json`) and adds `submit_result` to the child's tools
+  (also for `allowed_tools: []`, surviving `--no-tools` and `subagentTools` off), the child
+  extension registers that terminating tool, and the typed object comes back with zero
+  re-asks; v1 (schema in the prompt, parse, re-ask ≤ 3) remains the fallback.
+- **The host validates and persists**: the YAML and `commands/*.md` bodies are staged
+  under the run dir and validated (≤ 3 re-asks carrying the validator's issues), names
+  outside `^[a-z0-9][a-z0-9-]{0,63}$` or any path traversal are refused, an existing
+  workflow needs `--force`, then `.titan/workflows/<name>/<name>.yaml`, `commands/*.md`
+  and `AUTHORING.md` (goal, source, seat, requested vs effective thinking, manifest hash,
+  rounds) are written. The child never writes.
+- `--elevate` (from an escalation report) targets `min(level + 1, 3)`, halves the failed
+  workflow's `context_budget` (60000 when none), deepens the tier
+  (`web-general → research-planning → prototype-analytics → production-swe →
+  platform-update`), turns the watchdog on, asks for tighter phases and one more
+  verifier, and records `titan.parent_run` (the store's `parentRunId`).
+- The status line reads `L3 · level-3 · authoring-workflow · rune xhigh` while the child
+  runs and follows shape/level changes.
+
+## MCP bridge and the InfraNodus stage (0.7.0)
+
+pi-mcp-adapter registers the catalog's tools for the model; an extension cannot call
+another extension's tools, so workflow `mcp_tool:` nodes and the InfraNodus stage use
+titan's own runtime bridge, `modules/mcp-client.ts`: a dependency-free stdio JSON-RPC
+client (`initialize` → `notifications/initialized` → `tools/list` → `tools/call`,
+newline-delimited, the SDK's 10 MiB read cap, protocol `2025-11-25` with the older
+versions accepted) over the merged catalog — the package `mcp/mcp.json`, then
+`~/.config/mcp/mcp.json`, then `<cwd>/.mcp.json` (later wins). `${VAR}` is expanded from
+the environment; a missing variable disables the entry with a names-only reason
+(`missing env INFRANODUS_API_KEY`), `!command` secret expressions are never executed, and
+`url` servers stay with pi-mcp-adapter. One process per server, started lazily and
+reused; a disabled or unknown server fails closed before any call; `close()` runs at
+`session_shutdown`. `modules/infranodus.ts` orchestrates only tool calls:
+`generate_ontology_graph → generate_contextual_hint → optimize_reasoning`
+(`ontologyStage`) and `memory_add_relations` (`rememberRelations`); with the server
+disabled the stage returns `confidence: declared` with a banner instead of throwing. Skill:
+`infranodus-reasoning-ontology`.
+
+## /terraform (0.8.0)
+
+`/terraform [--refresh] [--section entity|ontology|roadmap|automations|connectors]
+[--dry-run]` runs the shipped package workflow `terraform`
+(`.pi/titan-harness/workflows/terraform/`): the host gathers the sources (README, package
+manifests, `AGENTS.md`, `vision.md`, `intent.md`, existing `.titan/*.md`, git remotes;
+`sources.json` with a sha256 per file), a `best_of` of three fusion seats plus a judge
+writes the entity (domain, organization, audience, platform, infrastructure, talent,
+financials, intent, vision, bias — unknowns stay `unknown`), four seats write ontology,
+roadmap, automations and connectors from it, and a `verifier` lane
+(research-planning tier) checks every claim against the sources — a fake citation fails
+the run and that section is reported `missing` instead of written. The InfraNodus stage
+runs host-side over the corpus when the server is keyed, otherwise the ontology carries
+the declared banner. Output: `.titan/terraform/{entity,ontology,roadmap,automations,connectors}.md`,
+each ending in a Sources table (path, sha256, bytes) and a run footer; `entity.md` ends
+with a `harness_defaults:` block (`level`, `tier`, `review`, `exa`, `budget_usd`,
+`personas`; the defaults are level 2, prototype-analytics, required, true, 25,
+implementer + evidence-auditor) that `/titan-level 2` consumes (`childExa`, `budgetUsd`,
+`auditor`); `.titan/terraform/connectors.yaml` is created once from the default
+connector list (`macro`, `figma`, `brandfetch`, `testmu`, `infranodus` as catalog MCP
+servers, `github` via `gh`, `linear` via `orca linear`, `analytics-db` as a read-only script
+with the credential named by `ANALYTICS_DATABASE_URL` — values never belong there) and
+dry-run probed as reachable or vacant by name; `automations.md` carries one
+`orca automations create --name titan-<workflow> --trigger … --precheck "node
+scripts/titan-lock-check.mjs <workflow>" --prompt 'pi -p "/workflow run <workflow>"'
+--provider claude --workspace "path:<cwd>"` recipe per `trigger:` workflow (printed, not
+run). Existing sections are not overwritten without `--refresh` (or `--section`); the
+dry run prints the DAG plan, the source list, the connector table and the recipes and
+spends nothing.
+
+## /local-dev-verify (0.8.0)
+
+`/local-dev-verify [--url <u>] [--start "<cmd>"] [--flows <file.json>] [--workers <n>]
+[--no-video] [--port <n>] [--timeout <s>]` verifies a locally running app with simulated
+users. It is an in-memory workflow (`probe → snapshot → sim-user-<n> → collect → verify →
+report`) executed by the engine, so it lands in the run store like any `/workflow run`:
+
+1. **Start.** `--start "<cmd>"`, else a recipe by project type: `package.json` `scripts.dev`
+   (`npm run dev`) or `scripts.start` (`npm start`), `Procfile` `web:`, `pyproject`
+   `[project.scripts]` (`uv run <name>`; a FastAPI/Flask/Django/uvicorn dependency guesses
+   `uv run python -m app`), a bare `index.html` (`python3 -m http.server <port> --bind
+   127.0.0.1`). The app runs in its own process group and its log lands in the run
+   directory; no recipe and no `--url` → `unavailable`.
+2. **Probe.** `--url`, else the port the app's log announces, else `http://localhost:3000`,
+   fetched until a 2xx/3xx or the timeout (60 s default, `--timeout <s>`) → otherwise
+   `unavailable`, never a pass.
+3. **Driver.** `kane-cli` on PATH → the `kane` runner; else a headless Chromium
+   (`TITAN_CHROMIUM`, then Playwright's `~/.cache/ms-playwright/chromium_headless_shell-*/
+   chrome-linux/headless_shell` or `chromium-*/chrome-linux64/chrome`, then
+   `brave-browser` / `google-chrome` / `chromium` on PATH) → the `cdp-browser` runner;
+   neither → `unavailable: no Kane, no Chromium`.
+4. **Sim users.** `--workers <n>` (default the `workerFanOut` pool, at most 5) fresh-context
+   worker seats read the page snapshot and write realistic flows as structured output
+   (`prompts/USER_PROMPT_SIM_USER.md`, persona `sim-user`); `--flows <file.json>` replays a
+   file instead of asking anyone.
+5. **Verify.** every flow runs in a fresh browser through `scripts/cdp-browser.mjs run
+   --flow <flow.json> --out <dir>` (steps `goto | click | fill | press | wait | screenshot |
+   snapshot | eval | expect`) into `evidence/<flow>/`: `step-<n>.png` (screenshot),
+   `snapshot-<n>.txt` + `snapshot-final.txt` (snapshot), `console.json` (console-log),
+   `network.json` (network-log), `flow-result.json` (report), `flow.json` (script); every
+   file is hashed with source `cdp` (a sim-user source, so production-swe's
+   video-or-screenshot rule holds). `video` (WebM/VP8) comes from
+   `scripts/stitch-video.mjs --frames <dir> --out <file.webm> [--fps 2]` when ffmpeg exists
+   (PATH or `~/.cache/ms-playwright/ffmpeg-*/ffmpeg-linux`); without it the package carries
+   `missingInformation: ["video: unavailable (ffmpeg not found)"]` instead of a claim
+   (`--no-video` skips the attempt).
+6. **Report.** an `inbox.architect` event with the evidence paths, and a panel with one row
+   per flow (`pass` / `fail` / `unavailable`); the app and the browser are stopped.
+
+The driver is dependency-free (`modules/cdp-browser.ts`: JSON-RPC over Node's global
+`WebSocket`, `--headless=new --no-sandbox --remote-debugging-port=0` with a throw-away
+profile; `--no-sandbox` because Ubuntu's AppArmor disables unprivileged user namespaces).
+`node scripts/cdp-browser.mjs doctor` names the Chromium it would use (exit 3: none);
+`snapshot --url <url>` prints a page snapshot. Exit codes of `run`: 0 ok, 1 the flow failed
+(`flow-result.json` says why), 2 usage, 3 no Chromium. The same runner is available to any
+workflow as `verify: { runner: cdp-browser, flows: [...] | flows_file: flows.json, video: true }`.
+
+## /cloud-simulated-users (0.7.0)
+
+`/cloud-simulated-users [probe]` prints the provider matrix — `cursor-cloud` (needs
+`CURSOR_API_KEY`, `git`), `testmu-hyperexecute` (the `testmu` MCP server enabled),
+`kane-remote` (`kane-cli` on PATH), `momentic` (`MOMENTIC_API_KEY` or `MOMENTIC_CONFIG`
+and the `momentic` server) — each `ready` or `vacant` with the missing pieces by name
+(values are never read; nothing reaches the network during a probe).
+`setup <provider>` spawns a read-only worker seat with the provider's skill and
+host-persists its advice as `.titan/terraform/remote-testing.md` (the provider's section
+replaced on re-run, credential-looking lines dropped; install commands run only after a
+confirm). `run <provider> --objective "<text>" [--devices a,b] [--ref <branch>]` executes a
+one-node `verify` workflow on the provider's runner (Cursor reads `.titan/cursor.yaml` for
+`repo`, `startingRef` and `api_base`; the template is `.pi/titan-harness/templates/cursor.yaml`),
+streams `cloud-sim.preflight / started / exec / progress / finished` events into the
+store and names the evidence package hash; a vacant provider refuses `run` naming what
+is missing. `advice` prints the file.
+
+## Triggers, graph.html and export --dw (0.8.x)
+
+- A workflow with `trigger: {cron: "<5 fields>"}` or `{every: 30s|15m|6h|1d}` is armed with
+  `/workflow schedule arm <name>` (`schedules.<name>.armed` in the settings file) and runs
+  from an in-process scheduler that ticks every 30 s **while the session that armed it is
+  open**; overlapping fires are skipped (a resident-run lock under
+  `~/.pi/titan-harness/locks/<workflow>.lock` with pid + heartbeat, stale after 10 min
+  without a heartbeat and cleared once), a missed window runs once (`catchUp: latest`),
+  `lastRun` is recorded, `disarm` stops it, `list` shows the plan. `recipe <name>` prints
+  the `orca automations create …` line for an Orca-scheduled run whose `--precheck` is
+  `node scripts/titan-lock-check.mjs <workflow>` (exit 0 free, 1 running, 2 usage). A
+  6-field cron validates but cannot be scheduled (reported, not a crash).
+- `/workflow graph <name> --html [--out <path>]` writes `.titan/plans/graph-<name>.html`:
+  one self-contained file, no external resources, layered SVG with the node glyphs, a
+  click shows the node's fields, the Mermaid text in a `<details>`.
+- `/workflow export --dw <name> [--out <path>]` writes `.titan/plans/<name>.dw.mjs`, a
+  pi-dynamic-workflows 3.10.1 script (pure-literal `meta`, `agent()` calls per node,
+  `parallel` per layer, `checkpoint` for approvals, `judgePanel` for `best_of`,
+  `workflow(name)` for child workflows, `schema:` for `output_format`); bash/script nodes
+  become a small-tier `agent()` with a warning because 3.10.1 has no `bash()` global, and
+  unsupported nodes are listed as warnings with `// TODO(id)` blocks. Never YAML; the
+  package stays pinned at 3.10.1.
 
 ## Children and extensions
 
@@ -339,9 +714,11 @@ Codex (or for plain names in Pi). `momentic`, `framer-mcp-plugin`, `figma-deskto
 `BRANDFETCH_MCP_TOKEN`; `/titan-doctor --import-infranodus-key` is the in-Pi route for
 the InfraNodus key).
 
-`skills/` is the curated pack, 18 skills: one per server, three combo workflows
-(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), three harness skills
-(`titan-orchestration`, `titan-auditor`, `titan-workflow-authoring`),
+`skills/` is the curated pack, 24 skills: one per server, three combo workflows
+(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), nine harness skills
+(`titan-orchestration`, `titan-auditor`, `titan-workflow-authoring`, `titan-watchdog`,
+`titan-ultraplan`, `titan-terraform`, `titan-local-dev-verify`,
+`titan-cloud-simulated-users`, `infranodus-reasoning-ontology`),
 `mcp-cli-bridges` for calling servers from bash with the Python mcp2cli or mcporter,
 and `divmagic-raw` (DivMagic is a Chrome extension, not MCP). Studio rules live in the
 skills: Higgsfield is first-party only, no OpenRouter; the win is 5–8 s looping Framer
@@ -355,9 +732,12 @@ for the agent-facing install steps and `mcp/README.md` for per-server notes.
 
 ## Non-goals
 
-Gap-fill inside this package, nothing more: no mega-CLI, no custom JSON-RPC MCP
-client, no Fusion Drive merge, no neuro-quant dump, no Kane-as-MCP, no Higgsfield
-marketing-skill dump, no Grok Imagine as a pack server, no OpenRouter video servers.
+Gap-fill inside this package, nothing more: no mega-CLI, no model-facing MCP client of
+its own (pi-mcp-adapter registers the catalog for the model; the 0.7.0
+`modules/mcp-client.ts` is a runtime bridge that only workflow `mcp_tool` nodes and the
+InfraNodus stage call, never a replacement for the adapter or the bash bridges), no
+Fusion Drive merge, no neuro-quant dump, no Kane-as-MCP, no Higgsfield marketing-skill
+dump, no Grok Imagine as a pack server, no OpenRouter video servers.
 
 ## Architect / builder / subagents
 

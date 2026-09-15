@@ -1,6 +1,6 @@
 # Skill pack
 
-Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 18 skills: ten server skills, three combo workflows, three harness skills, one bridge, one reference.
+Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 24 skills: ten server skills, three combo workflows, nine harness skills, one bridge, one reference.
 
 | Skill | Kind | Pairs with |
 |---|---|---|
@@ -20,6 +20,12 @@ Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `pac
 | `titan-orchestration` | harness | the 3-tier hierarchy, commands, hotkeys |
 | `titan-auditor` | harness | the audit contract and verdict format |
 | `titan-workflow-authoring` | harness | Author `.titan/workflows/<name>/<name>.yaml` DAGs for `/workflow`: the node types, `$id.output` hand-offs, `when` routing, roles, hooks, evidence; `/workflow validate` before `/workflow run` |
+| `titan-watchdog` | harness | The titan-native watchdog: compaction state block + bounded inspector, child pre-emption at 75 % of context (logical clear or fresh resume on the architect's model), stalemate and held-spend gates, `/titan-watchdog`, and its relationship to pi-subagents' own watchdog |
+| `titan-ultraplan` | harness | `/ultraplan`: grill the brief in plan mode, anonymous fusion seats draft, the judge ranks, the fuser merges, every seat ACKs the fused bytes; `/plan` routes here at level 3 |
+| `titan-terraform` | harness | `/terraform`: entity, ontology, roadmap, automations and connectors docs under `.titan/terraform` with source digests, the `harness_defaults` block level 2 consumes, connector probes and `orca automations` recipes |
+| `titan-local-dev-verify` | harness | `/local-dev-verify`: start or point at the local app, sim-user workers write flows, a headless Chromium replays them over CDP (Kane when installed), hashed screenshots, snapshots, console and network logs for the architect |
+| `titan-cloud-simulated-users` | harness | `/cloud-simulated-users`: probe the Cursor cloud, TestMu/HyperExecute, Kane `--remote` and Momentic lanes by name, host-persisted setup advice from a read-only agent, recorded runs streamed into the store |
+| `infranodus-reasoning-ontology` | harness | The InfraNodus reasoning-ontology stage (ontology graph → contextual hint → reasoning optimization) over documents, plans or run notes through titan's MCP bridge, plus `memory_add_relations`; declared-confidence fallback when the server is unkeyed |
 | `mcp-cli-bridges` | bridge | Call any MCP server from bash with the Python mcp2cli (knowsuchagency) or mcporter (TypeScript); named links per server; not the Rust mcp2cli the Grok plugin uses |
 | `divmagic-raw` | reference | DivMagic is a Chrome extension (RAW export of styles/components), not an MCP server; its export feeds Brandfetch/tokens and is rebuilt on shadcn |
 

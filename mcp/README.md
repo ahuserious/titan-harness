@@ -41,6 +41,23 @@ because each needs a machine-specific value or key. Set the variable (names in
 writes only the flag into the project's `.pi/mcp.json`), `/reload`, done. Every endpoint
 above is the vendor's published one; none is invented and none may be edited to a guess.
 
+## titan's own MCP bridge (workflow nodes and the InfraNodus stage)
+
+pi-mcp-adapter registers the catalog for the *model*; an extension cannot call another
+extension's tools, so `/workflow` `mcp_tool:` nodes and the InfraNodus reasoning stage go
+through titan's runtime bridge (`extensions/titan-harness/modules/mcp-client.ts`, 0.7.0): a
+dependency-free stdio JSON-RPC client that speaks the same wire format as the adapter
+(`initialize` → `notifications/initialized` → `tools/list` / `tools/call`, one JSON object
+per line, protocol `2025-11-25` with the older versions accepted). It merges the same three
+files — this catalog, `~/.config/mcp/mcp.json`, `<cwd>/.mcp.json` (later wins) — expands
+`${VAR}` from the environment, disables an entry whose variable is missing with a
+names-only reason (`missing env INFRANODUS_API_KEY`), never executes `!command` secret
+expressions and leaves `url` servers to the adapter. One server process per catalog entry,
+started lazily on the first call and reused, stopped at `session_shutdown`; a disabled or
+unknown server fails the node closed before any call, and no credential value ever appears
+in a status row or an error. It is not a model-facing client and not a CLI: the adapter
+and the bash bridges below stay the way agents call servers interactively.
+
 ## Framer, the official way
 
 Framer's own agent integration is a CLI plus skills, not an MCP server:

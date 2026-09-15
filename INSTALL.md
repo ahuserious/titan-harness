@@ -224,12 +224,13 @@ hosts copy the folders:
 - Claude Code: `cp -r skills/* ~/.claude/skills/`
 - Codex: `cp -r skills/* ~/.codex/skills/`
 
-18 skills (`skills/README.md`). Each states its server, auth, playbook, and
+24 skills (`skills/README.md`). Each states its server, auth, playbook, and
 guardrails. Combo skills: `design-to-code-pipeline`, `brand-launch-kit`,
 `ship-and-verify`; harness skills: `titan-orchestration`, `titan-auditor`,
-`titan-workflow-authoring` (how to write, validate and run a `/workflow` YAML DAG);
-bridge: `mcp-cli-bridges`; reference: `divmagic-raw` (DivMagic is a
-Chrome extension, not MCP). The one-stack rule the combos share: Tailwind + shadcn +
+`titan-workflow-authoring` (how to write, validate and run a `/workflow` YAML DAG),
+`titan-watchdog`, `titan-ultraplan`, `titan-terraform`, `titan-local-dev-verify`,
+`titan-cloud-simulated-users`, `infranodus-reasoning-ontology`; bridge:
+`mcp-cli-bridges`; reference: `divmagic-raw` (DivMagic is a Chrome extension, not MCP). The one-stack rule the combos share: Tailwind + shadcn +
 tokens; Relume / Untitled UI for Framer clients; DivMagic + Brandfetch feed RAW; shadcn
 is what we ship.
 
@@ -286,6 +287,9 @@ node scripts/install-mcp.mjs --dry-run | tail -5
 PI_OFFLINE=1 pi -p "reply with the single word pong" --no-session --mode json < /dev/null | grep -c pong
 node -e 'JSON.parse(require("fs").readFileSync("mcp/mcp.json","utf8")); console.log("catalog ok")'
 node scripts/verify-ledger.mjs ~/.pi/titan-harness/runs/<projectSlug>/<runId>   # after a first session: "chain intact"
+node scripts/titan-lock-check.mjs <workflow>   # 0 free · 1 a live run holds the lock · 2 usage
+node scripts/titan-monitor.mjs --list ~/.pi/titan-harness/runs --project <projectSlug>   # the runs table without the TUI
+node scripts/cdp-browser.mjs doctor           # which Chromium /local-dev-verify would drive (exit 3: none)
 ```
 
 In a TUI session: `/titan-doctor` (every item `ready` or `vacant`, none `unknown`),
@@ -295,7 +299,17 @@ In a TUI session: `/titan-doctor` (every item `ready` or `vacant`, none `unknown
 (`✓ classify-and-fix is valid`, no errors), `/stack status` (settings), `/titan`
 (command index + model bar), `/mcp` (server status, including the `titan-harness__*`
 package servers), `/workflows` (dynamic-workflows menu with the stack's subagent-tools
-and fan-out toggles).
+and fan-out toggles). Since 0.5.0–0.8.0 also: `/titan-watchdog status` (`off · …` until
+`/titan-watchdog on`), `/workflow-monitor list` (the runs table; `/workflow-monitor` opens
+the overlay, `close` closes it), `/plan` then `/plan off` (`Plan mode enabled. Built-in
+write tools disabled.`), `/ultraplan status` (`no session` until a brief is given),
+`/create-workflow` (prints the usage line and spends nothing), `/workflow schedule list`
+(`scheduler idle`), `/workflow export --dw classify-and-fix` and `/workflow graph
+classify-and-fix --html` (write `.titan/plans/classify-and-fix.dw.mjs` and
+`.titan/plans/graph-classify-and-fix.html`), `/terraform --dry-run` (the DAG plan, the
+source list, the connector table, the automation recipes; nothing spent),
+`/cloud-simulated-users probe` (four lanes, each `ready` or `vacant` with the missing
+names), `/local-dev-verify` in a folder without an app (`unavailable`, never a silent pass).
 
 ## 6. What this package changes on the machine
 
@@ -316,6 +330,22 @@ and fan-out toggles).
   memory and writes no file).
 - `~/.pi/workflows/settings.json` `excludeSubagentTools` / `defaultConcurrency`
   (only when `/stack tools off` or `/stack fanout N` is used).
+- Since 0.5.0–0.8.0: `<runDir>/results/` (structured-output v2 result files),
+  `<runDir>/artifacts/evidence/<nodeId>/` + `<runDir>/evidence/<nodeId>/` (evidence
+  packages), `<runDir>/artifacts/reviews/`, `artifacts/receipts/`,
+  `artifacts/escalation-report.md`, `<runDir>/hypotheses.jsonl`, `<runDir>/sessions/watchdog/`
+  (inspector sessions); `~/.pi/titan-harness/locks/<workflow>.lock` (only while a
+  `trigger:` workflow is armed or an Orca-scheduled run holds it); in the project:
+  `.titan/plans/<planId>/` (`/ultraplan`), `.titan/plans/graph-<name>.html` and
+  `<name>.dw.mjs` (`/workflow graph --html`, `export --dw`), `.titan/workflows/<name>/`
+  (`/create-workflow`), `.titan/terraform/*.md`, `connectors.yaml` and `remote-testing.md`
+  (`/terraform`, `/cloud-simulated-users setup`), `.titan/presets/content/` (yours);
+  `titan-harness.json` gains `schedules`. `/local-dev-verify` launches a headless Chromium
+  with a throw-away profile directory and stops it and the app it started at the end. The
+  MCP bridge starts catalog servers as child processes only when a workflow `mcp_tool` node
+  or the InfraNodus stage calls one, and stops them at `session_shutdown`. Nothing is
+  installed: `/cloud-simulated-users setup` prints install commands and runs them only after
+  a confirm.
 - One documented patch to pi-dynamic-workflows' `dist/workflow-commands.js`
   (bare `/workflows` menu hook), applied and reverted only by
   `scripts/apply-dw-patch.mjs`, with the pristine file kept as
@@ -401,6 +431,55 @@ Pi login) or an OpenRouter key exist in Pi; the Muse Spark seat (`optional`) sta
 vacant until `OPENROUTER_API_KEY`; Gemini 3.8 Flash and Qwen 3.8 27B accept at most
 `high`, so an `xhigh` request shows as `xhigh↘high`. The level announcement and the
 model bar name every substitution.
+
+## 8c. Verification, watchdog, monitor, planning, authoring, terraform, simulated users (0.5.0–0.8.0)
+
+Nothing here needs a new install step; every command is registered by the package and
+degrades to `vacant` / `unavailable` when its lane is not ready. What each one touches
+is listed in step 6; the `README.md` sections of the same names carry the semantics.
+
+- **Verification.** `verify:` nodes run one of `bash`, `kane`, `testmu`, `momentic`,
+  `cursor-cloud`, `orca-browser`, `cdp-browser`, `verifier` and fail closed; a tier's
+  required evidence must be *observed* (hashed by the harness) for `done-verified`.
+- **Watchdog.** `/titan-watchdog on` (settings `watchdog.*`): the host's compaction gets a
+  deterministic state block plus a bounded inspector narrative, workflow children are
+  halted at 75 % of their context window and either logically cleared or resumed fresh on
+  the architect's model, three identical findings stop the run at a human gate
+  (`/titan-watchdog resume`). The inspector runs on `watchdog.model`
+  (`cerebras/qwen-3.8-27b` medium by default).
+- **Monitor.** `/workflow-monitor` (overlay), `list`, `--split` (Orca pane, tmux fallback,
+  or the printed `node scripts/titan-monitor.mjs …` line), `close`.
+- **Planning and authoring.** `/plan`, `/ultraplan <brief> → answer → fuse → done`,
+  `/create-workflow <goal> [--from-plan id | --from <report> --elevate]`; the workflow
+  architect child is read-only and the host writes `.titan/workflows/<name>/`.
+- **Terraform and simulated users.** `/terraform` writes `.titan/terraform/`;
+  `/cloud-simulated-users probe|setup|run|advice`; `/local-dev-verify` needs a Chromium
+  (Playwright's `~/.cache/ms-playwright/chromium_headless_shell-*/…/headless_shell` or
+  `chromium-*/chrome-linux64/chrome`, `brave-browser`, `google-chrome` or `chromium` on
+  PATH, or `TITAN_CHROMIUM=<path>`) or `kane-cli`; `video` evidence needs `ffmpeg` (PATH or
+  `~/.cache/ms-playwright/ffmpeg-*/ffmpeg-linux`), otherwise the package records
+  `video: unavailable (ffmpeg not found)` and the flows still verify.
+- **Scheduling.** `/workflow schedule arm <name>` runs `trigger:` workflows only while the
+  arming Pi session is open; for unattended runs use the printed recipe
+  (`/workflow schedule recipe <name>`):
+
+```bash
+orca automations create --name titan-<workflow> --trigger hourly \
+  --precheck "node <package>/scripts/titan-lock-check.mjs <workflow>" \
+  --prompt 'pi -p "/workflow run <workflow>"' --provider claude --workspace "path:<cwd>"
+```
+
+**Runnable today** (what `/titan-doctor` and the probes report on this machine, 2026-09-15):
+levels 0–1 as declared; the level 2/3 architect and the `/create-workflow` seat on
+`xai/grok-4.6` until `/login openai-codex`; every Fable 5.1 seat on
+`antigravity/claude-opus-4-6`, Muse Spark vacant until `OPENROUTER_API_KEY`; InfraNodus
+vacant until `INFRANODUS_API_KEY` (the ontology stage falls back to `declared`); Kane not
+installed (`kane` and `kane-remote` lanes vacant); Cursor, TestMu and Momentic credentials
+pending (their lanes vacant, recorded fixtures prove the code paths); the Orca CLI of this
+build has no browser automation (`orca-browser` reports `unavailable` after one probe);
+Chromium is present in the Playwright cache, so `/local-dev-verify` and the `cdp-browser`
+runner run; ffmpeg only in that cache, so `video` is recorded when that binary is found and
+`video: unavailable` otherwise.
 
 ## 9. Non-goals
 
