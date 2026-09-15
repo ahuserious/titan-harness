@@ -2,7 +2,8 @@
  * runners/index.ts — the runner adapter contract behind `verify:` nodes (plan §5.8, D9, P4).
  *
  * A runner turns a VerifySpec into observed evidence: it runs a vendor lane (kane-cli,
- * TestMu tools, Momentic tools, the Cursor cloud API, the Orca browser CLI), a bash
+ * TestMu tools, Momentic tools, the Cursor cloud API, the Orca browser CLI, a headless
+ * Chromium over CDP), a bash
  * check, or an AI verifier, and returns hashed artifact rows plus checks. Every runner
  * fails closed — `pass` only when the lane reported success AND artifacts exist AND their
  * hashes were recorded — and never prints, stores or returns a credential value. Vendor
@@ -22,6 +23,7 @@ import type { EvidenceArtifact, EvidenceChecks, EvidenceKind, EvidenceSource, Ci
 import type { JsonSchema, SlotRole, VerifySpec } from "../schema.ts";
 import type { RunnerName } from "../tiers.ts";
 import { bashRunner } from "./bash.ts";
+import { cdpBrowserRunner } from "./cdp-browser.ts";
 import { cursorCloudRunner } from "./cursor-cloud.ts";
 import { kaneRunner } from "./kane.ts";
 import { momenticRunner } from "./momentic.ts";
@@ -87,6 +89,7 @@ export const RUNNERS: Record<RunnerName, Runner> = {
 	momentic: momenticRunner,
 	"cursor-cloud": cursorCloudRunner,
 	"orca-browser": orcaBrowserRunner,
+	"cdp-browser": cdpBrowserRunner,
 	verifier: verifierRunner,
 };
 

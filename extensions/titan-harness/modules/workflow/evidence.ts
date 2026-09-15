@@ -53,12 +53,12 @@ export const EVIDENCE_KINDS = [
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
 export type CapturedBy = "observed" | "inferred" | "declared";
-export type EvidenceSource = "tool" | "kane" | "momentic" | "cursor" | "orca" | "testmu" | "human" | "bash" | "verifier";
+export type EvidenceSource = "tool" | "kane" | "momentic" | "cursor" | "orca" | "cdp" | "testmu" | "human" | "bash" | "verifier";
 export type EvidenceStatus = "matched" | "current-unverified" | "unavailable" | "excluded";
 export type Degradation = "unhashed" | "scan-failed" | "truncated" | "missing";
 
 /** Runner sources that count as a simulated user (production-swe's video/screenshot rule). */
-export const SIM_USER_SOURCES: EvidenceSource[] = ["kane", "momentic", "orca"];
+export const SIM_USER_SOURCES: EvidenceSource[] = ["kane", "momentic", "orca", "cdp"];
 
 export interface EvidenceArtifact {
 	path: string;

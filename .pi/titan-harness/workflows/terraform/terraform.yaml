@@ -1,0 +1,131 @@
+# terraform — originalize the entity behind this repository (plan §2 H7, §5.7, P8).
+#
+# The host command (/terraform, modules/cmd-terraform.ts) gathers the sources (README,
+# AGENTS.md, vision.md, intent.md, manifests, docs/, .titan/*.md, git remotes) with a sha256
+# per file, runs the InfraNodus ontology stage when the bridge is keyed (else the ontology
+# section is declared, with a banner) and passes everything in as inputs. The DAG then writes
+# the five sections with the fusion seats — entity by best-of-3 with a judge, the other four
+# one seat each — verifies them against the sources (research-planning tier: every claim
+# cited by digest, no execution claims) and the host persists .titan/terraform/*.md with a
+# Sources table, the harness_defaults block, the connector probe table and the automation
+# recipes. Nothing here writes files: seats are tool-less, the host owns .titan/terraform/.
+apiVersion: titan.harness/v1
+name: terraform
+description: Entity, ontology, roadmap, automations and connectors docs with source digests, verified against the sources
+version: 1
+provider: pi
+returns: verify
+
+inputs:
+  sources:         { required: true, description: "JSON list of {path, sha256, bytes, kind} the host gathered" }
+  corpus:          { required: true, description: "Bounded text of the gathered documents, each under a '### <path> (sha256 …)' heading" }
+  contract:        { required: true, description: "prompts/SYSTEM_PROMPT_TERRAFORM.md — the seats' contract" }
+  ontology_graph:  { default: "unavailable", description: "InfraNodus ontology JSON from the host stage, or the word unavailable" }
+  connectors_yaml: { default: "", description: "The current .titan/terraform/connectors.yaml text (empty when none exists yet)" }
+  workflows:       { default: "[]", description: "JSON list of installed workflows: [{name, description, trigger}]" }
+
+phases:
+  - { title: gather }
+  - { title: entity }
+  - { title: derive }
+  - { title: verify }
+
+titan:
+  tier: research-planning
+  evidence: { require: [plan-digest, source-digests, alignment-table] }
+
+nodes:
+  - id: gather
+    phase: gather
+    bash: mkdir -p $ARTIFACTS_DIR && printf '%s' $inputs.sources > $ARTIFACTS_DIR/sources.json && echo sources recorded
+    timeout: 15000
+
+  - id: entity
+    phase: entity
+    depends_on: [gather]
+    role: fusion
+    context: fresh
+    allowed_tools: []
+    best_of:
+      n: 3
+      criteria: "All ten sections present and specific to THIS entity; every factual claim cites a source digest; unknowns say unknown instead of guessing; a valid harness_defaults YAML block closes the document; no execution claims."
+      prompt: |
+        $inputs.contract
+
+        # Task: entity.md
+
+        Write the entity document for the organization or product behind this repository.
+        Use only the sources below. Ten sections, in this order, each a level-2 heading:
+        Domain, Organization, Audience, Platform, Infrastructure, Talent, Financials, Intent,
+        Vision, Bias. Under each heading write what the sources support, and cite each
+        claim with the digest of the file it came from, like `(src: README.md@3f9a2c1b)`.
+        When the sources do not say, write `unknown` — never invent a fact, a number or a
+        name. "Bias" names the blind spots of these sources (what they cannot tell a planner).
+
+        Close the document with a fenced YAML block:
+
+        ```yaml
+        harness_defaults:
+          level: 2
+          tier: <web-general | research-planning | prototype-analytics | production-swe | platform-update | content — the tier a typical change to this entity needs>
+          review: required
+          exa: true
+          budget_usd: 25
+          personas: [implementer, evidence-auditor]
+        ```
+
+        ## Sources (path · sha256 · bytes)
+        $inputs.sources
+
+        ## Corpus
+        $inputs.corpus
+
+  - id: ontology
+    phase: derive
+    depends_on: [entity]
+    role: fusion
+    context: fresh
+    allowed_tools: []
+    command: ontology
+
+  - id: roadmap
+    phase: derive
+    depends_on: [entity]
+    role: fusion
+    context: fresh
+    allowed_tools: []
+    command: roadmap
+
+  - id: automations
+    phase: derive
+    depends_on: [entity]
+    role: fusion
+    context: fresh
+    allowed_tools: []
+    command: automations
+
+  - id: connectors
+    phase: derive
+    depends_on: [entity]
+    role: fusion
+    context: fresh
+    allowed_tools: []
+    command: connectors
+
+  - id: verify
+    phase: verify
+    depends_on: [entity, ontology, roadmap, automations, connectors]
+    role: verifier
+    context: fresh
+    verify:
+      runner: verifier
+      objective: "Every claim in the entity and roadmap documents must align with the gathered sources; execution claims are forbidden."
+      input: |
+        # entity.md
+        $entity.output
+
+        # roadmap.md
+        $roadmap.output
+    evidence:
+      require: [plan-digest, source-digests, alignment-table]
+      produces: [plan-digest, source-digests, alignment-table]

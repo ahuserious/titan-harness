@@ -64,6 +64,9 @@ import { registerUltraplanCommand, type ResolvedUltraplanStack } from "./modules
 import { createMcpToolBridge, type McpToolBridge } from "./modules/mcp-client.ts";
 import { registerCloudSimCommand } from "./modules/cmd-cloud-sim.ts";
 import { registerCreateWorkflowCommand } from "./modules/cmd-create-workflow.ts";
+import { readHarnessDefaults, registerTerraformCommand } from "./modules/cmd-terraform.ts";
+import { registerLocalDevVerifyCommand } from "./modules/cmd-local-dev-verify.ts";
+import { ontologyStage } from "./modules/infranodus.ts";
 import { loadWorkflow } from "./modules/workflow/loader.ts";
 import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult } from "./modules/workflow/executor.ts";
 import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
@@ -1425,6 +1428,8 @@ export default function (pi: ExtensionAPI) {
 		["/ultraplan <brief> | answer | fuse | done | abort", "grilling round, anonymous fusion seats, judge, fused plan with ACKs"],
 		["/cloud-simulated-users [probe|setup|run|advice]", "cloud sim-user lanes: probe matrix, setup agent, recorded runs"],
 		["/create-workflow <goal> [--from-plan|--from-findings|--elevate]", "clean-context workflow architect authors .titan/workflows/<name>; host persists"],
+		["/terraform [--refresh] [--section s] [--dry-run]", "entity, ontology, roadmap, automations, connectors docs under .titan/terraform"],
+		["/local-dev-verify [--url u] [--start cmd] [--flows f] [--workers n]", "sim users against the local app: Kane or headless Chromium (CDP), hashed evidence"],
 		["/titan [on|off|toggle]", "this list; model bar on/off (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
@@ -1841,7 +1846,24 @@ export default function (pi: ExtensionAPI) {
 		const problems = await loadShape(levelCodename(target), ctx);
 		if (problems.length) return announce(ctx, `titan: level ${target} not runnable — ${problems.join("; ")}`, "warning");
 		const stack = configuredStack!;
-		const notes = lastFallbackNotes.length ? ` · ${lastFallbackNotes.join("; ")}` : "";
+		let defaultsNote = "";
+		if (target === 2) {
+			// Level 2 (triggered ops) runs on the project's own terraform defaults when /terraform has written them.
+			try {
+				const defaults = readHarnessDefaults(ctx.cwd);
+				if (defaults) {
+					const patch: Record<string, unknown> = {};
+					if (typeof defaults.exa === "boolean") patch.childExa = defaults.exa;
+					if (defaults.budget_usd === null || typeof defaults.budget_usd === "number") patch.budgetUsd = defaults.budget_usd;
+					if (defaults.review === "required") patch.auditor = true;
+					if (Object.keys(patch).length) writeStackSettings(patch as any);
+					defaultsNote = ` · harness_defaults from .titan/terraform/entity.md (${[defaults.tier ? `tier ${defaults.tier}` : "", typeof defaults.exa === "boolean" ? `exa ${defaults.exa ? "on" : "off"}` : "", defaults.budget_usd !== undefined ? `budget ${defaults.budget_usd === null ? "off" : `$${defaults.budget_usd}`}` : ""].filter(Boolean).join(", ")})`;
+				}
+			} catch {
+				/* a malformed block never blocks the level */
+			}
+		}
+		const notes = (lastFallbackNotes.length ? ` · ${lastFallbackNotes.join("; ")}` : "") + defaultsNote;
 		const terraform = target === 3 && (stack.requires ?? []).includes("terraform") && terraformPackMissing(ctx.cwd) ? " · run /terraform for best results (no .titan/terraform/entity.md)" : "";
 		announce(ctx, `titan: ${describeLevel(stack, readStackSettings())}${notes}${terraform}`, terraform ? "warning" : "info");
 	};
@@ -2556,6 +2578,43 @@ export default function (pi: ExtensionAPI) {
 			return () => shapeListeners.delete(cb);
 		},
 		validateContext: (_cwd: string, ctx: any) => workflowValidateContext(ctx),
+	});
+
+	// ── 2.20 /terraform (plan H7, §5.7; P8): entity docs from the fusion seats, InfraNodus ontology when keyed, connectors + automations ──
+	registerTerraformCommand(pi, {
+		cwd: (ctx: any) => ctx.cwd,
+		store: () => runStore(),
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "terraform", ok: !/FAILED/.test(title), title: title.replace(/^◆\s*/, "") }, markdown),
+		runWorkflow: async (ctx: any, loaded, inputs) => {
+			noteHost(ctx);
+			const opened = runStore().open({ projectSlug: RunStore.projectSlug(ctx.cwd), cwd: ctx.cwd, command: "terraform", workflow: { name: loaded.name, sha256: loaded.sha256 }, status: "running" });
+			const result = await executeWorkflow(loaded, makeWorkflowRuntime(ctx, loaded, opened.runId, opened.dir), { inputs });
+			try {
+				runStore().updateRun(opened.dir, { status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "aborted" : "failed", endedAt: new Date().toISOString() });
+			} catch {}
+			return result;
+		},
+		ontology: (text: string) => ontologyStage(mcpBridge(), text, { purpose: "terraform: the entity ontology of this project for its harness docs" }),
+	});
+
+	// ── 2.21 /local-dev-verify (plan H8; P8): start or probe the app, sim-user flows, Kane or the CDP headless driver, hashed evidence ──
+	registerLocalDevVerifyCommand(pi, {
+		cwd: (ctx: any) => ctx.cwd,
+		store: () => runStore(),
+		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
+		panel: (_ctx: any, title: string, markdown: string) => panel({ kind: "banner", command: "local-dev-verify", ok: !/FAILED|UNAVAILABLE/.test(title), title: title.replace(/^◆\s*/, "") }, markdown),
+		runtime: (ctx: any, loaded, runId, runDir) => {
+			noteHost(ctx);
+			return makeWorkflowRuntime(ctx, loaded, runId, runDir);
+		},
+		settings: () => readStackSettings(),
+		which: (binary: string) => findBinary(binary, [path.join(os.homedir(), ".local", "bin"), path.join(os.homedir(), ".bun", "bin"), path.join(os.homedir(), "Dev Tools", "bin")]),
+		setStatus: (ctx: any, text: string | undefined) => {
+			try {
+				ctx.ui.setStatus("titan-local-dev-verify", text);
+			} catch {}
+		},
 	});
 
 	// ── 2.18 /cloud-simulated-users (plan H9; P8): provider probe matrix, setup agent, recorded runs ──

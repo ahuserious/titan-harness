@@ -13,7 +13,7 @@ import type { NodeDoc, WorkflowDoc } from "./schema.ts";
 export const TIER_NAMES = ["web-general", "research-planning", "prototype-analytics", "production-swe", "platform-update", "content"] as const;
 export type TierName = (typeof TIER_NAMES)[number];
 
-export type RunnerName = "bash" | "kane" | "testmu" | "momentic" | "cursor-cloud" | "orca-browser" | "verifier";
+export type RunnerName = "bash" | "kane" | "testmu" | "momentic" | "cursor-cloud" | "orca-browser" | "cdp-browser" | "verifier";
 
 export interface TierSpec {
 	name: TierName;

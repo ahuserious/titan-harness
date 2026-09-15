@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Titan fixture site</title>
+<style>body{font-family:sans-serif;margin:2rem} #greeting{font-weight:bold} .hidden{display:none}</style>
+</head>
+<body>
+<h1>Titan fixture</h1>
+<p id="intro">A tiny site the sim-user driver exercises: a form, a link and an API call.</p>
+<form id="hello" onsubmit="return greet(event)">
+	<label for="name">Your name</label>
+	<input id="name" name="name" type="text" placeholder="name">
+	<button id="submit" type="submit">Say hello</button>
+</form>
+<p id="greeting" class="hidden"></p>
+<nav><a id="about-link" href="about.html">About this site</a></nav>
+<p id="api">api: <span id="api-status">pending</span></p>
+<script>
+	console.log("fixture: page ready");
+	function greet(event) {
+		event.preventDefault();
+		var name = document.getElementById("name").value || "stranger";
+		var el = document.getElementById("greeting");
+		el.textContent = "Hello, " + name + "!";
+		el.className = "";
+		console.info("fixture: greeted " + name);
+		return false;
+	}
+	fetch("/api/ping").then(function (r) { return r.json(); }).then(function (json) {
+		document.getElementById("api-status").textContent = json.pong ? "ok" : "bad";
+	}).catch(function (err) { console.error("fixture: api failed " + err); document.getElementById("api-status").textContent = "error"; });
+</script>
+</body>
+</html>

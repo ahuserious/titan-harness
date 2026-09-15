@@ -127,7 +127,7 @@ describe("runners: helpers", () => {
 	});
 
 	test("the registry names every runner; shellQuote and whichBinary behave", () => {
-		expect(Object.keys(RUNNERS).sort()).toEqual(["bash", "cursor-cloud", "kane", "momentic", "orca-browser", "testmu", "verifier"]);
+		expect(Object.keys(RUNNERS).sort()).toEqual(["bash", "cdp-browser", "cursor-cloud", "kane", "momentic", "orca-browser", "testmu", "verifier"]);
 		expect(isRunnerName("kane")).toBe(true);
 		expect(isRunnerName("selenium")).toBe(false);
 		expect(shellQuote("it's $HOME")).toBe(`'it'\\''s $HOME'`);
