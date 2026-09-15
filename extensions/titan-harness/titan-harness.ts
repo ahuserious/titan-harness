@@ -54,7 +54,9 @@ import { registerReadonlyCommands } from "./modules/cmd-readonly.ts";
 import { piInvocation, runChild } from "./modules/child-runner.ts";
 import {
 	cloneStack,
+	expandFanout,
 	type HexColor,
+	lanesFor,
 	loadModelStack,
 	orderedSlots,
 	resolveThinking as resolveStackThinking,
@@ -63,6 +65,11 @@ import {
 	type ModelStack,
 	type Thinking,
 } from "./modules/model-stack.ts";
+import { applyLevel, describeLevel, fanoutForStack, leaveLevel, levelCodename, listLevels, nextLevel } from "./modules/levels.ts";
+import { claimShiftTab, formatDoctor, importInfranodusKey, runDoctor, shiftTabFree } from "./modules/doctor.ts";
+import { checkPins, dwPatchApplied } from "./modules/pins.ts";
+import { RunStore } from "./modules/run-store.ts";
+import { appendLedger, formatTotals, rowFromAgentRun, totalsFor, type LedgerOrigin, type LedgerRow } from "./modules/ledger.ts";
 import {
 	ANSWER_MAX_BYTES,
 	BOOT_TYPE,
@@ -91,6 +98,7 @@ import {
 	BUILDER_FANOUT_CYCLE,
 	EXA_TOOL_NAMES,
 	isStackChild,
+	LEVEL_CYCLE,
 	modelFamily,
 	nextInCycle,
 	readStackSettings,
@@ -100,7 +108,7 @@ import {
 	SUBAGENT_FANOUT_CYCLE,
 	writeStackSettings,
 } from "./modules/stack-config.ts";
-import { auditorCellStr, cellStr, exaCellStr, fanOutCellStr, shapeCellStr, subagentCellStr } from "./modules/tui.ts";
+import { auditorCellStr, cellStr, exaCellStr, fanOutCellStr, levelCellStr, shapeCellStr, subagentCellStr, totalsCellStr } from "./modules/tui.ts";
 import { acquireWriterLease, type WriterLease } from "./modules/writer-lease.ts";
 
 // ═══ 1. Defaults ═════════════════════════════════════════════════════════════
@@ -352,9 +360,83 @@ export default function (pi: ExtensionAPI) {
 	// architect), so a model never grades its own family's work.
 	const AUDITOR_POOL = ["antigravity/claude-opus-4-6", "antigravity/gemini-3.8-flash", "xai/grok-4.6", "openai-codex/gpt-6-astra", "anthropic/claude-fable-5-1"];
 	const AUDITOR_NAMES = ["ward", "sentinel", "warden", "arbiter"];
+	/**
+	 * Fallback resolution for schema-v2 shapes: a slot whose model is not usable takes
+	 * its declared `fallback` when that is usable (recorded as substitutedFrom); an
+	 * `optional` slot with no usable model is dropped as vacant. The judge and the
+	 * fuser never share a model after resolution. Returns human-readable notes.
+	 */
+	const FUSER_FALLBACK_ORDER = ["antigravity/claude-opus-4-6", "xai/grok-4.6", "antigravity/gemini-3.8-flash"];
+	const resolveFallbacks = (stack: ModelStack): string[] => {
+		if (stack.version !== 2) return [];
+		const notes: string[] = [];
+		for (const slot of stack.slots) {
+			if (slot.model === "auto") continue; // resolved below, once the builders are known
+			if (modelUsable(slot.model)) continue;
+			if (slot.fallback && modelUsable(slot.fallback)) {
+				notes.push(`${slot.name}: ${slot.model} → ${slot.fallback} (fallback)`);
+				(slot as any).substitutedFrom = slot.model;
+				slot.model = slot.fallback;
+				continue;
+			}
+			if (slot.optional) {
+				notes.push(`${slot.name}: vacant (${slot.model} not usable)`);
+				(slot as any).vacant = true;
+			}
+		}
+		// `model: auto` (auditor slots only): a cross-family pick relative to the primary
+		// builder and the architect after their own substitution; no cross-family model
+		// authed → the slot goes vacant with a note (the per-builder auditors still apply).
+		for (const slot of stack.slots) {
+			if (slot.model !== "auto") continue;
+			const primary = stack.slots.find((candidate) => candidate.primary && !(candidate as any).vacant) ?? stack.primaryBuilder;
+			const builderFamily = modelFamily(primary.model);
+			const architectFamily = modelFamily(stack.architect.model);
+			const pick =
+				AUDITOR_POOL.find((candidate) => modelFamily(candidate) !== builderFamily && modelFamily(candidate) !== architectFamily && modelUsable(candidate)) ??
+				AUDITOR_POOL.find((candidate) => modelFamily(candidate) !== builderFamily && modelUsable(candidate));
+			if (pick) {
+				notes.push(`${slot.name}: auto → ${pick} (cross-family auditor)`);
+				(slot as any).substitutedFrom = "auto";
+				slot.model = pick;
+			} else {
+				notes.push(`${slot.name}: vacant (no cross-family auditor authed)`);
+				(slot as any).vacant = true;
+			}
+		}
+		const judge = stack.lanes.judge;
+		const fuser = stack.lanes.fuser;
+		if (judge && fuser && !(judge as any).vacant && !(fuser as any).vacant && judge.model === fuser.model) {
+			const alternative = FUSER_FALLBACK_ORDER.find((candidate) => candidate !== judge.model && modelUsable(candidate));
+			if (alternative) {
+				notes.push(`${fuser.name}: ${fuser.model} → ${alternative} (judge and fuser must differ)`);
+				(fuser as any).substitutedFrom = fuser.model;
+				fuser.model = alternative;
+			}
+		}
+		const kept = stack.slots.filter((slot) => !(slot as any).vacant);
+		if (kept.length !== stack.slots.length) {
+			stack.slots = kept;
+			stack.builders = kept.filter((slot) => !slot.architect);
+			stack.lanes = lanesFor(kept);
+		}
+		return notes;
+	};
 	const applyShape = (base: ModelStack): ModelStack => {
 		const n = readStackSettings().builderFanOut;
 		const stack = cloneStack(base);
+		if (stack.version === 2) {
+			// Schema v2: lanes are templates; the builder pool expands by the builder fan-out,
+			// further builder templates keep their own fanout, and a level without builders
+			// (0 and 1) runs its primary worker as the host builder so every command still works.
+			const [first, ...rest] = stack.lanes.builders;
+			let builders: ModelSlot[] = first ? [...expandFanout(first, Math.max(1, n)), ...rest.flatMap((template) => expandFanout(template, Math.max(1, template.fanout ?? 1)))] : [];
+			const primary = stack.slots.find((slot) => slot.primary) ?? stack.primaryBuilder;
+			if (!builders.some((slot) => slot.primary)) builders = [primary, ...builders.filter((slot) => slot.id !== primary.id)];
+			const primaryBuilder = builders.find((slot) => slot.primary) ?? builders[0];
+			const slots = [stack.architect, ...builders];
+			return { ...stack, slots, builders, primaryBuilder };
+		}
 		const extras = stack.builders.filter((slot) => !slot.primary);
 		const builders: ModelSlot[] = [stack.primaryBuilder, ...extras.slice(0, Math.max(0, n - 1))];
 		if (builders.length < n) {
@@ -422,14 +504,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		return ["legacy", ...names.filter((name) => name !== "legacy")];
 	};
+	let lastFallbackNotes: string[] = []; // substitutions the last shape load made (shown once by announce)
 	const stackProblems = (stack: ModelStack): string[] =>
-		orderedSlots(stack).map((slot) => (modelUsable(slot.model) ? "" : `${slot.name}: ${slot.model} is not usable (not in catalog or not authed)`)).filter(Boolean);
+		stack.slots.map((slot) => (modelUsable(slot.model) ? "" : `${slot.name}: ${slot.model} is not usable (not in catalog or not authed)`)).filter(Boolean);
 	/** Switch the live shape (session-only) and persist the codename. */
 	const loadShape = async (codename: string, ctx: any, switchHost = true): Promise<string[]> => {
 		noteHost(ctx);
 		if (codename === "legacy") {
 			configuredStack = undefined;
-			writeStackSettings({ shape: "legacy" });
+			leaveLevel("legacy");
 			return [];
 		}
 		let stack: ModelStack;
@@ -438,10 +521,21 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			return [error instanceof Error ? error.message : String(error)];
 		}
+		lastFallbackNotes = resolveFallbacks(stack);
 		const problems = stackProblems(stack);
 		if (problems.length) return problems;
 		configuredStack = stack;
-		writeStackSettings({ shape: codename });
+		// A level shape carries its own fan-out pools, review policy and watchdog default;
+		// any other shape ends the active level (the LEVEL row then reads "shape <name>").
+		if (stack.version === 2 && typeof stack.level === "number") {
+			try {
+				applyLevel(stack.level, stack);
+			} catch {
+				writeStackSettings({ shape: codename }); /* settings write is best effort; the shape is live regardless */
+			}
+		} else {
+			leaveLevel(codename);
+		}
 		if (!switchHost) return [];
 		const primary = stack.primaryBuilder;
 		try {
@@ -546,6 +640,7 @@ export default function (pi: ExtensionAPI) {
 			if (r.slot && !absorbedRuns.has(r)) {
 				absorbedRuns.add(r);
 				bumpSlotPerf(r.slot.id, r.tokensOut, r.tpsSeconds, r.costUsd);
+				recordRun(r);
 			}
 			// FUSION is a FRESH throwaway session by design and runs LAST in /titan-fusion — letting
 			// it become sideLast would pin the left cell to a session that no longer exists and
@@ -583,7 +678,25 @@ export default function (pi: ExtensionAPI) {
 		const output = event.message.usage?.output || 0;
 		if (startedAt === undefined || output <= 0) return;
 		try {
-			bumpSlotPerf(modelStack().primaryBuilder.id, output, Math.max(0, endedAt - startedAt) / 1000, event.message.usage?.cost?.total || 0);
+			const primary = modelStack().primaryBuilder;
+			const seconds = Math.max(0, endedAt - startedAt) / 1000;
+			const usage = event.message.usage ?? {};
+			bumpSlotPerf(primary.id, output, seconds, usage.cost?.total || 0);
+			const model = hostModel ?? primary.model;
+			const level = String(pi.getThinkingLevel?.() ?? primary.thinking);
+			ledger({
+				agentId: "host",
+				callsign: primary.name,
+				role: "host",
+				model,
+				provider: model.split("/")[0] ?? "?",
+				thinking: { requested: level, effective: level },
+				tokens: { input: (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0), output, cacheRead: usage.cacheRead || 0, cacheWrite: usage.cacheWrite || 0 },
+				costUsd: usage.cost?.total || 0,
+				source: "observed",
+				origin: "host",
+				tpsSeconds: seconds,
+			});
 		} catch {
 			/* stack not resolvable yet — skip this turn's sample */
 		}
@@ -741,6 +854,114 @@ export default function (pi: ExtensionAPI) {
 		return { sessionDir: session.dir, sessionId: session.id };
 	};
 
+	// ── 2.4b Level snapshot + session totals (the LEVEL and Σ TOTALS rows) ──
+	const shiftTabBound = shiftTabFree().free; // decided at load: Pi drops an extension shift+tab binding unless the user rebound app.thinking.cycle
+	const terraformPackMissing = (cwd: string): boolean => {
+		try {
+			return !fs.existsSync(path.join(cwd, ".titan", "terraform", "entity.md"));
+		} catch {
+			return true;
+		}
+	};
+	const levelSnapshot = (ctx: any) => {
+		const s = readStackSettings();
+		let stack: ModelStack | undefined;
+		try {
+			stack = modelStack();
+		} catch {
+			stack = undefined;
+		}
+		const v2 = stack?.version === 2 ? stack : undefined;
+		const level = v2?.level ?? s.harnessLevel ?? null;
+		const fanout = v2 ? fanoutForStack(v2) : { builders: stack?.builders.length ?? 0, workers: 0, watchdogs: 0, verifiers: 0, exa: s.childExa ? s.exaFanOut : 0 };
+		return {
+			level,
+			label: v2?.label ?? shapeName(),
+			fanout,
+			planCommand: v2?.plan_command,
+			terraformMissing: level === 3 && (v2?.requires ?? []).includes("terraform") && terraformPackMissing(ctx?.cwd ?? process.cwd()),
+			shiftTab: shiftTabBound,
+		};
+	};
+	// ── 2.4c The run store + session ledger (hash-chained JSONL under settings.store.root) ──
+	// Every command's children and the host's own turns land as ledger rows in ONE
+	// session run; the Σ TOTALS row and /workflow-monitor read the same rows. Writes are
+	// best effort: a store problem must never break a command.
+	let store: RunStore | undefined;
+	const runStore = (): RunStore => (store ??= new RunStore(readStackSettings().store?.root));
+	let sessionRun: { runId: string; dir: string } | undefined;
+	const ledgerRows: LedgerRow[] = [];
+	const currentCwd = (): string => footerCtx?.cwd ?? hostCtx?.cwd ?? process.cwd();
+	const sessionRunFor = (cwd: string): { runId: string; dir: string } | undefined => {
+		if (sessionRun) return sessionRun;
+		try {
+			const s = readStackSettings();
+			sessionRun = runStore().open({ projectSlug: RunStore.projectSlug(cwd), cwd, command: "session", shape: shapeName(), level: s.harnessLevel ?? undefined, status: "running" });
+			return sessionRun;
+		} catch {
+			return undefined;
+		}
+	};
+	const ledger = (row: Omit<LedgerRow, "ts" | "runId">): void => {
+		try {
+			const run = sessionRunFor(currentCwd());
+			if (!run) return;
+			const full = { ...row, runId: run.runId } as Omit<LedgerRow, "ts">;
+			appendLedger(run.dir, full);
+			ledgerRows.push({ ...full, ts: new Date().toISOString() } as LedgerRow);
+		} catch {
+			/* ledger is observational; never break the session over it */
+		}
+	};
+	const recordEvent = (type: string, data: Record<string, unknown>, agentId?: string): void => {
+		try {
+			const run = sessionRunFor(currentCwd());
+			if (run) runStore().appendEvent(run.dir, type, data, agentId);
+		} catch {}
+	};
+	const originFor = (role: Role): LedgerOrigin => (role === "AUDITOR" ? "auditor" : role === "FUSION" ? "fusion" : role === "VALIDATOR" ? "verifier" : "run");
+	// Agent states use the monitor vocabulary; verification (P4) promotes done-unverified to done-verified.
+	const agentStateOf = (r: AgentRun): string => (r.status === "done" ? "done-unverified" : r.status === "failed" || r.status === "timeout" ? "failed" : r.status === "aborted" ? "cancelled" : r.status === "working" ? "dispatched-working" : "queued");
+	const recordRun = (r: AgentRun): void => {
+		try {
+			const run = sessionRunFor(currentCwd());
+			if (!run) return;
+			const effective = r.thinking ?? r.slot?.thinking;
+			ledger(rowFromAgentRun(r, run.runId, originFor(r.role), effective));
+			runStore().upsertAgent(run.dir, {
+				agentId: r.slot?.id ?? r.role.toLowerCase(),
+				callsign: r.slot?.name ?? r.role,
+				role: r.role.toLowerCase(),
+				model: r.model,
+				thinking: { requested: r.slot?.requestedThinking ?? effective ?? "medium", effective: effective ?? "medium" },
+				state: agentStateOf(r),
+				usage: { input: r.tokensIn, output: r.tokensOut, cacheRead: 0, cacheWrite: 0, cost: r.costUsd },
+				tps: { outputTokens: r.tokensOut, seconds: r.tpsSeconds },
+			});
+		} catch {
+			/* observational */
+		}
+	};
+	let totalsCache: { at: number; text: string } = { at: 0, text: "" };
+	const sessionTotalsText = (): string => {
+		if (!ledgerRows.length) return "";
+		if (Date.now() - totalsCache.at < 2_000) return totalsCache.text;
+		let text = "";
+		try {
+			const agents = sessionRun ? runStore().listAgents(sessionRun.dir) : undefined;
+			text = formatTotals(totalsFor(ledgerRows, agents));
+		} catch {
+			text = "";
+		}
+		totalsCache = { at: Date.now(), text };
+		return text;
+	};
+	pi.on("session_shutdown", async () => {
+		try {
+			if (sessionRun) runStore().updateRun(sessionRun.dir, { status: "completed", endedAt: new Date().toISOString() });
+		} catch {}
+	});
+
 	// ── 2.5 The MODEL BAR (/titan): one aligned cell per model — `◆ ROLE | model (med) | [██--------] 12%` ──
 	//
 	// The harness CLEARS pi's default footer at TUI session start (user direction
@@ -752,6 +973,8 @@ export default function (pi: ExtensionAPI) {
 	let footerVisible = readStackSettings().modelBar; // persisted through /stack and /titan on|off
 	let footerCtx: any; // the session ctx — the widget needs its ui + modelRegistry + live model
 	let footerTicker: ReturnType<typeof setInterval> | undefined;
+	// Assigned next to describeShape(); stub so session_start / SHAPE_HOOK can call it before that line.
+	let paintShapeStatus: (ctx?: any) => void = () => {};
 
 	const renderFooterWidget = () => {
 		const ctx = footerCtx;
@@ -800,8 +1023,15 @@ export default function (pi: ExtensionAPI) {
 							const perfSeconds = (perf?.seconds ?? 0) + (extra?.tpsSeconds ?? 0);
 							const perfCost = (perf?.costUsd ?? 0) + (extra?.costUsd ?? 0);
 							const perfStr = `${perfTokens > 0 && perfSeconds > 0 ? `${Math.round(perfTokens / perfSeconds)} tps` : "— tps"} | $${perfCost.toFixed(4)}`;
-							return truncateToWidth(cellStr(theme, role, model, active?.thinking ?? slot.thinking, bar(used, window), slot, perfStr), width);
+							// Requested→effective thinking: a normalized slot shows `xhi↘hi`, never a fake xhigh.
+							const requested = slot.requestedThinking;
+							const thinkingLabel = requested && requested !== slot.thinking ? `${THINKING_SHORT[requested] ?? requested}↘${THINKING_SHORT[slot.thinking] ?? slot.thinking}` : (active?.thinking ?? slot.thinking);
+							return truncateToWidth(cellStr(theme, role, model, thinkingLabel, bar(used, window), slot, perfStr), width);
 						});
+						// Σ TOTALS row: the session ledger (token burn, cost, avg tps/agent, completion rate).
+						rows.unshift(truncateToWidth(totalsCellStr(theme, sessionTotalsText(), liveRuns.length > 0), width));
+						// LEVEL row: which harness level (or plain shape) is live, its lane pools, the plan default.
+						rows.push(truncateToWidth(levelCellStr(theme, levelSnapshot(ctx)), width));
 						// FAN-OUT row: how many children are running right now, out of how many this
 						// command spawned, against the configured stack size.
 						rows.push(truncateToWidth(fanOutCellStr(theme, fanOutSnapshot()), width));
@@ -849,7 +1079,10 @@ export default function (pi: ExtensionAPI) {
 
 	// /stack toggles the bar through this hook (and persists the choice itself).
 	(globalThis as any)[STACK_MODEL_BAR_HOOK] = (visible: boolean) => setFooterVisible(visible);
-	(globalThis as any)[STACK_SHAPE_HOOK] = () => renderFooterWidget();
+	(globalThis as any)[STACK_SHAPE_HOOK] = () => {
+		renderFooterWidget();
+		paintShapeStatus();
+	};
 
 	// Boot: without --titan-config, load the persisted shape (settings.shape) as the session stack.
 	pi.on("session_start", async (_ev: any, ctx: any) => {
@@ -878,6 +1111,7 @@ export default function (pi: ExtensionAPI) {
 		// Pi's default footer stays. A /new or a session switch hands us a fresh ctx —
 		// re-attach the model bar if it is on.
 		if (footerVisible) setFooterVisible(true);
+		paintShapeStatus(ctx);
 	});
 
 	// ── 2.6 No transcript renderer: panels are plain markdown custom messages ──
@@ -989,6 +1223,7 @@ export default function (pi: ExtensionAPI) {
 		liveRuns = [...runs];
 		currentCommand = command;
 		currentStartedAt = startedAt;
+		recordEvent("command.start", { command, agents: runs.map((run) => run.slot?.name ?? run.role) });
 		const render = () => {
 			try {
 				ctx.ui.setStatus(LIVE_STATUS, activitySummary(command, liveRuns, startedAt));
@@ -1002,6 +1237,7 @@ export default function (pi: ExtensionAPI) {
 		return () => {
 			clearInterval(ticker);
 			absorbTotals(liveRuns);
+			recordEvent("command.end", { command, ms: Date.now() - startedAt, agents: liveRuns.map((run) => ({ name: run.slot?.name ?? run.role, status: run.status })) });
 			liveRuns = [];
 			currentCommand = undefined;
 			try {
@@ -1146,6 +1382,8 @@ export default function (pi: ExtensionAPI) {
 		["/titan-n [1-4]", "builder fan-out (Ctrl+Shift+N · Alt+N)"],
 		["/titan-s [0-16]", "subagent cap per child (Ctrl+Shift+S · Alt+S)"],
 		["/titan-audit [on|off]", "auditors per builder (Ctrl+Shift+A · Alt+A)"],
+		["/titan-level [0-3|next|status]", "harness level 0-3 (Shift+Tab after rebind · Alt+L)"],
+		["/titan-doctor [--json]", "models, credentials, tools, pins, decisions"],
 		["/titan [on|off|toggle]", "this list; model bar on/off (alias /fh)"],
 	];
 	const COMMAND_PAD = Math.max(...COMMAND_INDEX.map(([cmd]) => cmd.length));
@@ -1417,11 +1655,38 @@ export default function (pi: ExtensionAPI) {
 		const stack = modelStack();
 		return `shape ${shapeName()} · builders ${stack.builders.length} (${stack.builders.map((slot) => slot.name).join(", ")}) · subagents ${s.subagentFanOut > 0 ? `≤${s.subagentFanOut}` : "off"} · auditor ${s.auditor ? "on" : "off"} · ${s.anonymize ? "callsigns only" : "models visible"}`;
 	};
+	/** Idle footer status: current shape (ultraplan H2). Live command activity uses LIVE_STATUS. */
+	const SHAPE_STATUS = "titan";
+	const shapeStatusText = (): string => {
+		try {
+			const stack = modelStack();
+			if (stack.version === 2) return describeLevel(stack, readStackSettings());
+		} catch {
+			/* v1 / not loaded yet */
+		}
+		try {
+			return describeShape();
+		} catch {
+			return `shape ${readStackSettings().shape}`;
+		}
+	};
+	paintShapeStatus = (ctx?: any) => {
+		const ui = ctx?.ui ?? footerCtx?.ui;
+		if (!ui?.setStatus) return;
+		try {
+			const theme = ui.theme;
+			const text = shapeStatusText();
+			ui.setStatus(SHAPE_STATUS, theme?.fg ? theme.fg("accent", "⬡ ") + theme.fg("dim", text) : `⬡ ${text}`);
+		} catch {
+			/* headless / session teardown */
+		}
+	};
 	const announce = (ctx: any, text: string, level: "info" | "warning" | "error" = "info") => {
 		try {
 			ctx.ui.notify(text, level);
 		} catch {}
 		renderFooterWidget();
+		paintShapeStatus(ctx);
 	};
 	const cycleShape = async (ctx: any, wanted?: string) => {
 		const shapes = listShapes();
@@ -1516,6 +1781,106 @@ export default function (pi: ExtensionAPI) {
 		setSubagents(ctx, nextInCycle(SUBAGENT_FANOUT_CYCLE, SUBAGENT_FANOUT_CYCLE.includes(current) ? current : 0));
 	});
 	bindKey(["ctrl+shift+a", "alt+a"], "titan: toggle auditors", async (ctx) => setAuditor(ctx, !readStackSettings().auditor));
+
+	// ── 2.13d Harness levels: /titan-level + Alt+L / Ctrl+Shift+L, and Shift+Tab once the user has freed it ──
+	const cycleLevel = async (ctx: any, wanted?: number | "next") => {
+		const available = listLevels();
+		if (!available.length) {
+			announce(ctx, `titan: no level shapes in ${STACK_DIR} — copy model-stack-level-*.yaml from the package's .pi/titan-harness (see INSTALL.md).`, "warning");
+			return;
+		}
+		const current = readStackSettings().harnessLevel;
+		let target: number;
+		if (wanted === undefined || wanted === "next") target = nextLevel(current, available);
+		else {
+			target = wanted;
+			if (!available.includes(target)) return announce(ctx, `titan: level ${target} has no shape file. Available: ${available.join(", ")}`, "warning");
+		}
+		const problems = await loadShape(levelCodename(target), ctx);
+		if (problems.length) return announce(ctx, `titan: level ${target} not runnable — ${problems.join("; ")}`, "warning");
+		const stack = configuredStack!;
+		const notes = lastFallbackNotes.length ? ` · ${lastFallbackNotes.join("; ")}` : "";
+		const terraform = target === 3 && (stack.requires ?? []).includes("terraform") && terraformPackMissing(ctx.cwd) ? " · run /terraform for best results (no .titan/terraform/entity.md)" : "";
+		announce(ctx, `titan: ${describeLevel(stack, readStackSettings())}${notes}${terraform}`, terraform ? "warning" : "info");
+	};
+	pi.registerCommand("titan-level", {
+		description: "Harness level 0-3 (ultrafast · brain+workers · triggered ops · engineering): /titan-level [0-3|next|status|--claim-shift-tab]",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+			if (arg === "status") {
+				let text = "titan level: shape-driven (no level active)";
+				try {
+					const stack = modelStack();
+					if (stack.version === 2) text = `titan: ${describeLevel(stack, readStackSettings())}`;
+				} catch {}
+				const free = shiftTabFree();
+				return announce(ctx, `${text} · shift+tab ${free.free ? "bound to level cycling" : `reserved by Pi (${free.detail}) — alt+l and /titan-level work; /titan-level --claim-shift-tab to rebind`}`);
+			}
+			if (arg === "--claim-shift-tab" || arg === "claim-shift-tab") {
+				const free = shiftTabFree();
+				if (free.free) return announce(ctx, `titan: shift+tab is already free (${free.detail}). ${shiftTabBound ? "It cycles levels." : "Run /reload so titan binds it."}`);
+				let ok = false;
+				try {
+					ok = await ctx.ui.confirm("Free shift+tab for titan level cycling?", "This rebinds Pi's thinking-level cycle (app.thinking.cycle) to alt+t in ~/.pi/agent/keybindings.json (backup kept). You will need to /reload.");
+				} catch {
+					ok = false;
+				}
+				if (!ok) return announce(ctx, "titan: keybindings unchanged. alt+l and /titan-level keep working.");
+				const result = claimShiftTab();
+				return announce(ctx, `titan: ${result.message}`, result.changed ? "info" : "warning");
+			}
+			if (!arg || arg === "next") return cycleLevel(ctx, "next");
+			const level = Number.parseInt(arg, 10);
+			if (!LEVEL_CYCLE.includes(level)) return announce(ctx, "Usage: /titan-level [0-3|next|status|--claim-shift-tab]", "warning");
+			await cycleLevel(ctx, level);
+		},
+	});
+	bindKey(["ctrl+shift+l", "alt+l"], "titan: cycle harness level (0-3)", async (ctx) => cycleLevel(ctx, "next"));
+	if (shiftTabBound) bindKey(["shift+tab"], "titan: cycle harness level (0-3)", async (ctx) => cycleLevel(ctx, "next"));
+
+	// ── 2.13e /titan-doctor — the operator gate: models, credentials, tools, pins, decisions ──
+	pi.registerCommand("titan-doctor", {
+		description: "Report what the harness can run on this machine: models + auth, credentials (names only), tools on PATH, shift+tab, package pins, decisions. /titan-doctor [--json|--import-infranodus-key]",
+		handler: async (args, ctx) => {
+			noteHost(ctx);
+			const arg = args.trim().toLowerCase();
+			if (arg === "--import-infranodus-key" || arg === "import-infranodus-key") {
+				let ok = false;
+				try {
+					ok = await ctx.ui.confirm("Import the InfraNodus key?", "Copies an existing INFRANODUS_API_KEY (environment, mcp-server-infranodus/.env or ~/.claude.json) into ~/.config/mcp/mcp.json so pi-mcp-adapter can start the server. The value is never shown.");
+				} catch {
+					ok = false;
+				}
+				if (!ok) return announce(ctx, "titan: nothing imported.");
+				const result = importInfranodusKey();
+				return announce(ctx, `titan: ${result.message}`, result.ok ? "info" : "warning");
+			}
+			const report = runDoctor({ ctx, pins: () => checkPins(), dwPatchApplied: () => dwPatchApplied() });
+			if (arg === "--json" || arg === "json") {
+				const dir = await mkArtifacts();
+				await save(dir, "doctor.json", `${JSON.stringify(report, null, 2)}\n`);
+				return announce(ctx, `titan doctor: ready ${report.summary.ready} · vacant ${report.summary.vacant} · warn ${report.summary.warn} · unknown ${report.summary.unknown} → ${path.join(dir, "doctor.json")}`);
+			}
+			panel({ kind: "banner", command: "titan-doctor", ok: report.summary.unknown === 0 }, `\`\`\`\n${formatDoctor(report)}\n\`\`\``);
+		},
+	});
+
+	// Boot pin check: a drifted companion package or a wiped dynamic-workflows patch is
+	// the kind of thing that silently changes behaviour, so say it once per session.
+	let pinsChecked = false;
+	pi.on("session_start", async (ev: any, ctx: any) => {
+		if (pinsChecked || ev?.reason !== "startup") return;
+		pinsChecked = true;
+		try {
+			const drift = checkPins().filter((pin) => !pin.ok);
+			const patched = dwPatchApplied();
+			if (!drift.length && patched) return;
+			const parts = [...drift.map((pin) => `${pin.name} expected ${pin.expected}, found ${pin.found ?? "missing"}`), ...(patched ? [] : ["dynamic-workflows /workflows menu patch not applied (node scripts/apply-dw-patch.mjs)"])];
+			ctx.ui.notify(`titan pins: ${parts.join(" · ")}`, "warning");
+		} catch {
+			/* pins are advisory */
+		}
+	});
 
 	// ── 2.14 The orchestration commands — modules/cmd-*.ts through the HarnessDeps seam ──
 	const deps: HarnessDeps = {

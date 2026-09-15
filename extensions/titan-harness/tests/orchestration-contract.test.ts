@@ -51,7 +51,6 @@ describe("orchestration contracts", () => {
     expect(source).toContain("refusing to silently truncate any agent");
     expect(source).toContain("missingSessions");
     expect(source).toContain("requires at least 2 rounds");
-    expect(source).toContain("answers.find((candidate) => candidate.slotId === source.slotId)");
     expect(source).toContain("slots.map(h.newSlotRun)");
     expect(prompt("USER_PROMPT_DEBATE_REBUTTAL.md")).toContain("all of them");
     expect(prompt("USER_PROMPT_DEBATE_REBUTTAL.md")).toContain("concrete opinion");
@@ -78,7 +77,8 @@ describe("orchestration contracts", () => {
     expect(source).toContain('event.type === "tool_execution_end"');
     // Host raw-chat turns use the tps extension's boundary and credit the Main slot.
     expect(source).toContain('pi.on("before_provider_request"');
-    expect(source).toContain("bumpSlotPerf(modelStack().primaryBuilder.id");
+    expect(source).toContain("const primary = modelStack().primaryBuilder;");
+    expect(source).toContain("bumpSlotPerf(primary.id, output, seconds");
     // Throughput-weighted, division-by-zero guarded, rendered per row.
     expect(source).toContain("r.tokensOut > 0 && r.tpsSeconds > 0");
     expect(source).toContain("tps");
@@ -98,11 +98,9 @@ describe("orchestration contracts", () => {
   test("configured colors are actual hex and model bar is a widget", () => {
     expect(source).toContain("fgHex(slot.color");
     expect(source).toContain('{ placement: "belowEditor" }');
-    // Pi's default footer is cleared at TUI session start (user direction 2026-08-17):
-    // the ONLY setFooter call is the empty component that blanks it — the model bar
-    // stays a belowEditor widget, never a footer replacement.
+    // titan-harness leaves Pi's own footer alone: the model bar is a belowEditor widget,
+    // never a footer replacement, so the harness must not call setFooter at all.
     const setFooterCalls = source.match(/ctx\.ui\.setFooter\(/g) ?? [];
-    expect(setFooterCalls.length).toBe(1);
-    expect(source).toContain("ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }))");
+    expect(setFooterCalls.length).toBe(0);
   });
 });

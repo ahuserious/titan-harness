@@ -377,7 +377,11 @@ export default function (pi: ExtensionAPI) {
 			`  subagent fan-out: ${stack.subagentFanOut > 0 ? `≤${stack.subagentFanOut} per child` : "off"}   child subagents: ${stack.childSubagents}   (/titan-s · Ctrl+Shift+S; pi-subagents globalConcurrencyLimit)`,
 			`  exa in children : ${stack.childExa ? "ON" : "OFF"}   (${EXA_TOOL_NAMES.length} pi-exa tools)`,
 			`  workflow fan-out: ${fanOut ?? "package default (8)"}   (~/.pi/workflows/settings.json defaultConcurrency)`,
-			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (slots + FAN-OUT + SUBAGENT + EXA + SHAPE + AUDITOR rows)`,
+			`  model bar       : ${stack.modelBar ? "ON" : "OFF"}   (Σ TOTALS + slots + FAN-OUT + SUBAGENT + EXA + SHAPE + AUDITOR + LEVEL rows)`,
+			`  harness level   : ${stack.harnessLevel == null ? "shape-driven" : `L${stack.harnessLevel}`}   lanes b${stack.builderFanOut} w${stack.workerFanOut} wd${stack.watchdogFanOut} v${stack.verifierFanOut} exa${stack.exaFanOut}   (/titan-level · Alt+L)`,
+			`  child cap       : ${stack.maxConcurrentChildren} live children   budget ${stack.budgetUsd == null ? "none" : `$${stack.budgetUsd}`}   (/stack concurrency, /stack budget)`,
+			`  watchdog        : ${stack.watchdog.enabled ? "ON" : "OFF"}   ${stack.watchdog.model} (${stack.watchdog.thinking})   stalemate ${stack.watchdog.stalemateRepeats}   compaction ${stack.watchdog.onCompaction}`,
+			`  run store       : ${stack.store.root}${stack.store.sqliteIndex ? " (+sqlite index)" : ""}   monitor ${stack.monitor.mode}`,
 			`  settings file   : ${STACK_SETTINGS_PATH}`,
 		].join("\n");
 	};
@@ -388,6 +392,18 @@ export default function (pi: ExtensionAPI) {
 		const items: Array<[string, () => Promise<void>]> = [
 			[`Harness shape: ${stack.shape} · builders ${stack.builderFanOut}  → /titan-shape`, async () => {
 				if (!(await invokeCommand(ctx, "titan-shape", "next"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
+			[`Harness level: ${stack.harnessLevel == null ? "shape-driven" : `L${stack.harnessLevel}`}  → /titan-level next`, async () => {
+				if (!(await invokeCommand(ctx, "titan-level", "next"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
+			[`Doctor: models, credentials, tools, pins  → /titan-doctor`, async () => {
+				if (!(await invokeCommand(ctx, "titan-doctor", ""))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+			}],
+			[`Child concurrency cap: ${stack.maxConcurrentChildren} · budget ${stack.budgetUsd == null ? "none" : `$${stack.budgetUsd}`}  → /stack concurrency / budget`, async () => ctx.ui.notify("Use /stack concurrency <1-16> and /stack budget <usd|off>.", "info")],
+			[`Watchdog: ${stack.watchdog.enabled ? "ON" : "OFF"}  → toggle`, async () => {
+				writeStackSettings({ watchdog: { enabled: !stack.watchdog.enabled } });
+				shapeChanged();
+				ctx.ui.notify(`Watchdog ${!stack.watchdog.enabled ? "ON" : "OFF"}.`, "info");
 			}],
 			[`Auditor: ${stack.auditor ? "ON" : "OFF"}  → toggle`, async () => {
 				if (!(await invokeCommand(ctx, "titan-audit", "toggle"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
@@ -477,15 +493,46 @@ export default function (pi: ExtensionAPI) {
 				if (on === undefined) return ctx.ui.notify("Usage: /stack bar on|off", "warning");
 				return applyModelBar(ctx, on);
 			}
+			case "concurrency":
+			case "cap-children": {
+				const n = Number.parseInt(value, 10);
+				if (!Number.isFinite(n) || n < 1 || n > 16) return ctx.ui.notify("Usage: /stack concurrency <1-16>  (live titan children at once)", "warning");
+				writeStackSettings({ maxConcurrentChildren: n });
+				shapeChanged();
+				return ctx.ui.notify(`Child concurrency cap → ${n} (fan-out numbers are pool sizes; this is how many children run at once).`, "info");
+			}
+			case "budget": {
+				if (value.toLowerCase() === "off" || value.toLowerCase() === "none") {
+					writeStackSettings({ budgetUsd: null });
+					return ctx.ui.notify("Run budget cleared.", "info");
+				}
+				const usd = Number.parseFloat(value);
+				if (!Number.isFinite(usd) || usd < 0) return ctx.ui.notify("Usage: /stack budget <usd|off>", "warning");
+				writeStackSettings({ budgetUsd: usd });
+				return ctx.ui.notify(`Run budget → $${usd} (children are refused past it; the bar shows held-spend).`, "info");
+			}
+			case "watchdog": {
+				const on = onOff(value);
+				if (on === undefined) return ctx.ui.notify("Usage: /stack watchdog on|off", "warning");
+				writeStackSettings({ watchdog: { enabled: on } });
+				shapeChanged();
+				return ctx.ui.notify(`Watchdog ${on ? "ON" : "OFF"} (titan-native; pi-subagents' child watchdog stays off).`, "info");
+			}
+			case "level":
+				if (!(await invokeCommand(ctx, "titan-level", value || "next"))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+				return;
+			case "doctor":
+				if (!(await invokeCommand(ctx, "titan-doctor", value))) ctx.ui.notify("titan-harness is not loaded.", "warning");
+				return;
 			case "status":
 				return ctx.ui.notify(statusText(ctx), "info");
 			default:
-				return ctx.ui.notify("Usage: /stack [tools on|off | subagent-model <provider/id> [thinking] | auditor-model auto|<provider/id> [thinking] | audit-rounds <1-3> | anonymize on|off | child-subagents all|builders|off | subagent-cap <0-16> | exa on|off | fanout <1-16> | bar on|off | status]", "warning");
+				return ctx.ui.notify("Usage: /stack [tools on|off | subagent-model <provider/id> [thinking] | auditor-model auto|<provider/id> [thinking] | audit-rounds <1-3> | anonymize on|off | child-subagents all|builders|off | subagent-cap <0-16> | exa on|off | fanout <1-16> | concurrency <1-16> | budget <usd|off> | watchdog on|off | level [0-3|next] | doctor | bar on|off | status]", "warning");
 		}
 	};
 
 	pi.registerCommand("stack", {
-		description: "titan-harness settings: shape, auditor, anonymize, subagent model/cap, subagent tools, exa, workflow fan-out, model bar",
+		description: "titan-harness settings: level, shape, auditor, watchdog, anonymize, subagent model/cap, subagent tools, exa, fan-out, concurrency cap, budget, model bar, doctor",
 		handler,
 	});
 	pi.registerCommand("stack-settings", {

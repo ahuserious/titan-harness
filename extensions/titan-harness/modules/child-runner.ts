@@ -13,8 +13,18 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { briefArg, runOk, type AgentRun } from "./runtime.ts";
 import { childToolsFor, readStackSettings, STACK_CHILD_ENV, subagentCapHint } from "./stack-config.ts";
+import { DynamicSemaphore } from "./concurrency.ts";
 
 const KILL_GRACE_MS = 5_000; // SIGTERM → SIGKILL escalation window
+
+/**
+ * The one cap on live titan children (settings.maxConcurrentChildren, default 8).
+ * Fan-out numbers are pool sizes; this is how many processes may run at once.
+ */
+export const childSlots = new DynamicSemaphore(() => {
+	const raw = (readStackSettings() as any).maxConcurrentChildren;
+	return typeof raw === "number" && Number.isFinite(raw) ? raw : 8;
+});
 
 /** Locate the running pi binary so we can re-invoke it as a child. */
 export function piInvocation(args: string[]): { command: string; args: string[] } {
@@ -50,6 +60,7 @@ export function runChild(opts: {
 	cwd: string;
 	timeoutMs: number;
 	signal?: AbortSignal; // escape key — kill this child and settle it as "aborted"
+	priority?: boolean; // reviewers/inspectors bypass the concurrency cap so they never wait behind the children they review
 }): Promise<AgentRun> {
 	const run = opts.run;
 	run.thinking = opts.thinking;
@@ -93,6 +104,22 @@ export function runChild(opts: {
 	else args.push("--tools", effectiveTools);
 	args.push(opts.prompt);
 
+	return childSlots.acquire({ priority: opts.priority, signal: opts.signal }).then(
+		(lease) => runChildWithLease(opts, args, lease),
+		() => {
+			// Aborted while queued behind the cap: settle without spawning.
+			run.status = "aborted";
+			run.startedAt = Date.now();
+			run.endedAt = run.startedAt;
+			run.ms = 0;
+			run.exitCode = 130;
+			return run;
+		},
+	);
+}
+
+function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[], lease: { release(): void }): Promise<AgentRun> {
+	const run = opts.run;
 	return new Promise<AgentRun>((resolve) => {
 		const started = Date.now();
 		let buffer = "";
@@ -107,6 +134,7 @@ export function runChild(opts: {
 			run.endedAt = started;
 			run.ms = 0;
 			run.exitCode = 130;
+			lease.release();
 			resolve(run);
 			return;
 		}
@@ -271,6 +299,7 @@ export function runChild(opts: {
 			run.exitCode = aborted ? 130 : timedOut ? 124 : (code ?? 0);
 			cleanup();
 			settle();
+			lease.release();
 			resolve(run);
 		});
 		proc.on("error", (err) => {
@@ -279,6 +308,7 @@ export function runChild(opts: {
 			run.exitCode = 1;
 			cleanup();
 			settle();
+			lease.release();
 			resolve(run);
 		});
 

@@ -1,0 +1,15 @@
+# model-stack-level-2.yaml — triggered / operations / research / entity-aware strategy (5 per agent type)
+version: 2
+level: 2
+label: triggered-ops
+entry: authored-workflow           # any trigger → the architect authors a verified + recoverable workflow first
+exa: { enabled: true, fanout: 5, children: on }
+verification: { default_tier: research-planning, review: required, elevation: default }
+watchdog: { enabled: true, per_fanout: 1, counted: false, on_compaction: halt-inspect }
+slots:
+  - { name: rune,  role: architect, architect: true, model: openai-codex/gpt-6-astra, thinking: high, fallback: xai/grok-4.6 }
+  - { name: forge, role: builder, primary: true, model: xai/grok-4.6, thinking: xhigh, fanout: 5 }
+  - { name: scout, role: worker, model: antigravity/gemini-3.8-flash, thinking: high, fanout: 5 }   # brief gives no thinking; high chosen
+  - { name: hound, role: watchdog, model: cerebras/qwen-3.8-27b, thinking: medium, fanout: 5, counted: false }
+  - { name: lantern, role: exa, model: cerebras/qwen-3.8-27b, thinking: medium, fanout: 5, counted: false }
+  - { name: ward,  role: auditor, model: auto, thinking: high }                                      # ephemeral, cross-family

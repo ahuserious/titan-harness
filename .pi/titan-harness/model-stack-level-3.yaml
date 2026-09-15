@@ -1,0 +1,18 @@
+# model-stack-level-3.yaml — software engineering / architecture / deep research (3/5/5/5/10)
+version: 2
+level: 3
+label: engineering
+plan_command: /ultraplan            # status line shows "plan → /ultraplan"; bare /plan routes there
+requires: [terraform]               # notify "run /terraform" when .titan/terraform/entity.md is missing
+exa: { enabled: true, fanout: 10, children: on }
+verification: { default_tier: production-swe, review: required, elevation: default }
+watchdog: { enabled: true, per_fanout: 1, counted: false, on_compaction: halt-inspect }
+slots:
+  - { name: rune,   role: architect, architect: true, model: openai-codex/gpt-6-astra, thinking: xhigh, fallback: xai/grok-4.6 }
+  - { name: forge,  role: builder, primary: true, model: anthropic/claude-fable-5-1, thinking: high, fanout: 3, fallback: antigravity/claude-opus-4-6 }
+  - { name: scout,  role: worker, model: antigravity/gemini-3.8-flash, thinking: high, fanout: 5 }
+  - { name: ledger, role: worker, profile: db-ops-findings-curation, model: xai/grok-4.6, thinking: high, fanout: 2, pool: scout }  # alternate listing; draws from the 5-worker pool, printed fan-out stays 3/5/5/5/10
+  - { name: hound,  role: watchdog, model: cerebras/qwen-3.8-27b, thinking: medium, fanout: 5, counted: false }
+  - { name: assay,  role: verifier, model: xai/grok-4.6, thinking: xhigh, fanout: 5 }
+  - { name: lantern, role: exa, model: cerebras/qwen-3.8-27b, thinking: medium, fanout: 10, counted: false }
+  - { name: ward,   role: auditor, model: auto, thinking: high }

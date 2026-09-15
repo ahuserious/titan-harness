@@ -1,0 +1,13 @@
+# model-stack-ultraplan.yaml — the fusion team (plan §4.5): target roster, runnable-today substitution in comments.
+# Seats are anonymous (A/B/C/…) to the judge and the fuser; the judge model must differ from the fuser model.
+# Minimum live seats: 3, otherwise /ultraplan degrades to /titan-opinion with a notify.
+version: 2
+label: ultraplan
+slots:
+  - { name: rune,  role: architect, architect: true, model: openai-codex/gpt-6-astra, thinking: xhigh, fallback: xai/grok-4.6 }
+  - { name: quill, role: fusion, model: anthropic/claude-fable-5-1, thinking: xhigh, fallback: antigravity/claude-opus-4-6 }   # today: opus-4-6 high
+  - { name: slate, role: fusion, model: xai/grok-4.6, thinking: xhigh }
+  - { name: prism, role: fusion, model: antigravity/gemini-3.8-flash, thinking: xhigh }            # effective high
+  - { name: lumen, role: fusion, model: openrouter/meta/muse-spark-1.3, thinking: max, optional: true }  # vacant until OPENROUTER_API_KEY
+  - { name: gavel, role: judge, model: antigravity/gemini-3.8-flash, thinking: xhigh }             # effective high
+  - { name: loom,  role: fuser, primary: true, model: anthropic/claude-fable-5-1, thinking: xhigh, fallback: antigravity/claude-opus-4-6 }

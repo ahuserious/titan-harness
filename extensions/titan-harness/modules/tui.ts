@@ -114,6 +114,37 @@ export const auditorCellStr = (theme: any, a: AuditorSnapshot): string => {
 	return paint(theme.bold(`${ROLE_GLYPH.AUDITOR} AUDITOR`)) + sep + paint(`${a.name} · audits ${a.forName}`) + sep + paint(`${shortModel(a.model)}${thinkingTag(a.thinking)}`) + sep + paint(a.authed === false ? `not authed · /login ${a.model.split("/")[0]}` : a.state);
 };
 
+/** The Σ TOTALS row: `Σ TOTALS | 1.24M tok · $3.87 · 41 tps/agent · verified 86 % (12/14) | L3 engineering`. Accent when a run is live, dim when idle. */
+export const totalsCellStr = (theme: any, totals: string, live: boolean, suffix?: string): string => {
+	const sep = theme.fg("dim", " | ");
+	const color = live ? "accent" : "dim";
+	const bits = [theme.fg(color, totals || "no runs yet")];
+	if (suffix) bits.push(theme.fg(color, suffix));
+	return theme.fg(color, theme.bold("Σ TOTALS")) + sep + bits.join(sep);
+};
+
+export interface LevelSnapshot {
+	level: number | null; // null = shape-driven (no level active)
+	label: string; // "engineering", "ultrafast", … or the shape codename
+	fanout: { builders: number; workers: number; watchdogs: number; verifiers: number; exa: number };
+	planCommand?: string; // "/ultraplan" at level 3
+	terraformMissing?: boolean; // level 3 without a terraform pack
+	shiftTab: boolean; // shift+tab bound to level cycling (after the rebind)
+}
+
+/** The LEVEL row: `⟁ LEVEL | L3 engineering | b3 w5 wd5 v5 exa10 | plan → /ultraplan | shift+tab · alt+l`. Warning when terraform is missing at level 3. */
+export const levelCellStr = (theme: any, s: LevelSnapshot): string => {
+	const sep = theme.fg("dim", " | ");
+	const color = s.terraformMissing ? "warning" : "accent";
+	const c = (t: string) => theme.fg(color, t);
+	const f = s.fanout;
+	const bits = [c(s.level == null ? `shape ${s.label}` : `L${s.level} ${s.label}`), c(`b${f.builders} w${f.workers} wd${f.watchdogs} v${f.verifiers} exa${f.exa}`)];
+	if (s.planCommand) bits.push(c(`plan → ${s.planCommand}`));
+	if (s.terraformMissing) bits.push(c("run /terraform"));
+	bits.push(c(s.shiftTab ? "shift+tab · alt+l" : "alt+l · /titan-level"));
+	return c(theme.bold("⟁ LEVEL")) + sep + bits.join(sep);
+};
+
 export interface ShapeSnapshot {
 	shape: string;
 	builders: number;

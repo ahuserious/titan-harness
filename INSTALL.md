@@ -64,6 +64,40 @@ PI_OFFLINE=1 pi -p "reply with the single word pong" --no-session --thinking off
 Expect a JSON stream whose `turn_end` carries `pong` and no line containing
 `Extension error`.
 
+### 1a. Shape files: levels 0–3 and the fusion roster
+
+`/titan-shape` and `/titan-level` read `~/.pi/titan-harness/model-stack-<codename>.yaml`.
+Copy the package's shapes there once (from the installed package dir):
+
+```bash
+mkdir -p ~/.pi/titan-harness
+cp .pi/titan-harness/model-stack-*.yaml ~/.pi/titan-harness/
+```
+
+The five 0.3.0 files are `model-stack-level-0.yaml` … `model-stack-level-3.yaml` and
+`model-stack-ultraplan.yaml`; without the level files `/titan-level` answers
+`no level shapes in ~/.pi/titan-harness`. Same-named copies are overwritten, so a
+customized stack keeps its own codename.
+
+### 1b. Shift+Tab for level cycling (optional rebind, ask the human first)
+
+Pi reserves `shift+tab` for `app.thinking.cycle` and silently drops extension bindings
+on it, so titan binds Shift+Tab only when `~/.pi/agent/keybindings.json` maps that
+action elsewhere. Alt+L (Ctrl+Shift+L on Kitty-protocol terminals) and `/titan-level`
+work without any rebind. The rebind changes how the human cycles thinking levels
+(to `alt+t`), so confirm before running it:
+
+```bash
+node scripts/keybindings-rebind.mjs --check      # prints "free" (exit 0) or "reserved" (exit 2)
+node scripts/keybindings-rebind.mjs --dry-run    # prints the would-be keybindings.json, writes nothing
+node scripts/keybindings-rebind.mjs              # app.thinking.cycle → alt+t (backup keybindings.json.bak); --to <key> for another chord
+node scripts/keybindings-rebind.mjs --restore    # put the backup back
+```
+
+Inside Pi the same edit is `/titan-level --claim-shift-tab` (confirm dialog, backup
+kept). Either way run `/reload`; titan binds Shift+Tab at the next session start and
+the model bar's LEVEL row switches from `alt+l · /titan-level` to `shift+tab · alt+l`.
+
 ## 2. Install the MCP catalog
 
 ### 2.0 Pi: automatic through the package manifest, nothing to run
@@ -132,6 +166,20 @@ knowledge graphs, ontology graphs, topical clusters, content gaps, research
 questions, contextual hints and cross-run memory relations, which is the
 reasoning-ontology stage of the workflow plan. It ships `"disabled": true` until
 `INFRANODUS_API_KEY` exists; without the key nothing tries to start it.
+
+Two routes for the InfraNodus key:
+
+- **In Pi:** `/titan-doctor --import-infranodus-key`. After a confirm it copies an
+  existing key from the environment, a local `mcp-server-infranodus/.env` or
+  `~/.claude.json` into `~/.config/mcp/mcp.json` (`mcpServers.infranodus.env.INFRANODUS_API_KEY`,
+  `disabled: false`, file mode 0600), never prints the value, and asks for `/reload`.
+  That user-level entry outranks the package catalog's disabled copy. With no key
+  anywhere it says so and points at https://infranodus.com/api-access.
+- **Manual:** `export INFRANODUS_API_KEY=...` before launching Pi (the package entry
+  still needs `/mcp enable infranodus`), or write the key into that same user-config
+  entry by hand.
+
+`/titan-doctor` shows the result as `InfraNodus MCP (user config)` ready or vacant.
 
 ### 2c. Framer, official path (no MCP)
 
@@ -228,21 +276,33 @@ OAuth-only servers need a bearer token the host already obtained (complete
 ```bash
 pi list                                        # package + companions present
 node scripts/apply-dw-patch.mjs --check        # 0 = menu-hook patch applied
+node scripts/keybindings-rebind.mjs --check    # "free" or "reserved" (reserved is fine: Alt+L works)
+ls ~/.pi/titan-harness/model-stack-level-*.yaml   # the four level shapes are in place
 node scripts/install-mcp.mjs --dry-run | tail -5
 PI_OFFLINE=1 pi -p "reply with the single word pong" --no-session --mode json < /dev/null | grep -c pong
 node -e 'JSON.parse(require("fs").readFileSync("mcp/mcp.json","utf8")); console.log("catalog ok")'
+node scripts/verify-ledger.mjs ~/.pi/titan-harness/runs/<projectSlug>/<runId>   # after a first session: "chain intact"
 ```
 
-In a TUI session: `/stack status` (settings), `/titan` (command index + model bar),
-`/mcp` (server status, including the `titan-harness__*` package servers), `/workflows`
+In a TUI session: `/titan-doctor` (every item `ready` or `vacant`, none `unknown`),
+`/titan-level status` (the live level or `shape-driven`, and the shift+tab state),
+`/stack status` (settings), `/titan` (command index + model bar), `/mcp` (server
+status, including the `titan-harness__*` package servers), `/workflows`
 (dynamic-workflows menu with the stack's subagent-tools and fan-out toggles).
 
 ## 6. What this package changes on the machine
 
 - `~/.pi/agent/settings.json` packages entry (via `pi install`).
-- `~/.pi/agent/titan-harness.json` (created on first `/stack` change).
-- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs`; the
-  `pi.mcp` catalog itself is registered in memory and writes no file).
+- `~/.pi/agent/titan-harness.json` (created on first `/stack` or `/titan-level` change).
+- `~/.pi/titan-harness/model-stack-*.yaml` (only when you copy them, step 1a).
+- `~/.pi/titan-harness/runs/` — the run store (one directory per run, hash-chained
+  JSONL, files 0600 / directories 0700), created at the first session; `settings.store.root`
+  moves it.
+- `~/.pi/agent/keybindings.json` (only via the Shift+Tab rebind, step 1b; backup
+  `keybindings.json.bak`).
+- `~/.config/mcp/mcp.json` (only when you run `scripts/install-mcp.mjs` or
+  `/titan-doctor --import-infranodus-key`; the `pi.mcp` catalog itself is registered in
+  memory and writes no file).
 - `~/.pi/workflows/settings.json` `excludeSubagentTools` / `defaultConcurrency`
   (only when `/stack tools off` or `/stack fanout N` is used).
 - One documented patch to pi-dynamic-workflows' `dist/workflow-commands.js`
@@ -282,7 +342,9 @@ Stacks are `~/.pi/titan-harness/model-stack-<codename>.yaml` (copy the package's
 `.pi/titan-harness/*.yaml` there). `/titan-shape list` shows them; `/titan-shape next`
 cycles, skipping any stack with an unauthed slot. Persisted in
 `~/.pi/agent/titan-harness.json` (`shape`, `builderFanOut`, `subagentFanOut`, `auditor`,
-`auditorModel`, `auditorThinking`, `auditRounds`, `anonymize`).
+`auditorModel`, `auditorThinking`, `auditRounds`, `anonymize`; since 0.3.0 also
+`harnessLevel`, `workerFanOut`, `watchdogFanOut`, `verifierFanOut`, `exaFanOut`,
+`maxConcurrentChildren`, `budgetUsd`, `watchdog`, `store`, `monitor`).
 
 Hotkeys need the Kitty keyboard protocol for the Ctrl variants (Kitty, Ghostty, WezTerm,
 foot); the Alt variants work in every terminal:
@@ -292,12 +354,42 @@ foot); the Alt variants work in every terminal:
 | cycle shape | Ctrl+Tab | Alt+H | `/titan-shape next` |
 | builders 1→4 | Ctrl+Shift+N | Alt+N | `/titan-n [1-4]` |
 | subagent cap 0/2/4/6/8 | Ctrl+Shift+S | Alt+S | `/titan-s [0-16]` |
-| auditors on/off | Ctrl+Shift+A | Alt+A | `/titan-audit [on|off]` |
+| auditors on/off | Ctrl+Shift+A | Alt+A | `/titan-audit [on\|off]` |
+| cycle level 0→3 | Ctrl+Shift+L (and Shift+Tab after the rebind, step 1b) | Alt+L | `/titan-level next` |
 
 The auditor needs a usable cross-family model: with Antigravity and xAI authed the
 auto rule picks Claude Opus 4.6, Gemini 3.8 Flash, or Grok 4.6 depending on the builder.
 `/stack auditor-model <provider/id>` pins one. The subagent cap is also written to
 `~/.pi/agent/extensions/subagent/config.json` (`globalConcurrencyLimit`).
+
+## 8b. Levels, doctor, run store (0.3.0)
+
+`/titan-level [0-3|next|status|--claim-shift-tab]` applies one of the level shapes
+from step 1a (`README.md` has the per-level model table): it writes the level, the
+shape codename and the lane pools to `titan-harness.json`, switches the host chat to
+the level's primary seat, and announces the fan-out plus every fallback it had to
+take. Fan-out numbers are pool sizes; `/stack concurrency <1-16>` (default 8) is the
+one cap on live children, `/stack budget <usd|off>` refuses children past a spend,
+`/stack watchdog on|off` toggles the titan-native watchdog, `/stack level` and
+`/stack doctor` forward to the two commands. `/titan-doctor` reports models + auth,
+credential names, tools on PATH, the shift+tab rebind, package pins, the patch, the
+run-store root and the recorded decisions, each `ready`, `vacant`, `warn` or
+`unknown`; `--json` writes `doctor.json` under `/tmp/titan-harness-*/`. Every session
+writes a hash-chained run under `~/.pi/titan-harness/runs/<projectSlug>/<runId>/`
+(`run.json`, `events.jsonl`, `ledger.jsonl`, `provenance.jsonl`, `agents/`, `evidence/`,
+`artifacts/nodes/`, `blobs/`); `node scripts/verify-ledger.mjs <runDir>` checks the
+chains (exit 0 intact, 1 broken).
+
+**Runnable today.** `/titan-doctor` decides, and a lane it reports vacant is never
+described as runnable. On a machine with only Antigravity, xAI and Cerebras authed:
+levels 0 and 1 run as declared; the level 2 and 3 architect (`openai-codex/gpt-6-astra`)
+runs on its declared fallback `xai/grok-4.6` until `/login openai-codex`; every Fable 5.1
+slot (level-3 builders, the ultraplan seat `quill` and fuser `loom`) runs on its
+declared fallback `antigravity/claude-opus-4-6` until Anthropic credentials (API key or
+Pi login) or an OpenRouter key exist in Pi; the Muse Spark seat (`optional`) stays
+vacant until `OPENROUTER_API_KEY`; Gemini 3.8 Flash and Qwen 3.8 27B accept at most
+`high`, so an `xhigh` request shows as `xhigh↘high`. The level announcement and the
+model bar name every substitution.
 
 ## 9. Non-goals
 

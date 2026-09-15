@@ -19,7 +19,7 @@
  *
  * Shape (the 3-tier hierarchy)
  *   shape            codename of the stack YAML in ~/.pi/titan-harness (or "legacy").
- *   builderFanOut    n builders active (1-4); extra builders are cloned from the builder
+ *   builderFanOut    n builders active (1-8); extra builders are cloned from the builder
  *                    pool, surplus YAML builders are parked.
  *   auditor          true → every builder gets an AUDITOR that must review a write task's
  *                    report before it reaches the architect.
@@ -27,6 +27,23 @@
  *   auditorThinking  thinking level for auditors.
  *   auditRounds      bounded correction rounds after a FAIL verdict (1-3).
  *   anonymize        prompts carry callsigns only; model identities are withheld from agents.
+ *
+ * Levels and lanes (shape schema v2, plan §4; written by /titan-level via levels.ts)
+ *   harnessLevel     0-3, or null when the shape alone decides (no level applied yet).
+ *   workerFanOut, watchdogFanOut, verifierFanOut, exaFanOut
+ *                    pool sizes per lane (0-16). Pools, not simultaneous children (D8):
+ *                    maxConcurrentChildren is the only concurrency cap.
+ *   maxConcurrentChildren  the child-runner semaphore (1-16).
+ *   budgetUsd        run budget in USD, or null for no cap.
+ *   watchdog         the titan-native watchdog (D3): enabled, model, thinking,
+ *                    stalemateRepeats (identical findings before "stalemate"), onCompaction
+ *                    ("halt-inspect" | "summary-only" | "off"), inspectorTimeoutMs,
+ *                    preemptAtContextFraction (children are pre-empted at this share of
+ *                    their context window).
+ *   store            the run store: root (hash-chained JSONL runs), sqliteIndex (optional
+ *                    derived index).
+ *   monitor          /workflow-monitor surface: "bar" | "overlay" | "split".
+ *   shiftTabHintShown  the one-time "shift+tab is reserved by Pi" notify has been shown.
  *
  * UI
  *   modelBar         the belowEditor status bar.
@@ -43,6 +60,8 @@ export const STACK_CHILD_ENV = "TITAN_HARNESS_CHILD";
 export const STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "titan-harness.json");
 /** Where --titan-config stacks live (model-stack-<codename>.yaml). */
 export const STACK_DIR = path.join(os.homedir(), ".pi", "titan-harness");
+/** Default root of the run store (one directory per run, hash-chained JSONL inside). */
+export const DEFAULT_RUN_ROOT = path.join(os.homedir(), ".pi", "titan-harness", "runs");
 /** pi-subagents' own config file (globalConcurrencyLimit lives here). */
 export const PI_SUBAGENTS_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json");
 /** globalThis hook: (visible: boolean) => void — set by titan-harness, called by /stack. */
@@ -60,8 +79,46 @@ export const EXA_TOOL_NAMES = ["web_search_exa", "web_fetch_exa", "web_search_ad
 export type ChildSubagents = "all" | "builders" | "off";
 export const CHILD_SUBAGENT_MODES: ChildSubagents[] = ["all", "builders", "off"];
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-export const BUILDER_FANOUT_CYCLE = [1, 2, 3, 4];
+export const BUILDER_FANOUT_CYCLE = [1, 2, 3, 4, 5, 8];
 export const SUBAGENT_FANOUT_CYCLE = [0, 2, 4, 6, 8];
+/** Harness levels, in cycling order (/titan-level next, alt+l). */
+export const LEVEL_CYCLE = [0, 1, 2, 3];
+
+export type WatchdogOnCompaction = "halt-inspect" | "summary-only" | "off";
+export const WATCHDOG_ON_COMPACTION_MODES: WatchdogOnCompaction[] = ["halt-inspect", "summary-only", "off"];
+export type MonitorMode = "bar" | "overlay" | "split";
+export const MONITOR_MODES: MonitorMode[] = ["bar", "overlay", "split"];
+
+export interface WatchdogSettings {
+	enabled: boolean;
+	model: string;
+	thinking: string;
+	stalemateRepeats: number;
+	onCompaction: WatchdogOnCompaction;
+	inspectorTimeoutMs: number;
+	preemptAtContextFraction: number;
+}
+
+export interface StoreSettings {
+	root: string;
+	sqliteIndex: boolean;
+}
+
+export interface MonitorSettings {
+	mode: MonitorMode;
+}
+
+/** What a level overwrote, kept so leaving the level (loading a plain shape) restores it. */
+export interface LevelRestore {
+	builderFanOut: number;
+	workerFanOut: number;
+	watchdogFanOut: number;
+	verifierFanOut: number;
+	exaFanOut: number;
+	childExa: boolean;
+	auditor: boolean;
+	watchdogEnabled: boolean;
+}
 
 export interface StackSettings {
 	subagentTools: boolean;
@@ -78,7 +135,26 @@ export interface StackSettings {
 	auditRounds: number;
 	anonymize: boolean;
 	modelBar: boolean;
+	harnessLevel: number | null;
+	workerFanOut: number;
+	watchdogFanOut: number;
+	verifierFanOut: number;
+	exaFanOut: number;
+	maxConcurrentChildren: number;
+	budgetUsd: number | null;
+	watchdog: WatchdogSettings;
+	store: StoreSettings;
+	monitor: MonitorSettings;
+	shiftTabHintShown: boolean;
+	levelRestore: LevelRestore | null;
 }
+
+/** A settings patch: top-level keys are optional and the nested objects may be partial (they deep-merge). */
+export type StackSettingsPatch = Partial<Omit<StackSettings, "watchdog" | "store" | "monitor">> & {
+	watchdog?: Partial<WatchdogSettings>;
+	store?: Partial<StoreSettings>;
+	monitor?: Partial<MonitorSettings>;
+};
 
 export const DEFAULT_STACK_SETTINGS: StackSettings = {
 	subagentTools: true,
@@ -95,6 +171,31 @@ export const DEFAULT_STACK_SETTINGS: StackSettings = {
 	auditRounds: 2,
 	anonymize: true,
 	modelBar: true,
+	harnessLevel: null,
+	workerFanOut: 5,
+	watchdogFanOut: 0,
+	verifierFanOut: 0,
+	exaFanOut: 5,
+	maxConcurrentChildren: 8,
+	budgetUsd: null,
+	watchdog: {
+		enabled: false,
+		model: "cerebras/qwen-3.8-27b",
+		thinking: "medium",
+		stalemateRepeats: 3,
+		onCompaction: "halt-inspect",
+		inspectorTimeoutMs: 20_000,
+		preemptAtContextFraction: 0.75,
+	},
+	store: {
+		root: DEFAULT_RUN_ROOT,
+		sqliteIndex: false,
+	},
+	monitor: {
+		mode: "overlay",
+	},
+	shiftTabHintShown: false,
+	levelRestore: null,
 };
 
 export function isStackChild(): boolean {
@@ -103,11 +204,46 @@ export function isStackChild(): boolean {
 
 const clampInt = (value: unknown, lo: number, hi: number, fallback: number): number =>
 	typeof value === "number" && Number.isFinite(value) ? Math.min(hi, Math.max(lo, Math.round(value))) : fallback;
+const clampNum = (value: unknown, lo: number, hi: number, fallback: number): number =>
+	typeof value === "number" && Number.isFinite(value) ? Math.min(hi, Math.max(lo, value)) : fallback;
+const isMapping = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+const isModelId = (value: unknown): value is string => typeof value === "string" && value.includes("/");
 
-export function readStackSettings(): StackSettings {
+function readWatchdog(raw: unknown, d: WatchdogSettings): WatchdogSettings {
+	const r = isMapping(raw) ? raw : {};
+	return {
+		enabled: typeof r.enabled === "boolean" ? r.enabled : d.enabled,
+		model: isModelId(r.model) ? r.model : d.model,
+		thinking: typeof r.thinking === "string" && THINKING_LEVELS.includes(r.thinking) ? r.thinking : d.thinking,
+		stalemateRepeats: clampInt(r.stalemateRepeats, 1, 10, d.stalemateRepeats),
+		onCompaction: typeof r.onCompaction === "string" && (WATCHDOG_ON_COMPACTION_MODES as string[]).includes(r.onCompaction) ? (r.onCompaction as WatchdogOnCompaction) : d.onCompaction,
+		inspectorTimeoutMs: clampInt(r.inspectorTimeoutMs, 1_000, 600_000, d.inspectorTimeoutMs),
+		preemptAtContextFraction: clampNum(r.preemptAtContextFraction, 0.1, 0.95, d.preemptAtContextFraction),
+	};
+}
+
+function readStore(raw: unknown, d: StoreSettings): StoreSettings {
+	const r = isMapping(raw) ? raw : {};
+	return {
+		root: typeof r.root === "string" && r.root.trim() ? r.root.trim() : d.root,
+		sqliteIndex: typeof r.sqliteIndex === "boolean" ? r.sqliteIndex : d.sqliteIndex,
+	};
+}
+
+function readMonitor(raw: unknown, d: MonitorSettings): MonitorSettings {
+	const r = isMapping(raw) ? raw : {};
+	return {
+		mode: typeof r.mode === "string" && (MONITOR_MODES as string[]).includes(r.mode) ? (r.mode as MonitorMode) : d.mode,
+	};
+}
+
+const copyDefaults = (d: StackSettings): StackSettings => ({ ...d, watchdog: { ...d.watchdog }, store: { ...d.store }, monitor: { ...d.monitor } });
+
+/** Read the settings file (default: ~/.pi/agent/titan-harness.json); missing or malformed → defaults, never rewritten here. */
+export function readStackSettings(settingsPath: string = STACK_SETTINGS_PATH): StackSettings {
 	const d = DEFAULT_STACK_SETTINGS;
 	try {
-		const raw = JSON.parse(fs.readFileSync(STACK_SETTINGS_PATH, "utf8"));
+		const raw = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
 		if (raw && typeof raw === "object" && !Array.isArray(raw)) {
 			return {
 				subagentTools: typeof raw.subagentTools === "boolean" ? raw.subagentTools : d.subagentTools,
@@ -117,28 +253,62 @@ export function readStackSettings(): StackSettings {
 				subagentThinking: THINKING_LEVELS.includes(raw.subagentThinking) ? raw.subagentThinking : d.subagentThinking,
 				subagentFanOut: clampInt(raw.subagentFanOut, 0, 16, d.subagentFanOut),
 				shape: typeof raw.shape === "string" && raw.shape.trim() ? raw.shape.trim() : d.shape,
-				builderFanOut: clampInt(raw.builderFanOut, 1, 4, d.builderFanOut),
+				builderFanOut: clampInt(raw.builderFanOut, 1, 8, d.builderFanOut),
 				auditor: typeof raw.auditor === "boolean" ? raw.auditor : d.auditor,
 				auditorModel: typeof raw.auditorModel === "string" && (raw.auditorModel === "auto" || raw.auditorModel.includes("/")) ? raw.auditorModel : d.auditorModel,
 				auditorThinking: THINKING_LEVELS.includes(raw.auditorThinking) ? raw.auditorThinking : d.auditorThinking,
 				auditRounds: clampInt(raw.auditRounds, 1, 3, d.auditRounds),
 				anonymize: typeof raw.anonymize === "boolean" ? raw.anonymize : d.anonymize,
 				modelBar: typeof raw.modelBar === "boolean" ? raw.modelBar : d.modelBar,
+				harnessLevel: raw.harnessLevel === null ? null : LEVEL_CYCLE.includes(raw.harnessLevel) ? raw.harnessLevel : d.harnessLevel,
+				workerFanOut: clampInt(raw.workerFanOut, 0, 16, d.workerFanOut),
+				watchdogFanOut: clampInt(raw.watchdogFanOut, 0, 16, d.watchdogFanOut),
+				verifierFanOut: clampInt(raw.verifierFanOut, 0, 16, d.verifierFanOut),
+				exaFanOut: clampInt(raw.exaFanOut, 0, 16, d.exaFanOut),
+				maxConcurrentChildren: clampInt(raw.maxConcurrentChildren, 1, 16, d.maxConcurrentChildren),
+				budgetUsd: raw.budgetUsd === null ? null : typeof raw.budgetUsd === "number" && Number.isFinite(raw.budgetUsd) && raw.budgetUsd >= 0 ? raw.budgetUsd : d.budgetUsd,
+				watchdog: readWatchdog(raw.watchdog, d.watchdog),
+				store: readStore(raw.store, d.store),
+				monitor: readMonitor(raw.monitor, d.monitor),
+				shiftTabHintShown: typeof raw.shiftTabHintShown === "boolean" ? raw.shiftTabHintShown : d.shiftTabHintShown,
+				levelRestore: readLevelRestore(raw.levelRestore),
 			};
 		}
 	} catch {
 		/* missing or malformed → defaults; never rewrite here */
 	}
-	return { ...d };
+	return copyDefaults(d);
 }
 
-/** Atomic merge-write (temp file + rename, mode 0600). Returns the new settings. */
-export function writeStackSettings(patch: Partial<StackSettings>): StackSettings {
-	const next = { ...readStackSettings(), ...patch };
-	fs.mkdirSync(path.dirname(STACK_SETTINGS_PATH), { recursive: true });
-	const tmp = `${STACK_SETTINGS_PATH}.${process.pid}.tmp`;
+function readLevelRestore(raw: any): LevelRestore | null {
+	if (!raw || typeof raw !== "object") return null;
+	return {
+		builderFanOut: clampInt(raw.builderFanOut, 1, 8, DEFAULT_STACK_SETTINGS.builderFanOut),
+		workerFanOut: clampInt(raw.workerFanOut, 0, 16, DEFAULT_STACK_SETTINGS.workerFanOut),
+		watchdogFanOut: clampInt(raw.watchdogFanOut, 0, 16, DEFAULT_STACK_SETTINGS.watchdogFanOut),
+		verifierFanOut: clampInt(raw.verifierFanOut, 0, 16, DEFAULT_STACK_SETTINGS.verifierFanOut),
+		exaFanOut: clampInt(raw.exaFanOut, 0, 16, DEFAULT_STACK_SETTINGS.exaFanOut),
+		childExa: typeof raw.childExa === "boolean" ? raw.childExa : DEFAULT_STACK_SETTINGS.childExa,
+		auditor: typeof raw.auditor === "boolean" ? raw.auditor : DEFAULT_STACK_SETTINGS.auditor,
+		watchdogEnabled: typeof raw.watchdogEnabled === "boolean" ? raw.watchdogEnabled : DEFAULT_STACK_SETTINGS.watchdog.enabled,
+	};
+}
+
+/** Atomic merge-write (temp file + rename, mode 0600); nested objects deep-merge. Returns the new settings. */
+export function writeStackSettings(patch: StackSettingsPatch, settingsPath: string = STACK_SETTINGS_PATH): StackSettings {
+	const current = readStackSettings(settingsPath);
+	const { watchdog, store, monitor, ...flat } = patch;
+	const next: StackSettings = {
+		...current,
+		...flat,
+		watchdog: { ...current.watchdog, ...(watchdog ?? {}) },
+		store: { ...current.store, ...(store ?? {}) },
+		monitor: { ...current.monitor, ...(monitor ?? {}) },
+	};
+	fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+	const tmp = `${settingsPath}.${process.pid}.tmp`;
 	fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-	fs.renameSync(tmp, STACK_SETTINGS_PATH);
+	fs.renameSync(tmp, settingsPath);
 	return next;
 }
 

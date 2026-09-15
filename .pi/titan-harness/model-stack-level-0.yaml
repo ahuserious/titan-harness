@@ -1,0 +1,11 @@
+# model-stack-level-0.yaml — ultrafast (fan-out: workers 5 / exa 5)
+version: 2
+level: 0
+label: ultrafast
+exa: { enabled: true, fanout: 5, children: on }
+verification: { default_tier: web-general, review: optional }
+watchdog: { enabled: false }
+slots:
+  - { name: rune,  role: architect, architect: true, model: cerebras/qwen-3.8-27b, thinking: xhigh }   # requested xhigh → effective high
+  - { name: scout, role: worker, primary: true, model: cerebras/qwen-3.8-27b, thinking: high, fanout: 5 }
+  - { name: lantern, role: exa, model: cerebras/qwen-3.8-27b, thinking: medium, fanout: 5, counted: false }
