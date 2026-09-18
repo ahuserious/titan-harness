@@ -120,7 +120,7 @@ TUI, `/mcp` lists the package servers after `/reload` or a restart (the headless
 node -e 'import(process.env.HOME + "/.pi/agent/npm/node_modules/pi-mcp-adapter/dist/package-mcp-loader.js").then(m => console.log(Object.keys(m.loadPackageMcpConfigs().mcpServers).join("\n")))'
 ```
 
-Expect `titan-harness__figma` … `titan-harness__infranodus` (eleven names).
+Expect `titan-harness__figma` … `titan-harness__fiber` … `titan-harness__infranodus` (twelve names).
 
 ### 2.1 Manual merge (other hosts, or plain names in Pi)
 
@@ -138,7 +138,7 @@ under its plain name.
 ### 2a. OAuth servers **(browser)**
 
 Inside Pi run `/mcp`, pick each of `relume`, `brandfetch`, `higgsfield`,
-`macro`, `testmu` (as `titan-harness__<name>` when loaded from the package) and
+`macro`, `fiber`, `testmu` (as `titan-harness__<name>` when loaded from the package) and
 complete the browser sign-in. The human must do this; tell them the list and wait.
 
 `figma` (remote) may reject dynamic client registration for generic clients.
@@ -224,9 +224,9 @@ hosts copy the folders:
 - Claude Code: `cp -r skills/* ~/.claude/skills/`
 - Codex: `cp -r skills/* ~/.codex/skills/`
 
-24 skills (`skills/README.md`). Each states its server, auth, playbook, and
+26 skills (`skills/README.md`). Each states its server, auth, playbook, and
 guardrails. Combo skills: `design-to-code-pipeline`, `brand-launch-kit`,
-`ship-and-verify`; harness skills: `titan-orchestration`, `titan-auditor`,
+`ship-and-verify`, `outbound-scratch`; harness skills: `titan-orchestration`, `titan-auditor`,
 `titan-workflow-authoring` (how to write, validate and run a `/workflow` YAML DAG),
 `titan-watchdog`, `titan-ultraplan`, `titan-terraform`, `titan-local-dev-verify`,
 `titan-cloud-simulated-users`, `infranodus-reasoning-ontology`; bridge:
@@ -246,7 +246,7 @@ different binaries are called `mcp2cli`; never treat them as one tool:
   `mcp2cli link create --name …`) plus **mcp-to-cli** (Smithery).
 
 If a `mcp2cli` is already on PATH, `mcp2cli --help` tells you which one it is. Prefer a
-named link per server (`higgsfield`, `figma`, `relume`, `brandfetch`, `macro`, `testmu`)
+named link per server (`higgsfield`, `figma`, `relume`, `brandfetch`, `macro`, `fiber`, `testmu`)
 so bash looks like a CLI, and keep native MCP in the interactive host. All of these
 are documented, not installed, not on PATH: `docs/named-links.md`.
 

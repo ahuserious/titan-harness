@@ -32,6 +32,10 @@
       "url": "https://mcp-server.macro.com/mcp",
       "auth": "oauth"
     },
+    "fiber": {
+      "url": "https://mcp.fiber.ai/mcp/v3",
+      "auth": "oauth"
+    },
     "testmu": {
       "url": "https://mcp.lambdatest.com/mcp",
       "auth": "oauth"

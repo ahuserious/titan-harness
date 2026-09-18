@@ -55,6 +55,7 @@ export function connectorsPath(cwd: string): string {
 /** The default catalog: the surfaces the plan names (§5.7), all read scope unless noted. */
 export const DEFAULT_CONNECTORS: ConnectorSpec[] = [
 	{ name: "macro", kind: "mcp", server: "macro", purpose: "organization documents, tasks and channel posts (entity, roadmap, automations inputs)", scope: "read-write" },
+	{ name: "fiber", kind: "mcp", server: "fiber", purpose: "B2B people and company search for outbound lists (scratch CRM is Macro, not Salesforce sandbox)", scope: "read" },
 	{ name: "figma", kind: "mcp", server: "figma", purpose: "design context and components for design-match verdicts", scope: "read" },
 	{ name: "brandfetch", kind: "mcp", server: "brandfetch", purpose: "brand kit (logos, colours, fonts) for the entity's brand sections", scope: "read" },
 	{ name: "testmu", kind: "mcp", server: "testmu", purpose: "cloud test data: HyperExecute jobs, logs, SmartUI diffs, accessibility audits", scope: "read" },

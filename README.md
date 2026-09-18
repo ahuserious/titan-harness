@@ -792,8 +792,8 @@ extensions, `antigravity/gemini-3.8-flash` and friends are valid slot models.
 
 ## MCP catalog + skill pack
 
-`mcp/mcp.json` holds ten services (Figma, shadcn, Relume, Brandfetch, Higgsfield,
-Macro, TestMu AI, Momentic, Framer, InfraNodus) as a standard `mcpServers` file with
+`mcp/mcp.json` holds eleven services (Figma, shadcn, Relume, Brandfetch, Higgsfield,
+Macro, Fiber, TestMu AI, Momentic, Framer, InfraNodus) as a standard `mcpServers` file with
 OAuth or `${ENV_VAR}` placeholders only. In Pi it loads by itself: `package.json`
 declares `"pi": { "mcp": "./mcp/mcp.json" }` and pi-mcp-adapter 2.33.0 registers the
 servers as `titan-harness__<server>` (tool namespaces `titan_harness__<server>`), with
@@ -805,8 +805,8 @@ Codex (or for plain names in Pi). `momentic`, `framer-mcp-plugin`, `figma-deskto
 `BRANDFETCH_MCP_TOKEN`; `/titan-doctor --import-infranodus-key` is the in-Pi route for
 the InfraNodus key).
 
-`skills/` is the curated pack, 24 skills: one per server, three combo workflows
-(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`), nine harness skills
+`skills/` is the curated pack, 26 skills: one per server, four combo workflows
+(`design-to-code-pipeline`, `brand-launch-kit`, `ship-and-verify`, `outbound-scratch`), nine harness skills
 (`titan-orchestration`, `titan-auditor`, `titan-workflow-authoring`, `titan-watchdog`,
 `titan-ultraplan`, `titan-terraform`, `titan-local-dev-verify`,
 `titan-cloud-simulated-users`, `infranodus-reasoning-ontology`),

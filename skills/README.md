@@ -1,6 +1,6 @@
 # Skill pack
 
-Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 24 skills: ten server skills, three combo workflows, nine harness skills, one bridge, one reference.
+Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `package.json` → `pi.skills`, so `pi install` exposes them; copy a folder into `~/.pi/agent/skills/` for other hosts, or `.claude/skills/` for Claude Code. 26 skills: eleven server skills, four combo workflows, nine harness skills, one bridge, one reference.
 
 | Skill | Kind | Pairs with |
 |---|---|---|
@@ -10,12 +10,14 @@ Curated skills for the MCP catalog in `../mcp/mcp.json`. Registered through `pac
 | `brandfetch-brand-kit` | server | Fetch a company's brand kit (logos, colors, fonts, description, socials) by domain, ticker, ISIN, or name through the Brandfetch MCP, identify merchants from statement strings, and build Logo CDN URLs |
 | `higgsfield-media` | server | Generate images and video (Sora, Veo, Kling and 30+ models) through Higgsfield's hosted MCP; studio rules: first-party only, no OpenRouter; 5–8 s looping Framer heroes, not films; credit cost before any video batch; `@higgsfield/cli` documented as-is |
 | `macro-workspace` | server | Search, read, create, and edit documents, tasks, emails, and channel posts in a Macro workspace through the official Macro MCP; notes which Macro "Tool Stack" rows are stale |
+| `fiber-b2b-data` | server | Search and enrich B2B companies and people through Fiber AI hosted MCP (OAuth V3). Credits before reveal. Not web search (Exa) and not Salesforce |
 | `testmu-cloud-testing` | server | Run, triage, and audit tests on the TestMu AI (formerly LambdaTest) cloud through its MCP: HyperExecute orchestration, Automation failure triage, SmartUI visual regression, Accessibility (WCAG/ADA/508) audits, and Test Manager |
 | `kane-cli-browser-runs` | server | Drive Kane CLI (TestMu AI's KaneAI terminal agent) to run natural-language browser flows in a real Chrome and return pass/fail with shareable proof |
 | `momentic-e2e` | server | Author and run Momentic AI end-to-end tests (web, iOS, Android) through the Momentic MCP and its YAML test format |
 | `framer-agent` | server | Connect to a Framer project with Framer's official agent integration (npx @framer/agent setup, then /framer) to edit canvas and components, manage CMS collections, and publish; fall back to the marketplace MCP plugin for read-only design context; Untitled UI (eval for Framer clients) |
 | `design-to-code-pipeline` | combo | Combo workflow: Figma design → tokens (Tokens Studio + Style Dictionary) → shadcn/Relume components → Framer or app code, with the titan-harness fanning out builders |
 | `brand-launch-kit` | combo | Combo workflow: Brandfetch brand data → Higgsfield hero media (studio rules apply) → Macro launch doc/tasks, assembling a launch kit for a company or product |
+| `outbound-scratch` | combo | Combo workflow: Exa web search + Fiber people/company graph → ranked list in the Macro scratch CRM. Never treat "scratch" as Salesforce sandbox (`test.salesforce.com`) |
 | `ship-and-verify` | combo | Combo workflow: gate a build with TestMu cloud runs, Kane CLI browser flows, and Momentic E2E before merge, wired into /titan-auto-validate |
 | `titan-orchestration` | harness | the 3-tier hierarchy, commands, hotkeys |
 | `titan-auditor` | harness | the audit contract and verdict format |

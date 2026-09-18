@@ -28,7 +28,8 @@ Two ways in:
 | `relume` | remote `https://relume-library-mcp.relume.io/mcp` | Relume account OAuth | 1,000+ real React components fetched by slug, vendored into the project with Tailwind preset + primitives | relume.ai/relume-library-mcp |
 | `brandfetch` | remote `https://mcp.brandfetch.io/mcp` | OAuth or `bf1…` MCP token (`BRANDFETCH_MCP_TOKEN` for the bash bridges) | brand search, brand data by domain/ticker/ISIN, merchant identification, LLM-ready brand context, Logo CDN URLs | github.com/Brandfetch/brandfetch-mcp-server |
 | `higgsfield` | remote `https://mcp.higgsfield.ai/mcp` | OAuth (plan credits) | 30+ image and video generation models (Sora, Veo, Kling, …). Studio rules in `skills/higgsfield-media`: first-party only, no OpenRouter; 5–8 s looping Framer heroes, not films; credit cost before any video batch | higgsfield.ai/mcp |
-| `macro` | remote `https://mcp-server.macro.com/mcp` | OAuth | search/read/create Macro docs, email drafts, tasks, channels, calls | macro.com/agents |
+| `macro` | remote `https://mcp-server.macro.com/mcp` | OAuth | search/read/create Macro docs, email drafts, tasks, channels, calls. Scratch CRM for outbound lists (`outbound-scratch` skill) | macro.com/agents |
+| `fiber` | remote `https://mcp.fiber.ai/mcp/v3` | OAuth (V3). Do not send an API key to V3; a key uses `/mcp/v2` only as a user/project override | B2B people and company search, live LinkedIn, work email/phone reveal. Credits via `chargeInfo`. Not KYB, not web search (Exa / `pi-exa` stays web) | docs.fiber.ai/article/using-mcp-in-llms |
 | `testmu` | remote `https://mcp.lambdatest.com/mcp` | OAuth (testmuai.com) | HyperExecute, Automation triage, SmartUI visual diff, Accessibility audits, Test Manager | testmuai.com/support/docs/testmu-mcp-server |
 | `momentic` | `npx -y momentic mcp --config ${MOMENTIC_CONFIG}` | `MOMENTIC_API_KEY`; shipped `disabled` | AI end-to-end browser and mobile tests from YAML | momentic.ai/docs/integrations/mcp-server |
 | `framer-mcp-plugin` | remote `${FRAMER_MCP_URL}` | user-specific URL from the Framer marketplace "MCP" plugin (plugin must stay open); shipped `disabled` | project structure, node selection, design tokens | framer.com/marketplace/plugins/mcp |
@@ -114,4 +115,5 @@ This catalog stays a catalog. Not in scope, now or later:
 - no Kane-as-MCP (Kane CLI stays a CLI);
 - no Higgsfield marketing-skill dump (its 27–35 marketing skills are not imported);
 - no Grok Imagine as a pack server;
-- no OpenRouter video servers (Higgsfield is first-party only).
+- no OpenRouter video servers (Higgsfield is first-party only);
+- no Salesforce Hosted MCP (sandbox or production). Scratch CRM for outbound is Macro. `test.salesforce.com` is not a scratch pad.

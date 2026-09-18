@@ -20,7 +20,7 @@ human before installing anything globally. The commands below are for the human 
 ## Named links
 
 A named link is a per-server alias so bash reads like a CLI instead of a URL soup:
-`higgsfield`, `figma`, `relume`, `brandfetch`, `macro`, `testmu` (the catalog's OAuth
+`higgsfield`, `figma`, `relume`, `brandfetch`, `macro`, `fiber`, `testmu` (the catalog's OAuth
 servers; the endpoints are the ones in `mcp/mcp.json`, never retyped from memory).
 
 - Rust mcp2cli (Grok): `mcp2cli config init --name higgsfield --transport streamable_http --endpoint https://mcp.higgsfield.ai/mcp` then `mcp2cli link create --name higgsfield`, after which `higgsfield ls --tools` works.
