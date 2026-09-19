@@ -3,6 +3,10 @@
 Dan's Pi package. One install replaces `pi-titan-harness-v2` plus the loose
 `~/.pi/agent/extensions/ctx-picker.ts`.
 
+## 0.9.2
+
+Persona discovery handles escaped filesystem paths correctly. Runner tests isolate user tool directories, and operating guidance reads effective model settings.
+
 ## What is in it
 
 | Extension | Commands | Notes |
@@ -61,7 +65,7 @@ reads them, `~/.pi/workflows/settings.json` (`defaultConcurrency`, `excludeSubag
 ## What changed in 0.9.0
 
 The v0.9 phase implemented [`docs/PRD-v0.9-live-tui.md`](docs/PRD-v0.9-live-tui.md) (R1–R5);
-the state of the work before it is in [`docs/status-report-2026-09-15.md`](docs/status-report-2026-09-15.md).
+the runtime boundaries are documented in [Runtime contracts](docs/RUNTIME-CONTRACTS.md).
 The workflow that titan's own `/create-workflow` authored from that PRD is checked in as
 [`.titan/workflows/v09-live-tui/`](.titan/workflows/v09-live-tui/) (five phases: plan → build →
 verify → audit → report; `v09-live-tui.yaml`, `commands/*.md`, `AUTHORING.md`) — it is the
@@ -855,8 +859,7 @@ provider Pi knows, authed or not; unauthed picks are allowed and flagged.
 
 ## The 3-tier shape (0.2.0)
 
-Design record: `docs/harness-shape-consult.md` (a `/titan-fusion` of Gemini 3.8 Flash,
-Grok 4.6 and Claude Opus 4.6 reviewing the proposal). What shipped:
+Runtime roles and persona boundaries: [Runtime contracts](docs/RUNTIME-CONTRACTS.md).
 
 - **Tiers.** ARCHITECT (tier 1) → BUILDERS (tier 2, `n` = 1-4, extra builders come from a
   heterogeneous pool) → SUBAGENTS (tier 3, pi-subagents, capped per child). The cap and

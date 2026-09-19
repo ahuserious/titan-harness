@@ -16,8 +16,9 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const MODULE_DIR: string = typeof __dirname !== "undefined" && __dirname ? __dirname : path.dirname(new URL(import.meta.url).pathname);
+const MODULE_DIR: string = typeof __dirname !== "undefined" && __dirname ? __dirname : path.dirname(fileURLToPath(import.meta.url));
 /** modules/ → extensions/titan-harness → extensions → the package root. */
 export const PACKAGE_PERSONAS_DIR = path.resolve(MODULE_DIR, "..", "..", "..", "personas");
 

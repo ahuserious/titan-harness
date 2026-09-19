@@ -8,7 +8,7 @@ description: How Titan Harness's 3-tier hierarchy works (ARCHITECT → BUILDERS 
 ## The hierarchy
 - **Tier 1 ARCHITECT** (one slot; default the strongest reasoning model at xhigh): plans, delegates a task DAG, arbitrates audits, integrates. Never edits files during planning; never spawns subagents directly.
 - **Tier 2 BUILDERS** (n = 1-4; the primary builder is the live host chat): execute delegated tasks inside claimed paths, one write-enabled child at a time (writer lease), verify, report ≤ a few KB. May delegate narrow work to tier 3.
-- **Tier 3 SUBAGENTS** (pi-subagents, default `cerebras/qwen-3.8-27b` high, cap per child): stateless search/read/bounded checks/small scoped edits; never spawn subagents, never talk to the architect, auditor, or user.
+- **Tier 3 SUBAGENTS** (pi-subagents; model, thinking and cap from effective `/stack` and Pi `subagents` settings): bounded search, reading, checks and scoped edits. Inspect the configured provider before launching; examples are not the current account configuration.
 - **AUDITORS** (one per builder when on; ephemeral per review; cross-family model): review every finished WRITE task before the report reaches the architect. Verdict YAML: PASS, PASS_WITH_WARNINGS, FAIL (→ bounded corrections, then AUDIT_EXHAUSTED for architect arbitration), SAFETY / SCOPE_VIOLATION (fail-closed).
 - Agents address each other by **callsign only** (forge, anvil, ward, …); models are shown to the human in the transcript and the model bar, never to other agents.
 

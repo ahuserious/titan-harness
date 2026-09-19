@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sha256 } from "../modules/hash-chain.ts";
@@ -29,6 +31,21 @@ const PROVIDER_ID = /\b(openai-codex|anthropic|antigravity|xai|cerebras|openrout
 const persona = (lens: string, extra = "", body = "Body.") => `---\nlens: ${lens}\nbias: toward tests\nstyle: terse\n${extra}---\n${body}\n`;
 
 describe("persona files", () => {
+	test("Node ESM loads package personas from a path containing spaces and URL-special characters", () => {
+		const root = join(scratch(), "Dev Tools #1% package");
+		const moduleDir = join(root, "extensions", "titan-harness", "modules");
+		mkdirSync(moduleDir, { recursive: true });
+		mkdirSync(join(root, "personas"));
+		writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
+		copyFileSync(fileURLToPath(new URL("../modules/personas.ts", import.meta.url)), join(moduleDir, "personas.ts"));
+		writeFileSync(join(root, "personas", "implementer.md"), persona("fixture lens"));
+		const moduleUrl = pathToFileURL(join(moduleDir, "personas.ts")).href;
+		const script = `const p = await import(${JSON.stringify(moduleUrl)}); console.log(JSON.stringify({ root: p.PACKAGE_PERSONAS_DIR, names: p.listPersonas([p.PACKAGE_PERSONAS_DIR]).map(x => x.name) }));`;
+		const result = spawnSync("node", ["--experimental-strip-types", "--input-type=module", "-e", script], { encoding: "utf8" });
+		expect(result.status, result.stderr).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({ root: join(root, "personas"), names: ["implementer"] });
+	});
+
 	test("the eight shipped personas load, carry distinct lenses and never name a model", () => {
 		const shipped = listPersonas([PACKAGE_PERSONAS_DIR]);
 		expect(shipped.map((p) => p.name)).toEqual(["contrarian", "cursor-cloud-swe", "evidence-auditor", "implementer", "researcher", "sim-user", "test-author", "workflow-architect"]);

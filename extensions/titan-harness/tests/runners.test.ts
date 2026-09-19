@@ -552,15 +552,24 @@ describe("verify node: evidence packages through the executor", () => {
 
 	test("an unavailable lane fails closed without retries; a skipped lane passes only when optional", async () => {
 		const h = harness();
+		let processCalls = 0;
+		h.deps.bash = async () => {
+			processCalls++;
+			throw new Error("unavailable lanes must not execute external commands");
+		};
 		const nodes = [
 			{ id: "kane", verify: { runner: "kane", objective: "Log in" }, evidence: { require: ["screenshot"] }, retry: { max_attempts: 3, delay_ms: 0 } },
 			{ id: "momentic", verify: { runner: "momentic", objective: "Log in", optional: true }, evidence: { require: ["screenshot"] } },
 			{ id: "momentic-required", verify: { runner: "momentic", objective: "Log in" }, evidence: { require: ["screenshot"] } },
 		] as unknown as NodeDoc[];
-		const saved = process.env.PATH;
-		process.env.PATH = "/nonexistent-bin";
+		const savedPath = process.env.PATH;
+		const savedHome = process.env.HOME;
+		// Discovery also searches HOME user bins, so isolate both lookup roots.
+		process.env.PATH = join(h.cwd, "empty-bin");
+		process.env.HOME = h.cwd;
 		try {
 			const result = await executeWorkflow(loaded(nodes), h.deps, { maxParallel: 1 });
+			expect(processCalls).toBe(0);
 			expect(result.nodes.kane.status).toBe("failed");
 			expect(result.nodes.kane.attempts).toBe(1);
 			expect(result.nodes.kane.error).toContain("kane unavailable: kane-cli not on PATH");
@@ -570,7 +579,10 @@ describe("verify node: evidence packages through the executor", () => {
 			expect(result.nodes["momentic-required"].error).toContain("momentic skipped");
 			for (const id of ["kane", "momentic", "momentic-required"]) expect(existsSync(join(h.runDir, "evidence", id, "evidence.json"))).toBe(true);
 		} finally {
-			process.env.PATH = saved;
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
 		}
 	});
 

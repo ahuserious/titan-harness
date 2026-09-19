@@ -1,7 +1,7 @@
-# Named links and first-party CLIs (documented, not installed, not on PATH)
+# Named links and first-party CLIs
 
 titan-harness ships an MCP catalog (`mcp/mcp.json`) and a skill pack. It does **not**
-install any tool listed here: none of them is on PATH after `pi install`, and no
+install any tool listed here: `pi install` alone does not place them on PATH, and no
 skill, command, script or status line in this package may assert that one is present.
 Check before use (`command -v kane-cli`, `command -v higgsfield`, `command -v mcp2cli`,
 `command -v mcporter`, `command -v mcp`), report a missing tool as *vacant*, and ask the
@@ -9,13 +9,13 @@ human before installing anything globally. The commands below are for the human 
 
 | Tool | What it is | Install / login | Status |
 |---|---|---|---|
-| Kane CLI (`@testmuai/kane-cli`) | TestMu AI's terminal agent for natural-language browser runs; a CLI, not an MCP server (`kane-cli-browser-runs` skill) | `npm i -g @testmuai/kane-cli`; `kane-cli doctor --install`; vendor skill `npx @testmuai/kane-cli-skill`; login with username + access key (`kane-cli login --username <user> --access-key <key>`) or `kane-cli login --oauth` | documented, not installed, not on PATH |
-| Framer agent (`@framer/agent`) | Framer's official agent integration (CLI + skills), the Framer path this package prefers (`framer-agent` skill) | `npx @framer/agent setup` (browser grant), then `/framer` inside the agent | documented, not installed, not on PATH (npx fetches it per use) |
-| Higgsfield CLI (`@higgsfield/cli`) | Higgsfield's official CLI, used as-is next to the hosted MCP (`higgsfield-media` skill) | `npm i -g @higgsfield/cli` then `higgsfield auth login` (or `npx @higgsfield/cli`) | documented, not installed, not on PATH, not wrapped |
-| mcp2cli, Python (knowsuchagency/mcp2cli) | the bash bridge the Pi/titan skills use (`--mcp`, `--mcp-stdio`, `--auth-header`; `mcp-cli-bridges` skill) | `uvx mcp2cli` or `uv tool install mcp2cli` | documented, not installed, not on PATH |
-| mcporter (openclaw/mcporter, TypeScript) | the second Pi/titan bridge; reads the same `mcpServers` shape as `mcp.json` | `npx mcporter …` | documented, not installed, not on PATH |
-| mcp2cli, Rust (mcp2cli.dev) | the bash bridge the Grok plugin (`triarc-creative-stack`) uses; a different binary with the same name | `curl -fsSL https://mcp2cli.dev/install.sh \| sh`; `mcp2cli config init --name <link> --transport streamable_http --endpoint <url>`; `mcp2cli link create --name <link>` | documented, not installed, not on PATH |
-| mcp-to-cli (Smithery; the `mcp` binary) | the Grok plugin's TypeScript bridge | `npm i -g mcp-to-cli`; `mcp connect <url> --name <link>` | documented, not installed, not on PATH |
+| Kane CLI (`@testmuai/kane-cli`) | TestMu AI's terminal agent for natural-language browser runs; a CLI, not an MCP server (`kane-cli-browser-runs` skill) | `npm i -g @testmuai/kane-cli`; `kane-cli doctor --install`; vendor skill `npx @testmuai/kane-cli-skill`; login with username + access key (`kane-cli login --username <user> --access-key <key>`) or `kane-cli login --oauth` | separately installed; check local availability |
+| Framer agent (`@framer/agent`) | Framer's official agent integration (CLI + skills), the Framer path this package prefers (`framer-agent` skill) | `npx @framer/agent setup` (browser grant), then `/framer` inside the agent | separately installed; check local availability (npx fetches it per use) |
+| Higgsfield CLI (`@higgsfield/cli`) | Higgsfield's official CLI, used as-is next to the hosted MCP (`higgsfield-media` skill) | `npm i -g @higgsfield/cli` then `higgsfield auth login` (or `npx @higgsfield/cli`) | separately installed; check local availability, not wrapped |
+| mcp2cli, Python (knowsuchagency/mcp2cli) | the bash bridge the Pi/titan skills use (`--mcp`, `--mcp-stdio`, `--auth-header`; `mcp-cli-bridges` skill) | `uvx mcp2cli` or `uv tool install mcp2cli` | separately installed; check local availability |
+| mcporter (openclaw/mcporter, TypeScript) | the second Pi/titan bridge; reads the same `mcpServers` shape as `mcp.json` | `npx mcporter …` | separately installed; check local availability |
+| mcp2cli, Rust (mcp2cli.dev) | the bash bridge the Grok plugin (`triarc-creative-stack`) uses; a different binary with the same name | `curl -fsSL https://mcp2cli.dev/install.sh \| sh`; `mcp2cli config init --name <link> --transport streamable_http --endpoint <url>`; `mcp2cli link create --name <link>` | separately installed; check local availability |
+| mcp-to-cli (Smithery; the `mcp` binary) | the Grok plugin's TypeScript bridge | `npm i -g mcp-to-cli`; `mcp connect <url> --name <link>` | separately installed; check local availability |
 
 ## Named links
 
