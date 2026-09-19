@@ -779,7 +779,7 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 	};
 
 	patchRun({ status: "running", phases: doc.phases?.map((p) => p.title) });
-	log("workflow.start", { workflow: doc.name, sha256: loaded.sha256, layers: plan, inputs: Object.keys(inputs), maxParallel: opts.maxParallel ?? deps.settings.maxConcurrentChildren });
+	log("workflow.start", { workflow: doc.name, description: doc.description, nodes: doc.nodes.map(node => ({ id: node.id, phase: node.phase, kind: nodeType(node), title: node.callsign ?? node.id, role: node.role })), sha256: loaded.sha256, layers: plan, inputs: Object.keys(inputs), maxParallel: opts.maxParallel ?? deps.settings.maxConcurrentChildren });
 	const maxParallel = opts.maxParallel ?? deps.settings.maxConcurrentChildren ?? 8;
 	try {
 		for (let layerIndex = 0; layerIndex < plan.length && !halt && !signal.aborted; layerIndex++) {
