@@ -2,6 +2,7 @@ import { test, expect, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { canonicalJson, GENESIS, sha256 } from '../modules/hash-chain.ts';
 import { RunStore } from '../modules/run-store.ts';
 import { readWorkflowProjection, readTaskOutput } from '../modules/monitor/workflow-projection.ts';
 const roots: string[] = [];
@@ -19,3 +20,68 @@ test('scoped output requires matching content digest', () => { const { store, di
 test('empty or truncated terminal event evidence cannot appear complete',()=>{const {store,dir}=fixture();store.updateRun(dir,{status:'completed'});writeFileSync(join(dir,'events.jsonl'),'');expect(readWorkflowProjection(dir).status).toBe('incomplete');});
 test('planned and unreached cancelled nodes are retained',()=>{const {store,dir}=fixture();store.appendEvent(dir,'workflow.start',{layers:[['build'],['unreached']]});store.appendEvent(dir,'node.start',{nodeId:'build'});store.appendEvent(dir,'node.end',{nodeId:'build',status:'success'});store.appendEvent(dir,'workflow.end',{status:'cancelled',nodes:{build:'success',unreached:'cancelled'}});store.updateRun(dir,{status:'aborted'});const p=readWorkflowProjection(dir);expect(p.tasks.find(t=>t.id==='unreached')?.state).toBe('cancelled');expect(p.stats.cancelled).toBe(1);expect(p.status).toBe('aborted');});
 test('terminal workflow summary cannot conceal running child',()=>{const {store,dir}=fixture();store.appendEvent(dir,'node.start',{nodeId:'build'});store.appendEvent(dir,'workflow.end',{status:'completed',nodes:{build:'success'}});store.updateRun(dir,{status:'completed'});expect(readWorkflowProjection(dir).status).toBe('incomplete');});
+
+test('captured inventory retains queued phase, exact title and kind without counting nodes as agents', () => {
+    const { store, dir, root } = fixture();
+    store.appendEvent(dir, 'workflow.start', { description: 'Captured purpose', layers: [['build'], ['review']], nodes: [
+        { id: 'build', phase: 'Build', kind: 'bash', title: 'Exact configured label' },
+        { id: 'review', phase: 'Review', kind: 'prompt', title: 'Review evidence' },
+    ] });
+    writeFileSync(join(root, 'workflow.yaml'), 'description: changed after execution');
+    expect(readWorkflowProjection(dir).tasks.find(t => t.id === 'review')).toMatchObject({ state: 'queued', phase: 'Review', kind: 'prompt' });
+    store.appendEvent(dir, 'node.start', { nodeId: 'build', type: 'bash' });
+    store.appendEvent(dir, 'agent.start', { agentId: 'review', nodeId: 'review', label: 'generated/label' });
+    store.upsertAgent(dir, { agentId: 'review', callsign: 'record default' });
+    const p = readWorkflowProjection(dir);
+    expect(p.description).toBe('Captured purpose');
+    expect(p.agentCount).toBe(1);
+    expect(p.tasks.find(t => t.id === 'build')).toMatchObject({ phase: 'Build', kind: 'bash', title: 'Exact configured label' });
+    expect(p.tasks.find(t => t.id === 'review')).toMatchObject({ phase: 'Review', kind: 'prompt', title: 'Review evidence' });
+});
+
+test('task times require execution evidence and agent return cannot end its running node', () => {
+    const { store, dir } = fixture();
+    store.appendEvent(dir, 'workflow.start', { layers: [['build'], ['queued']] });
+    store.appendEvent(dir, 'node.start', { nodeId: 'build' });
+    store.appendEvent(dir, 'agent.start', { nodeId: 'build', agentId: 'build' });
+    store.appendEvent(dir, 'agent.end', { nodeId: 'build', agentId: 'build', ok: true });
+    let p = readWorkflowProjection(dir);
+    expect(Number.isFinite(Date.parse(p.tasks[0].startedAt!))).toBe(true);
+    expect(p.tasks[0].endedAt).toBeUndefined();
+    expect(p.tasks[1].startedAt).toBeUndefined();
+    expect(p.tasks[1].endedAt).toBeUndefined();
+    store.appendEvent(dir, 'node.end', { nodeId: 'build', status: 'failed' });
+    p = readWorkflowProjection(dir);
+    expect(Number.isFinite(Date.parse(p.tasks[0].endedAt!))).toBe(true);
+    expect(p.tasks[0].state).toBe('failed');
+    expect(p.stats.exactOneReview).toBeNull();
+});
+
+test('legacy metadata stays unknown and late starts do not invent a start time', () => {
+    const { store, dir } = fixture();
+    store.appendEvent(dir, 'node.end', { nodeId: 'build', status: 'failed' });
+    store.appendEvent(dir, 'node.start', { nodeId: 'build' });
+    const p = readWorkflowProjection(dir);
+    expect(p.description).toBeUndefined();
+    expect(p.agentCount).toBe(0);
+    expect(p.tasks[0].kind).toBeUndefined();
+    expect(p.tasks[0].startedAt).toBeUndefined();
+    expect(Number.isFinite(Date.parse(p.tasks[0].endedAt!))).toBe(true);
+});
+
+
+test('invalid event timestamps remain unknown', () => {
+    const { dir, runId } = fixture();
+    let prev = GENESIS;
+    const rows = ['node.start', 'node.end'].map((type, index) => {
+        const body = { runId, seq: index + 1, prev, ts: 'not-a-time', type, data: { nodeId: 'build', status: 'success' } };
+        const row = { ...body, hash: sha256(canonicalJson(body)) };
+        prev = row.hash;
+        return JSON.stringify(row);
+    });
+    writeFileSync(join(dir, 'events.jsonl'), rows.join('\n') + '\n');
+    const task = readWorkflowProjection(dir).tasks[0];
+    expect(task.startedAt).toBeUndefined();
+    expect(task.endedAt).toBeUndefined();
+    expect(task.seconds).toBeUndefined();
+});
