@@ -16,13 +16,15 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildSidebarView, renderSidebar, sidebarAutoCloseDue, type SidebarView } from "./monitor/sidebar.ts";
+import type { WorkflowProjection } from "./monitor/workflow-projection.ts";
+import { createWorkflowTuiState, renderWorkflowTui, applyWorkflowTuiInput } from "./monitor/workflow-tui.ts";
 import { RunStore } from "./run-store.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
 import { loadWorkflow } from "./workflow/loader.ts";
 import type { WorkflowDoc } from "./workflow/schema.ts";
 
 export const SIDEBAR_REFRESH_MS = 500;
-export const SIDEBAR_SUBCOMMANDS = ["expand", "collapse", "close"] as const;
+export const SIDEBAR_SUBCOMMANDS = ["expand", "collapse", "close", "focus"] as const;
 
 export interface SidebarOverlayHandle {
 	close(): void;
@@ -31,9 +33,11 @@ export interface SidebarOverlayHandle {
 
 export interface SidebarCommandDeps {
 	store(): RunStore;
+	/** Shared read-only projection used by GUI and standalone terminal observers. */
+	projection?(runDir: string): WorkflowProjection;
 	cwd(ctx: any): string;
 	/** Open the overlay; `render` is called on every refresh with the tick and the current size. Undefined when there is no TUI. */
-	openOverlay(ctx: any, render: (tick: number, size: { width: number; height: number }) => string[], onClose: () => void): SidebarOverlayHandle | undefined;
+	openOverlay(ctx: any, render: (tick: number, size: { width: number; height: number }) => string[], onClose: () => void, interaction?: { input(data: string): void; focus: boolean }): SidebarOverlayHandle | undefined;
 	notify(ctx: any, text: string, level?: "info" | "warning" | "error"): void;
 	panel(ctx: any, title: string, markdown: string): void;
 	/** The in-flight workflow run's directory, when the lead tracks one. */
@@ -49,7 +53,7 @@ export interface SidebarCommandDeps {
 export interface SidebarController {
 	/** ctrl+w: open when closed, close when open. */
 	toggle(ctx: any): void;
-	open(ctx: any, runId?: string): void;
+	open(ctx: any, runId?: string, focus?: boolean): void;
 	close(): boolean;
 	isOpen(): boolean;
 	expanded(): boolean;
@@ -87,6 +91,9 @@ export function defaultLoadedFor(store: RunStore, runDir: string, cwd: string): 
 export function createSidebarController(deps: SidebarCommandDeps): SidebarController {
 	let overlay: { handle: SidebarOverlayHandle; timer: ReturnType<typeof setInterval>; runId: string } | undefined;
 	let expanded = false;
+	let local = createWorkflowTuiState();
+	let projection: WorkflowProjection | undefined;
+	let hitRows: Map<number, number> | undefined;
 	const now = () => deps.now?.() ?? Date.now();
 	const close = (): boolean => {
 		if (!overlay) return false;
@@ -97,12 +104,13 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
 		overlay = undefined;
 		return true;
 	};
-	const open = (ctx: any, wanted?: string): void => {
+	const open = (ctx: any, wanted?: string, focus = false): void => {
 		const store = deps.store();
 		const cwd = deps.cwd(ctx);
 		const target = resolveSidebarRun(store, RunStore.projectSlug(cwd), wanted, deps.currentRunDir?.(ctx));
 		if (!target) return deps.notify(ctx, wanted ? `No run matching "${wanted}" in this project.` : "No runs recorded for this project yet — /workflow run <name> opens one.", "warning");
 		close();
+        projection = undefined; local = createWorkflowTuiState();
 		const doc: WorkflowDoc | undefined = (deps.loadedFor ? deps.loadedFor(target.dir, ctx) : defaultLoadedFor(store, target.dir, cwd))?.doc;
 		let cached: SidebarView | undefined;
 		let cachedAt = 0;
@@ -118,11 +126,23 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
 			}
 			return cached;
 		};
-		const render = (tick: number, size: { width: number; height: number }): string[] => renderSidebar(view(), { width: size.width, height: size.height, tick, color: deps.color, expanded, now: now() });
-		const handle = deps.openOverlay(ctx, render, () => close());
+		const render = (tick: number, size: { width: number; height: number }): string[] => {
+            if (!deps.projection) return renderSidebar(view(), { width: size.width, height: size.height, tick, color: deps.color, expanded, now: now() });
+            const initial = !projection;
+            try { projection = deps.projection(target.dir); }
+            catch { return ["Workflow evidence unavailable; retrying".slice(0, size.width)]; }
+            if (initial && expanded) local.expanded = new Set(projection.phases.map(p => p.id));
+            local.selected = Math.max(0, Math.min(local.selected, projection.phases.length - 1));
+            const frame = renderWorkflowTui(projection, local, size.width, size.height);
+            hitRows = frame.hitRows; local.offset = frame.offset;
+            return frame.lines;
+        };
+        const handle = deps.openOverlay(ctx, render, () => close(), {focus, input(data) {
+            if (projection) { local = applyWorkflowTuiInput(projection, local, data, hitRows); overlay?.handle.refresh(); }
+        }});
 		if (!handle) {
 			// Headless: one plain frame as a panel instead of a silent no-op.
-			return deps.panel(ctx, `◧ WORKFLOW ${target.runId}`, `\`\`\`\n${renderSidebar(view(), { width: 100, height: 60, tick: 0, expanded, now: now() }).join("\n")}\n\`\`\``);
+			return deps.panel(ctx, `◧ WORKFLOW ${target.runId}`, `\`\`\`\n${render(0, { width: 100, height: 60 }).join("\n")}\n\`\`\``);
 		}
 		let tick = 0;
 		const timer = setInterval(() => {
@@ -153,6 +173,7 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
 		expanded: () => expanded,
 		setExpanded: (value) => {
 			expanded = value;
+            if (projection) local.expanded = value ? new Set(projection.phases.map(p => p.id)) : new Set();
 			try {
 				overlay?.handle.refresh();
 			} catch {}
@@ -163,7 +184,7 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
 export function registerSidebarCommand(pi: ExtensionAPI, deps: SidebarCommandDeps): SidebarController {
 	const controller = createSidebarController(deps);
 	pi.registerCommand("workflow-sidebar", {
-		description: "workflow progress sidebar: phases coloured by role and state (ctrl+w toggles it): /workflow-sidebar [runId|expand|collapse|close]",
+		description: "workflow progress sidebar: phases coloured by role and state (ctrl+w toggles it): /workflow-sidebar [runId|expand|collapse|focus|close]",
 		getArgumentCompletions: (prefix: string) => {
 			const items = SIDEBAR_SUBCOMMANDS.filter((verb) => verb.startsWith(prefix.trim().toLowerCase())).map((verb) => ({ value: verb, label: verb }));
 			return items.length ? items : null;
@@ -171,6 +192,7 @@ export function registerSidebarCommand(pi: ExtensionAPI, deps: SidebarCommandDep
 		handler: async (args: string, ctx: any) => {
 			const words = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const verb = (words[0] ?? "").toLowerCase();
+            if (verb === "focus") return controller.open(ctx, words[1], true);
 			if (verb === "close" || verb === "hide") return deps.notify(ctx, controller.close() ? "sidebar closed" : "sidebar: nothing open", "info");
 			if (verb === "expand") {
 				controller.setExpanded(true);
