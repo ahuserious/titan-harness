@@ -91,6 +91,7 @@ export function defaultLoadedFor(store: RunStore, runDir: string, cwd: string): 
 export function createSidebarController(deps: SidebarCommandDeps): SidebarController {
 	let overlay: { handle: SidebarOverlayHandle; timer: ReturnType<typeof setInterval>; runId: string } | undefined;
 	let expanded = false;
+    let expansionPreference: boolean | undefined;
 	let local = createWorkflowTuiState();
 	let projection: WorkflowProjection | undefined;
 	let hitRows: Map<number, number> | undefined;
@@ -131,7 +132,7 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
             const initial = !projection;
             try { projection = deps.projection(target.dir); }
             catch { return ["Workflow evidence unavailable; retrying".slice(0, size.width)]; }
-            if (initial && expanded) local.expanded = new Set(projection.phases.map(p => p.id));
+            if (initial) { local = createWorkflowTuiState(projection); if (expansionPreference !== undefined) local.expanded = expansionPreference ? new Set(projection.phases.map(p => p.id)) : new Set(); }
             local.selected = Math.max(0, Math.min(local.selected, projection.phases.length - 1));
             const frame = renderWorkflowTui(projection, local, size.width, size.height);
             hitRows = frame.hitRows; local.offset = frame.offset;
@@ -172,7 +173,7 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
 		isOpen: () => !!overlay,
 		expanded: () => expanded,
 		setExpanded: (value) => {
-			expanded = value;
+			expanded = value; expansionPreference = value;
             if (projection) local.expanded = value ? new Set(projection.phases.map(p => p.id)) : new Set();
 			try {
 				overlay?.handle.refresh();

@@ -14,6 +14,7 @@ let local = createWorkflowTuiState();
 let projection: ReturnType<typeof readWorkflowProjection>;
 let layout: ReturnType<typeof renderWorkflowTui>;
 const interactive = process.stdin.isTTY && process.stdout.isTTY && !args.includes('--once');
+let initialized = false;
 let closed = false, timer: ReturnType<typeof setInterval> | undefined;
 function restore() {
  if (closed) return; closed = true;
@@ -23,6 +24,7 @@ function restore() {
 function draw() {
  try {
   projection = readWorkflowProjection(runDir);
+  if (!initialized) {local = createWorkflowTuiState(projection); initialized = true;}
   local.selected = Math.max(0,Math.min(local.selected,projection.phases.length-1));
   layout = renderWorkflowTui(projection,local,process.stdout.columns || 80,process.stdout.rows || 30);
   local.offset = layout.offset;
