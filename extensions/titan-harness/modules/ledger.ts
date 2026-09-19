@@ -7,6 +7,7 @@
  * Pure Node, no pi imports; the store directory is the only filesystem touch point.
  */
 import * as path from "node:path";
+import { summarizeThroughput, type ThroughputSample, type ThroughputSummary } from "./monitor/workflow-telemetry.ts";
 import { appendChained, type ChainRow, readChain } from "./hash-chain.ts";
 
 export const LEDGER_FILE = "ledger.jsonl";
@@ -28,7 +29,10 @@ export interface LedgerRow {
 	costUsd: number;
 	source: LedgerSource;
 	origin: LedgerOrigin;
+	/** Legacy provider-response segment; only an estimate of generation duration. */
 	tpsSeconds?: number;
+	/** Explicit paired measurement; never inferred from legacy tpsSeconds. */
+	generationMeasurement?: ThroughputSample;
 	note?: string;
 }
 
@@ -40,6 +44,7 @@ export interface Totals {
 	costUsd: number;
 	unmetered: number;
 	agents: number;
+	/** Legacy arithmetic agent mean. Not the UI-03 weighted generation rate. */
 	avgTpsPerAgent?: number;
 	completionRate?: number;
 	verified: number;
@@ -162,4 +167,13 @@ export function rowFromAgentRun(
 	if (requested !== undefined && effective !== undefined) row.thinking = { requested, effective };
 	if (num(run.tpsSeconds) > 0) row.tpsSeconds = run.tpsSeconds;
 	return row;
+}
+
+/** Human observer seam. Legacy observations remain estimates; unmetered rows are unknown. */
+export function throughputFromLedger(rows: readonly LedgerRow[]): ThroughputSummary {
+	return summarizeThroughput(rows.map((row) => row.generationMeasurement ?? {
+		outputTokens: row.tokens?.output,
+		generationSeconds: row.tpsSeconds,
+		measurement: row.source === "unmetered" ? "unknown" : "estimated",
+	}));
 }

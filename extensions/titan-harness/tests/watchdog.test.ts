@@ -234,6 +234,23 @@ describe("state block", () => {
 // ═══ compaction.ts ═══
 
 describe("compaction", () => {
+	test("rehydration allowlist excludes human model provider and throughput telemetry", async () => {
+		const run = seededRun();
+		run.store.upsertAgent(run.dir, { agentId: "implement", model: "PRIVATE_PROVIDER/PRIVATE_MODEL", ...({ provider: "PRIVATE_PROVIDER", tps: { outputTokens: 987654, seconds: 1 }, humanTelemetry: "PRIVATE_TPS" } as object) });
+		run.store.appendEvent(run.dir, "human.telemetry", { model: "PRIVATE_MODEL", provider: "PRIVATE_PROVIDER", tps: "PRIVATE_TPS" });
+		for (const reason of ["overflow", "threshold"] as const) {
+			const inspect = inspector();
+			const out = await handleBeforeCompact(event(reason), compactionDeps(run, inspect));
+			const payloads = [out.summary!, JSON.stringify(out.stateBlock!.json), ...inspect.calls.map((c) => c.prompt)];
+			for (const payload of payloads) {
+				for (const secret of ["PRIVATE_MODEL", "PRIVATE_PROVIDER", "PRIVATE_TPS", "987654", "antigravity/gemini-3.8-flash"]) expect(payload).not.toContain(secret);
+				expect(payload).toContain("implement");
+				expect(payload).toContain("dispatched-working");
+			}
+			expect(out.stateBlock!.json.evidence[0]).toMatch(/^plan:[0-9a-f]{12}$/);
+			expect(Object.keys(out.stateBlock!.json.agents[0]).sort()).toEqual(["callsign", "id", "state"]);
+		}
+	});
 	test("threshold + working inspector → custom summary = state block + narrative, one ledger row, compaction.before event", async () => {
 		const run = seededRun();
 		const inspect = inspector({ text: "Kept the plan; implement is mid-loop; evidence plan:ok." });
