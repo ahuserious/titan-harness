@@ -30,6 +30,8 @@ export interface WorkflowProjection {
     /** Unique observed agent identities; execution nodes are not agents. */
     agentCount?: number;
     status: string;
+    /** Producer lifecycle status; does not override incomplete evidence or grant acceptance. */
+    reportedStatus?: string;
     startedAt: string;
     endedAt?: string;
     phases: Array<{
@@ -270,7 +272,7 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         throw new Error('Agent inventory changed during read; retry');
     warnings.push('File snapshot checked for concurrent changes; not an atomic producer checkpoint.');
     const sourceDigest = sha256(canonicalJson(sources));
-    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, description, agentCount: observedAgentIds.size, status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
+    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, description, agentCount: observedAgentIds.size, status, reportedStatus: run.status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
 }
 /** Output only, scoped to a known task and validated against its store metadata. No arbitrary transcript paths. */
 export function readTaskOutput(runDir: string, taskId: string): string {
