@@ -55,6 +55,7 @@ import { currentWorkflowRun, registerWorkflowCommands } from "./modules/cmd-work
 import { createWorkflowRuntime, findBinary, runProcess } from "./modules/workflow-runtime.ts";
 import { registerMonitorCommand } from "./modules/cmd-monitor.ts";
 import { registerSidebarCommand } from "./modules/cmd-sidebar.ts";
+import { readWorkflowProjection } from "./modules/monitor/workflow-projection.ts";
 import { registerTitanConfigCommand } from "./modules/cmd-titan-config.ts";
 import { applyRowChange, buildSettingsModel, handleSettingsKey, type PanelColorRole, type PanelDeps, renderSettingsPanel, type SettingsModel } from "./modules/settings-panel.ts";
 import { renderBarRow } from "./modules/monitor/frame.ts";
@@ -2449,7 +2450,7 @@ export default function (pi: ExtensionAPI) {
 		return text;
 	};
 	/** A right-anchored, non-capturing overlay (the monitor and the sidebar share it): the editor keeps input; `render(tick, size)` runs on every refresh. */
-	const openTitanOverlay = (ctx: any, render: (tick: number, size: { width: number; height: number }) => string[], onClose: () => void) => {
+	const openTitanOverlay = (ctx: any, render: (tick: number, size: { width: number; height: number }) => string[], onClose: () => void, interaction?: { input(data: string): void; focus: boolean }) => {
 			if (!ctx?.hasUI || typeof ctx.ui?.custom !== "function") return undefined;
 			let tick = 0;
 			let tuiRef: any;
@@ -2464,6 +2465,7 @@ export default function (pi: ExtensionAPI) {
 						render: (width: number) => render(tick, { width, height: height() }).map((line) => truncateToWidth(line, width)),
 						handleInput: (data: string) => {
 							if (matchesKey(data, "escape") || data === "q") done(undefined);
+							else interaction?.input(data);
 						},
 						invalidate: () => {},
 					};
@@ -2473,7 +2475,7 @@ export default function (pi: ExtensionAPI) {
 					overlayOptions: { anchor: "right-center", width: "50%", minWidth: 44, maxHeight: "90%", margin: { right: 1 } },
 					onHandle: (handle: any) => {
 						try {
-							handle.unfocus(); // the editor keeps input; the overlay is a live view
+							if (!interaction?.focus) handle.unfocus(); // explicit focus enables panel navigation
 						} catch {}
 					},
 				},
@@ -2525,6 +2527,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── 2.16b /workflow-sidebar + ctrl+w (PRD v0.9 R3): phases coloured by role and state, like a todo list ──
 	const sidebar = registerSidebarCommand(pi, {
+		projection: readWorkflowProjection,
 		store: () => runStore(),
 		cwd: (ctx: any) => ctx.cwd,
 		notify: (ctx: any, text: string, level?: "info" | "warning" | "error") => announce(ctx, text, level ?? "info"),
