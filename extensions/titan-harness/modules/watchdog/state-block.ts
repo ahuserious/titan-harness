@@ -24,7 +24,7 @@ export interface StateBlockJson {
 	phases?: string[];
 	status: string;
 	nodes: Record<string, string>;
-	agents: Array<{ id: string; callsign?: string; state: string; model?: string }>;
+	agents: Array<{ id: string; callsign?: string; state: string }>;
 	evidence: string[];
 	findings: Array<{ id: string; severity: string; summary: string }>;
 	planDigest?: string;
@@ -86,7 +86,8 @@ export function buildStateBlock(store: RunStore, runDir: string, extra: StateBlo
 	const run = store.readRun(runDir);
 	const events = readChainSafe(path.join(runDir, EVENTS_FILE));
 	const tail = events.slice(-(extra.maxEvents ?? DEFAULT_EVENT_TAIL));
-	const agents = store.listAgents(runDir).map((a) => ({ id: a.agentId, callsign: a.callsign || undefined, state: a.state, model: a.model || undefined }));
+	// Model-facing allowlist: provider routing and performance stay in the host store.
+	const agents = store.listAgents(runDir).map((a) => ({ id: a.agentId, callsign: a.callsign || undefined, state: a.state }));
 	const findings = (extra.findings ?? []).map((f) => ({ id: f.id, severity: f.severity, summary: f.summary }));
 	const json: StateBlockJson = {
 		runId: run.runId,
@@ -108,7 +109,7 @@ export function buildStateBlock(store: RunStore, runDir: string, extra: StateBlo
 		`- run: ${json.runId} · ${json.workflow ? `workflow: ${json.workflow}` : `command: ${json.command ?? "-"}`} · status: ${json.status}`,
 		`- phase: ${json.phase ?? "-"} · phases: ${json.phases?.length ? json.phases.join(" → ") : "-"}`,
 		`- nodes: ${Object.keys(json.nodes).length ? Object.entries(json.nodes).map(([id, state]) => `${id}=${state}`).join(", ") : "-"}`,
-		`- agents: ${agents.length ? agents.map((a) => `${a.callsign ?? a.id}(${a.id}) ${a.state}${a.model ? ` ${a.model}` : ""}`).join(", ") : "-"}`,
+		`- agents: ${agents.length ? agents.map((a) => `${a.callsign ?? a.id}(${a.id}) ${a.state}`).join(", ") : "-"}`,
 		`- evidence: ${json.evidence.length ? json.evidence.join(", ") : "-"}`,
 		`- open findings: ${findings.length ? findings.map((f) => `[${f.severity}] ${f.summary} (${short(f.id, 8)})`).join("; ") : "-"}`,
 		`- plan digest: ${json.planDigest ?? "-"}`,
