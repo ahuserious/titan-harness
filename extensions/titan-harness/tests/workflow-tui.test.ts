@@ -74,3 +74,9 @@ describe('terminal groups and metric details',()=>{
   const narrow=workflowFooter(p,44);expect(narrow.length).toBeLessThanOrEqual(44);expect(narrow).toContain('Workspace');expect(narrow).toContain('avg -- tok/s');expect(narrow).toContain('cfg+5');expect(narrow).toContain('1 run');
  });
 });
+
+test('headless shared telemetry never becomes a model-facing panel', async()=>{
+ const {createSidebarController}=await import('../modules/cmd-sidebar.ts');const p=fixture();let panels=0;const notices:string[]=[];
+ const controller=createSidebarController({store:()=>({readRun:()=>({runId:'run'})} as any),cwd:()=>'/project',currentRunDir:()=>'/run',loadedFor:()=>undefined,projection:()=>p,notify:(_ctx,message)=>notices.push(message),panel:()=>{panels++},openOverlay:()=>undefined});
+ controller.open({});expect(panels).toBe(0);expect(notices.join(' ')).not.toContain('example');expect(notices.join(' ')).toContain('human UI');
+});

@@ -142,6 +142,8 @@ export function createSidebarController(deps: SidebarCommandDeps): SidebarContro
             if (projection) { local = applyWorkflowTuiInput(projection, local, data, hitRows); overlay?.handle.refresh(); }
         }});
 		if (!handle) {
+            // The host panel writes conversation messages. Human telemetry must never enter it.
+            if (deps.projection) return deps.notify(ctx, "Workflow telemetry requires a human UI; use the standalone observer.", "info");
 			// Headless: one plain frame as a panel instead of a silent no-op.
 			return deps.panel(ctx, `◧ WORKFLOW ${target.runId}`, `\`\`\`\n${render(0, { width: 100, height: 60 }).join("\n")}\n\`\`\``);
 		}

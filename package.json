@@ -24,7 +24,9 @@
     "mcp": "./mcp/mcp.json"
   },
   "scripts": {
-    "test": "bun test extensions/titan-harness/tests"
+    "test": "bun test extensions/titan-harness/tests",
+    "workflow:view": "bun scripts/titan-workflow-view.ts",
+    "workflow:tui": "bun scripts/titan-workflow-tui.ts"
   },
   "dependencies": {
     "yaml": "^2.9.0"
