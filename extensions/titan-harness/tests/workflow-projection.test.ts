@@ -85,3 +85,32 @@ test('invalid event timestamps remain unknown', () => {
     expect(task.endedAt).toBeUndefined();
     expect(task.seconds).toBeUndefined();
 });
+
+
+test('process review bookkeeping is not evidence of an agent dispatch', () => {
+    const { store, dir } = fixture();
+    store.appendEvent(dir, 'workflow.start', { nodes: [{ id: 'build', kind: 'bash', title: 'build' }] });
+    store.appendEvent(dir, 'node.start', { nodeId: 'build', type: 'bash' });
+    store.appendEvent(dir, 'node.end', { nodeId: 'build', type: 'bash', status: 'success' });
+    store.upsertAgent(dir, { agentId: 'build', state: 'done-unverified' });
+    expect(readWorkflowProjection(dir).agentCount).toBe(0);
+});
+
+test('legacy model or session records without dispatch events leave agent count unknown', () => {
+    for (const evidence of [{ model: 'configured/model' }, { sessionDir: '/recorded/session' }]) {
+        const { store, dir } = fixture();
+        store.upsertAgent(dir, { agentId: 'legacy', ...evidence });
+        store.appendEvent(dir, 'agent.start', { agentId: 'known', nodeId: 'known' });
+        const p = readWorkflowProjection(dir);
+        expect(p.agentCount).toBeUndefined();
+        expect(p.warnings.some(w => w.includes('Agent count unavailable'))).toBe(true);
+    }
+});
+
+test('explicit agent events count unique identities even without agent records', () => {
+    const { store, dir } = fixture();
+    store.appendEvent(dir, 'agent.start', { agentId: 'worker', nodeId: 'work' });
+    store.appendEvent(dir, 'agent.end', { agentId: 'worker', nodeId: 'work', ok: true });
+    store.appendEvent(dir, 'agent.start', { agentId: 'worker#2', nodeId: 'work' });
+    expect(readWorkflowProjection(dir).agentCount).toBe(2);
+});
