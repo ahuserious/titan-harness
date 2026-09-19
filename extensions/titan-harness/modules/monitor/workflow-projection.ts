@@ -8,6 +8,9 @@ import type { LedgerRow } from '../ledger.ts';
 export interface WorkflowTask {
     id: string;
     title: string;
+    kind?: string;
+    startedAt?: string;
+    endedAt?: string;
     role: string;
     state: string;
     phase: string;
@@ -23,6 +26,9 @@ export interface WorkflowProjection {
     cursor: string;
     runId: string;
     name: string;
+    description?: string;
+    /** Unique observed agent identities; execution nodes are not agents. */
+    agentCount?: number;
     status: string;
     startedAt: string;
     endedAt?: string;
@@ -52,6 +58,7 @@ const terminal = new Set(['execution_completed', 'failed', 'cancelled', 'skipped
 const active = new Set(['dispatched-working', 'in-review', 'edit-round-n', 'harvesting', 'compacting', 'inspecting-compaction', 'resuming', 'authoring-workflow', 'repairing-workflow', 'system-run', 'running']);
 const normalize = (s: string) => s === 'done-verified' || s === 'done-unverified' || s === 'success' ? 'execution_completed' : s === 'aborted' ? 'cancelled' : s === 'failed-review' || s === 'watchdog-failed' || s === 'stalemate' ? 'failed' : active.has(s) ? 'running' : s;
 const count = (n: unknown): number | undefined => typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : undefined;
+const timestamp = (value: unknown): string | undefined => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
 const safe = (id: string) => id.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.-]+/, '').replace(/-+$/, '') || 'x';
 function scopedFile(dir: string, relative: string): string { const root = fs.realpathSync(dir); const file = path.join(root, relative); if (fs.existsSync(file) && !fs.realpathSync(file).startsWith(root + path.sep))
     throw new Error('Observer path escapes selected run'); return file; }
@@ -111,13 +118,27 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         t = { id, title: id, role: 'worker', state: 'queued', phase: 'Workflow', modelSource: 'unknown', outputAvailable: false };
         tasks.set(id, t);
     } return t; };
-    for (const event of events) {
-        const data = event.data as any;
-        if (event.type === 'workflow.start' && Array.isArray(data?.layers)) {
-            for (const id of data.layers.flat()) { if (typeof id === 'string') task(id); }
+    const capturedStart = events.find(e => e.type === 'workflow.start')?.data as any;
+    const description = typeof capturedStart?.description === 'string' ? capturedStart.description : undefined;
+    const configuredTitles = new Set<string>();
+    const declaredNodes = new Set<string>();
+    if (Array.isArray(capturedStart?.layers)) {
+        for (const id of capturedStart.layers.flat()) { if (typeof id === 'string') task(id); }
+    }
+    if (Array.isArray(capturedStart?.nodes)) {
+        for (const node of capturedStart.nodes) {
+            if (!node || typeof node.id !== 'string' || !node.id) continue;
+            declaredNodes.add(node.id);
+            const t = task(node.id);
+            if (typeof node.phase === 'string') t.phase = node.phase;
+            if (typeof node.kind === 'string') t.kind = node.kind;
+            if (typeof node.role === 'string') t.role = node.role;
+            if (typeof node.title === 'string') { t.title = node.title; configuredTitles.add(node.id); }
         }
     }
-    const nodeIds = new Set(events.filter(e => e.type === 'node.start' || e.type === 'node.end').map(e => (e.data as any)?.nodeId).filter(Boolean));
+    const emittedNodeIds = new Set(events.filter(e => e.type === 'node.start' || e.type === 'node.end').map(e => (e.data as any)?.nodeId).filter(Boolean));
+    const nodeIds = new Set([...declaredNodes, ...emittedNodeIds]);
+    const observedAgentIds = new Set(agentIds);
     const endedNodes = new Set<string>();
     let currentPhase = 'Workflow';
     const starts = new Map<string, string>();
@@ -132,18 +153,26 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         if (!['node.start', 'node.end', 'agent.start', 'agent.end'].includes(String(event.type)))
             continue;
         const t = task(id);
+        if (event.type === 'agent.start' || event.type === 'agent.end') {
+            observedAgentIds.add(id);
+            if (!nodeIds.has(id)) t.kind = 'agent';
+        } else if (typeof d.type === 'string') t.kind = d.type;
         if (typeof d.phase === 'string')
             t.phase = d.phase;
-        else if (event.type === 'node.start' || event.type === 'agent.start')
+        else if (t.phase === 'Workflow' && (event.type === 'node.start' || event.type === 'agent.start'))
             t.phase = event.type === 'node.start' ? currentPhase : tasks.get(d.nodeId)?.phase ?? currentPhase;
         if (typeof d.role === 'string')
             t.role = d.role;
-        if (typeof d.label === 'string')
+        if (!configuredTitles.has(id) && typeof d.label === 'string')
             t.title = d.label;
+        const wasTerminal = terminal.has(t.state);
         if (event.type === 'node.start' || event.type === 'agent.start') {
             if (!terminal.has(t.state))
                 t.state = d.skipped ? 'skipped' : 'running';
-            starts.set(id, starts.get(id) ?? event.ts);
+            if (!wasTerminal && !d.skipped && timestamp(event.ts)) {
+                starts.set(id, starts.get(id) ?? event.ts);
+                t.startedAt ??= event.ts;
+            }
         }
         else if (event.type === 'node.end' && !endedNodes.has(id)) {
             endedNodes.add(id);
@@ -152,6 +181,8 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         else if (!nodeIds.has(id) && !terminal.has(t.state)) {
             t.state = event.type === 'node.end' ? normalize(d.status ?? 'unknown') : d.aborted ? 'cancelled' : d.ok === true ? 'execution_completed' : d.ok === false ? 'failed' : 'unknown';
         }
+        if (String(event.type).endsWith('.end') && terminal.has(t.state) && !t.endedAt && timestamp(event.ts) && (!t.startedAt || Date.parse(event.ts) >= Date.parse(t.startedAt)))
+            t.endedAt = event.ts;
         if (typeof d.error === 'string')
             t.error = d.error;
         const duration = count(d.durationMs);
@@ -163,11 +194,15 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
                 t.seconds = delta;
         }
     }
-    const workflowEnd = events.filter(e => e.type === 'workflow.end').at(-1)?.data as any;
+    const workflowEndEvent = events.filter(e => e.type === 'workflow.end').at(-1);
+    const workflowEnd = workflowEndEvent?.data as any;
     for (const [id, state] of Object.entries(workflowEnd?.nodes ?? {})) {
         if (typeof state !== 'string') continue;
         const t = task(id);
-        if (!nodeIds.has(id) && !terminal.has(t.state)) t.state = normalize(state);
+        if (!emittedNodeIds.has(id) && !terminal.has(t.state)) {
+            t.state = normalize(state);
+            if (terminal.has(t.state) && timestamp(workflowEndEvent?.ts) && (!t.startedAt || Date.parse(workflowEndEvent!.ts) >= Date.parse(t.startedAt))) t.endedAt = workflowEndEvent!.ts;
+        }
     }
     for (const a of records) {
         if (!a.agentId)
@@ -176,7 +211,8 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         if (!nodeIds.has(a.agentId) && !terminal.has(t.state))
             t.state = normalize(a.state);
         t.role = a.role || t.role;
-        t.title = a.callsign || t.title;
+        if (!configuredTitles.has(a.agentId)) t.title = a.callsign || t.title;
+        if (!nodeIds.has(a.agentId)) t.kind = 'agent';
         if (a.model) {
             t.model = a.model;
             t.modelSource = 'configured';
@@ -234,7 +270,7 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         throw new Error('Agent inventory changed during read; retry');
     warnings.push('File snapshot checked for concurrent changes; not an atomic producer checkpoint.');
     const sourceDigest = sha256(canonicalJson(sources));
-    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
+    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, description, agentCount: observedAgentIds.size, status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
 }
 /** Output only, scoped to a known task and validated against its store metadata. No arbitrary transcript paths. */
 export function readTaskOutput(runDir: string, taskId: string): string {
