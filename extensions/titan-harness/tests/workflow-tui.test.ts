@@ -15,7 +15,7 @@ describe('shared workflow terminal observer',()=>{
  test('bounded ASCII lines resist terminal controls and disclose unknown measurements',()=>{
   const p=fixture(),local=applyWorkflowTuiInput(p,createWorkflowTuiState(),' ');
   for(const width of [1,4,22,44,80]){const frame=renderWorkflowTui(p,local,width,16);expect(frame.lines.length).toBeLessThanOrEqual(16);for(const line of frame.lines){expect(line.length).toBeLessThanOrEqual(width);expect(line).toMatch(/^[\x20-\x7e]*$/);}}
-  expect(workflowFooter(p)).toContain('avg -- tok/s');expect(workflowFooter(p)).toContain('0/1 measured');
+  expect(workflowFooter(p)).toContain('avg -- tok/s');expect(workflowFooter(p)).toContain('Workspace');
   expect(renderWorkflowTui(p,local,100,30).lines.join('\n')).toContain('(configured)');
  });
  test('terminal parent with running child stays incomplete and glyph does not animate',()=>{
@@ -49,5 +49,28 @@ describe('native sidebar projection integration',()=>{
   const {createSidebarController}=await import('../modules/cmd-sidebar.ts');let render:any;
   const controller=createSidebarController({store:()=>({readRun:()=>({runId:'run'})} as any),cwd:()=>'/project',currentRunDir:()=>'/run',loadedFor:()=>undefined,projection:()=>{throw new Error('torn evidence')},notify:()=>{},panel:()=>{},openOverlay:(_ctx,r)=>{render=r;return {close(){},refresh(){}};}});
   try {controller.open({});expect(render(0,{width:80,height:25}).join('\n')).toContain('unavailable');}finally{controller.close();}
+ });
+});
+
+
+describe('terminal groups and metric details',()=>{
+ test('running defaults expand and finished filter keeps failures available',()=>{
+  const p=fixture();p.phases[1].tasks=[{id:'b',title:'Failed verifier',role:'reviewer',state:'failed',phase:'Build',modelSource:'unknown',outputAvailable:false}];
+  const local=createWorkflowTuiState(p);expect(local.expanded.has('first')).toBe(true);
+  const running=applyWorkflowTuiInput(p,local,'r');expect(renderWorkflowTui(p,running,100,30).lines.join('\n')).toContain('[R Running]');
+  expect(renderWorkflowTui(p,running,100,30).lines.join('\n')).not.toContain('Failed verifier');
+  const finished=applyWorkflowTuiInput(p,applyWorkflowTuiInput(p,local,'f'),' ');expect(finished.selected).toBe(1);expect(renderWorkflowTui(p,finished,100,30).lines.join('\n')).toContain('Failed verifier');
+ });
+ test('warnings are compact by default and metrics distinguish estimates',()=>{
+  const p=fixture();p.warnings=Array(30).fill('Detailed evidence warning');p.stats.estimatedTps=42;p.stats.cancelled=2;p.stats.failed=1;
+  const local=createWorkflowTuiState(p);const initial=renderWorkflowTui(p,local,100,25).lines.join('\n');
+  expect(initial).toContain('30 evidence notes');expect(initial).toContain('Builder');expect(initial).not.toContain('Detailed evidence warning');
+  const detail=renderWorkflowTui(p,applyWorkflowTuiInput(p,local,'h'),100,25).lines.join('\n');
+  expect(detail).toContain('Estimated rate 42.0 tok/s (not measured)');expect(detail).toContain('Measured 0/1 samples');expect(detail).toContain('Exact-one-review: unknown');expect(detail).toContain('cancelled 2');
+ });
+ test('footer preserves configured provenance and overflow counts within width',()=>{
+  const p=fixture();p.tasks=Array.from({length:5},(_,i)=>({...p.phases[0].tasks[0],id:String(i),model:'provider/model-'+i}));
+  const full=workflowFooter(p,120);expect(full).toContain('configured:');expect(full).toMatch(/\+[1-5]/);
+  const narrow=workflowFooter(p,44);expect(narrow.length).toBeLessThanOrEqual(44);expect(narrow).toContain('Workspace');expect(narrow).toContain('avg -- tok/s');expect(narrow).toContain('cfg+5');expect(narrow).toContain('1 run');
  });
 });
