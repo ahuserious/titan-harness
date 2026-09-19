@@ -16,7 +16,7 @@ describe('shared workflow terminal observer',()=>{
   const p=fixture(),local=applyWorkflowTuiInput(p,createWorkflowTuiState(),' ');
   for(const width of [1,4,22,44,80]){const frame=renderWorkflowTui(p,local,width,16);expect(frame.lines.length).toBeLessThanOrEqual(16);for(const line of frame.lines){expect(line.length).toBeLessThanOrEqual(width);expect(line).toMatch(/^[\x20-\x7e]*$/);}}
   expect(workflowFooter(p)).toContain('avg -- tok/s');expect(workflowFooter(p)).toContain('Workspace');
-  expect(renderWorkflowTui(p,local,100,30).lines.join('\n')).toContain('(configured)');
+  expect(renderWorkflowTui(p,local,100,30).lines.join('\n')).toContain('cfg:example');
  });
  test('terminal parent with running child stays incomplete and glyph does not animate',()=>{
   const p=fixture(),local=applyWorkflowTuiInput(p,createWorkflowTuiState(),' ');
@@ -26,7 +26,7 @@ describe('shared workflow terminal observer',()=>{
  });
  test('long phase lists preserve selected row with an overflow indicator',()=>{
   const p=fixture();p.phases=Array.from({length:30},(_,i)=>({id:String(i),title:`Phase ${i}`,tasks:[]}));
-  const local=createWorkflowTuiState();local.selected=15;const frame=renderWorkflowTui(p,local,44,12);
+  const local=createWorkflowTuiState();local.selected=15;local.followSelection=true;const frame=renderWorkflowTui(p,local,44,12);
   expect(frame.lines.join('\n')).toContain('Phase 15');expect(frame.lines.join('\n')).toContain('more rows');expect(frame.offset).toBeGreaterThan(0);
  });
 });
@@ -54,12 +54,30 @@ describe('native sidebar projection integration',()=>{
 
 
 describe('terminal groups and metric details',()=>{
- test('running defaults expand and finished filter keeps failures available',()=>{
+ test('groups classify the workflow and never filter completed or failed phase children',()=>{
   const p=fixture();p.phases[1].tasks=[{id:'b',title:'Failed verifier',role:'reviewer',state:'failed',phase:'Build',modelSource:'unknown',outputAvailable:false}];
-  const local=createWorkflowTuiState(p);expect(local.expanded.has('first')).toBe(true);
-  const running=applyWorkflowTuiInput(p,local,'r');expect(renderWorkflowTui(p,running,100,30).lines.join('\n')).toContain('[R Running]');
-  expect(renderWorkflowTui(p,running,100,30).lines.join('\n')).not.toContain('Failed verifier');
-  const finished=applyWorkflowTuiInput(p,applyWorkflowTuiInput(p,local,'f'),' ');expect(finished.selected).toBe(1);expect(renderWorkflowTui(p,finished,100,30).lines.join('\n')).toContain('Failed verifier');
+  const local=createWorkflowTuiState(p);local.expanded.add('second');expect(local.expanded.has('first')).toBe(true);
+  const running=applyWorkflowTuiInput(p,local,'r');
+  const runningText=renderWorkflowTui(p,running,100,45).lines.join('\n');
+  expect(runningText).toContain('[R Running]');expect(runningText).toContain('Failed verifier');expect(runningText).toContain('incomplete');
+  const empty=applyWorkflowTuiInput(p,local,'f');expect(renderWorkflowTui(p,empty,100,30).lines.join('\n')).toContain('No finished workflow');
+  expect(applyWorkflowTuiInput(p,empty,' ').expanded).toEqual(empty.expanded);
+  p.status='failed';p.endedAt='2026-09-19T00:03:00Z';
+  const finished=applyWorkflowTuiInput(p,local,'f');
+  const text=renderWorkflowTui(p,finished,100,45).lines.join('\n');
+  expect(text).toContain('Finished 1');expect(text).toContain('Failed verifier');expect(text).toContain('Builder');expect(text).toContain('3m 0s');expect(text).toContain('1 failed');
+ });
+ test('execution grids count successful execution without implying acceptance',()=>{
+  const p=fixture();p.phases[0].tasks.push(...['execution_completed','failed','cancelled','queued'].map((state,i)=>({...p.phases[0].tasks[0],id:String(i),title:state,state})));
+  const local=createWorkflowTuiState(p),text=renderWorkflowTui(p,local,100,50).lines.join('\n');
+  expect(text).toContain('1/5');expect(text).toContain('[>][#][!][-][.]');expect(text).toContain('Agent');expect(text).toContain('Model');expect(text).toContain('Tokens');expect(text).toContain('Time');
+  expect(text).not.toContain('accepted');
+  const detail=renderWorkflowTui(p,applyWorkflowTuiInput(p,local,'h'),100,50).lines.join('\n');expect(detail).toContain('not acceptance');
+ });
+ test('mouse wheel scrolls independently of phase selection',()=>{
+  const p=fixture(),local=createWorkflowTuiState(p);
+  const down=applyWorkflowTuiInput(p,local,'\x1b[<65;12;8M');expect(down.offset).toBe(5);expect(down.followSelection).toBe(false);
+  expect(applyWorkflowTuiInput(p,down,'\x1b[<64;12;8M').offset).toBe(0);
  });
  test('warnings are compact by default and metrics distinguish estimates',()=>{
   const p=fixture();p.warnings=Array(30).fill('Detailed evidence warning');p.stats.estimatedTps=42;p.stats.cancelled=2;p.stats.failed=1;
@@ -80,3 +98,10 @@ test('headless shared telemetry never becomes a model-facing panel', async()=>{
  const controller=createSidebarController({store:()=>({readRun:()=>({runId:'run'})} as any),cwd:()=>'/project',currentRunDir:()=>'/run',loadedFor:()=>undefined,projection:()=>p,notify:(_ctx,message)=>notices.push(message),panel:()=>{panels++},openOverlay:()=>undefined});
  controller.open({});expect(panels).toBe(0);expect(notices.join(' ')).not.toContain('example');expect(notices.join(' ')).toContain('human UI');
 });
+
+ test('workflow card keeps captured metadata and does not invent terminal elapsed time',()=>{
+  const p=Object.assign(fixture(),{description:'Research, draft and review the workflow.',agentCount:8,status:'failed'});
+  const text=renderWorkflowTui(p,createWorkflowTuiState(p),100,40).lines.join('\n');
+  expect(text).toContain('Background tasks');expect(text).toContain('8 agents');expect(text).toContain(p.description);expect(text).toContain('Workflow | failed | --');
+  expect(text).not.toContain('Stop workflow');
+ });
