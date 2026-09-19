@@ -27,3 +27,11 @@ The browser offers Running/Finished navigation, native accessible buttons for ph
 - Human telemetry is not emitted as a model tool result. The demonstrated structured watchdog state-block leak is repaired; this does not claim universal redaction of free text, existing transcripts, screenshots or same-user shell access.
 
 Unresolved mode routing, worker counts, compaction targets, live provider authentication, shared budgets, durable recovery, source-bound review authority, and cancellation are not changed by this UI slice.
+
+## Background task presentation
+
+The dark browser pane and terminal observer follow a workflow-card hierarchy: Running and Finished groups contain whole workflows, and each workflow retains all phases and their task rows. A compact card in the chat area opens the right pane. Expand, collapse, resize, close, and popout controls affect the observer only. This single-run observer does not invent other session history or offer unsupported stop, trash, or pin actions.
+
+Phase headers show executed/total task counts and fixed status cells. Grey means executed, blue running, red failed, amber stopped; hollow cells mean pending or unknown. These marks never grant independent acceptance. The terminal uses explicit ASCII symbols and a separate unknown marker. Agent/task, model, token, and elapsed-time columns expand beneath each phase.
+
+Workflow descriptions and declared node metadata are captured in `workflow.start`, so viewing a past run does not load a changed workflow file. Agent counts require unique dispatch events; bookkeeping records are not agent invocations and uncertain legacy counts remain unknown. The producer's `reportedStatus` determines which lifecycle group contains a workflow; an ended workflow with unresolved evidence remains visibly `incomplete`. Recorded output dialogs restore keyboard focus across snapshot updates.

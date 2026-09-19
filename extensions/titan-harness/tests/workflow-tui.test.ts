@@ -105,3 +105,15 @@ test('headless shared telemetry never becomes a model-facing panel', async()=>{
   expect(text).toContain('Background tasks');expect(text).toContain('8 agents');expect(text).toContain(p.description);expect(text).toContain('Workflow | failed | --');
   expect(text).not.toContain('Stop workflow');
  });
+
+test('reported terminal run with incomplete projection groups as Finished without accepting children',()=>{
+ const p=fixture();p.reportedStatus='completed';p.status='incomplete';
+ const local=createWorkflowTuiState(p);local.group='finished';
+ const text=renderWorkflowTui(p,local,100,40).lines.join('\n');
+ expect(text).toContain('Finished 1');expect(text).toContain('incomplete');expect(text).toContain('[>]');expect(text).not.toContain('Running 1');
+});
+
+test('unrecognized states never increment phase executed counts',()=>{
+ const p=fixture();p.phases[0].tasks[0].state='not-completed';const local=createWorkflowTuiState(p);local.expanded.add('first');
+ const text=renderWorkflowTui(p,local,100,40).lines.join('\n');expect(text).toContain('0/1');expect(text).toContain('[?]');expect(text).not.toContain('[#]');
+});

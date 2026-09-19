@@ -6,11 +6,11 @@ export const createWorkflowTuiState = (p?: WorkflowProjection): WorkflowTuiState
 const clean = (s: unknown): string => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').replace(/[^\x20-\x7e]/g, '?');
 const fit = (s: string, n: number): string => n <= 0 ? '' : s.length <= n ? s.padEnd(n) : n > 3 ? s.slice(0, n - 3) + '...' : s.slice(0, n);
 const isActive = (s: string) => ['running', 'working', 'dispatched-working', 'in-review', 'edit-round-n', 'harvesting', 'compacting', 'resuming', 'authoring-workflow', 'repairing-workflow', 'system-run'].includes(s);
-const mark = (s: string): string => isActive(s) ? '[>]' : /failed|error|stalemate/.test(s) ? '[!]' : /cancel|stop|abort/.test(s) ? '[-]' : /done|complete|success|verified/.test(s) ? '[#]' : '[.]';
+const mark = (s: string): string => isActive(s) ? '[>]' : s === 'failed' ? '[!]' : ['cancelled','skipped'].includes(s) ? '[-]' : s === 'execution_completed' ? '[#]' : ['queued','pending'].includes(s) ? '[.]' : '[?]';
 
 /** Groups classify this selected workflow, never its children. */
 function workflowFinished(p: WorkflowProjection): boolean {
- return ['completed','failed','aborted','reauthored','stalemate','cancelled','stopped'].includes(p.status);
+ return ['completed','failed','aborted','reauthored','stalemate','cancelled','stopped'].includes(p.reportedStatus ?? p.status);
 }
 function visiblePhases(p: WorkflowProjection, group = 'all') {
  const finished = workflowFinished(p);
@@ -49,7 +49,7 @@ export function renderWorkflowTui(p: WorkflowProjection, local: WorkflowTuiState
   body.push({text:`Estimated rate ${p.stats.estimatedTps === undefined ? '--' : p.stats.estimatedTps.toFixed(1)} tok/s (not measured)`});
   body.push({text:'Exact-one-review: unknown; independent receipts unavailable'});
   body.push({text:'Model labels: cfg = configured, obs = observed dispatch'});
-  body.push({text:'[#] executed [>] running [!] failed [-] stopped [.] pending'});
+  body.push({text:'[#] executed [>] running [!] failed [-] stopped [.] pending [?] unknown'});
   body.push({text:'Executed counts are not acceptance or review approval.'});
   for (const warning of p.warnings) {
    const text = clean('! '+warning); const size = Math.max(1,inner-2);
@@ -63,7 +63,7 @@ export function renderWorkflowTui(p: WorkflowProjection, local: WorkflowTuiState
  if (showWorkflow) {
   body.push({text: `${groupTitle} 1`});
   body.push({text: `> ${p.name}`});
-  body.push({text: `  Workflow | ${p.status} | ${elapsed(p.startedAt,p.endedAt ?? (p.status === 'running' ? new Date().toISOString() : undefined))}`});
+  body.push({text: `  Workflow | ${p.status} | ${elapsed(p.startedAt,p.endedAt ?? (p.status === 'running' && !workflowFinished(p) ? new Date().toISOString() : undefined))}`});
   const meta = p as WorkflowProjection & {agentCount?: number; description?: string};
   body.push({text: `  ${meta.agentCount === undefined ? '--' : meta.agentCount} agents | ${tokens(p.stats.observedTokens)} observed tokens`});
   if (meta.description) {
