@@ -27,7 +27,7 @@ export interface WorkflowProjection {
     runId: string;
     name: string;
     description?: string;
-    /** Unique observed agent identities; execution nodes are not agents. */
+    /** Unique dispatched agent identities; absent when legacy records lack dispatch evidence. */
     agentCount?: number;
     status: string;
     /** Producer lifecycle status; does not override incomplete evidence or grant acceptance. */
@@ -140,7 +140,8 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
     }
     const emittedNodeIds = new Set(events.filter(e => e.type === 'node.start' || e.type === 'node.end').map(e => (e.data as any)?.nodeId).filter(Boolean));
     const nodeIds = new Set([...declaredNodes, ...emittedNodeIds]);
-    const observedAgentIds = new Set(agentIds);
+    const observedAgentIds = new Set<string>();
+    let missingAgentIdentity = false;
     const endedNodes = new Set<string>();
     let currentPhase = 'Workflow';
     const starts = new Map<string, string>();
@@ -156,7 +157,9 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
             continue;
         const t = task(id);
         if (event.type === 'agent.start' || event.type === 'agent.end') {
-            observedAgentIds.add(id);
+            const agentId = typeof d.agentId === 'string' && d.agentId ? d.agentId : typeof event.agentId === 'string' && event.agentId ? event.agentId : undefined;
+            if (agentId) observedAgentIds.add(agentId);
+            else missingAgentIdentity = true;
             if (!nodeIds.has(id)) t.kind = 'agent';
         } else if (typeof d.type === 'string') t.kind = d.type;
         if (typeof d.phase === 'string')
@@ -228,6 +231,13 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
                 t.phase = parent.phase;
         }
     }
+    // The executor also writes agent-shaped review bookkeeping for process nodes.
+    // Only explicit dispatch events establish an exact count; unmatched legacy
+    // model/session records cannot safely be converted into a known count.
+    const uncertainAgentCount = missingAgentIdentity || records.some(a => !observedAgentIds.has(a.agentId) &&
+        !(['bash', 'script'].includes(tasks.get(a.agentId)?.kind ?? '') && !a.model && !a.sessionDir));
+    const agentCount = uncertainAgentCount ? undefined : observedAgentIds.size;
+    if (uncertainAgentCount) warnings.push('Agent count unavailable: legacy records lack explicit agent dispatch evidence.');
     for (const t of tasks.values()) {
         try {
             const meta = JSON.parse(read('artifacts/nodes/' + safe(t.id) + '.meta.json', true) || 'null');
@@ -272,7 +282,7 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
         throw new Error('Agent inventory changed during read; retry');
     warnings.push('File snapshot checked for concurrent changes; not an atomic producer checkpoint.');
     const sourceDigest = sha256(canonicalJson(sources));
-    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, description, agentCount: observedAgentIds.size, status, reportedStatus: run.status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
+    return { schemaVersion: 1, cursor: run.runId + ':' + sourceDigest, sourceDigest, runId: run.runId, name: run.workflow?.name ?? run.command ?? run.runId, description, agentCount, status, reportedStatus: run.status, startedAt: run.startedAt, endedAt: run.endedAt, phases: [...phases.values()], tasks: list, stats: { running: list.filter(t => t.state === 'running').length, finished: list.filter(t => terminal.has(t.state)).length, failed: list.filter(t => t.state === 'failed').length, cancelled: list.filter(t => t.state === 'cancelled').length, unreviewed: list.length, observedTokens: list.reduce((n, t) => n + (t.tokens ?? 0), 0), avgTps: tp.measured.tokensPerSecond, estimatedTps: tp.estimated.tokensPerSecond, measured: tp.coverage.measuredSamples, samples: tp.coverage.totalSamples, exactOneReview: null }, warnings };
 }
 /** Output only, scoped to a known task and validated against its store metadata. No arbitrary transcript paths. */
 export function readTaskOutput(runDir: string, taskId: string): string {

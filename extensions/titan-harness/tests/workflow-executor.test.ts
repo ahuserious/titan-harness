@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { readChain, sha256, verifyChain } from "../modules/hash-chain.ts";
 import { readLedger } from "../modules/ledger.ts";
+import { readWorkflowProjection } from "../modules/monitor/workflow-projection.ts";
 import { RunStore } from "../modules/run-store.ts";
 import { FULL_TOOLS, READONLY_TOOLS } from "../modules/runtime.ts";
 import { DEFAULT_STACK_SETTINGS } from "../modules/stack-config.ts";
@@ -793,4 +794,13 @@ test('workflow start captures immutable display inventory before node execution'
     { id: 'build', phase: 'Build', kind: 'bash', title: 'Exact label' },
     { id: 'review', phase: 'Review', kind: 'prompt', title: 'review', role: 'auditor' },
   ] });
+});
+
+
+test('review bookkeeping for a bash workflow does not count as an agent', async () => {
+  const h = harness();
+  await run(h, [{ id: 'process', bash: 'echo built', role: 'builder' }]);
+  expect(existsSync(join(h.runDir, 'agents', 'process.json'))).toBe(true);
+  expect(h.agentCalls).toHaveLength(0);
+  expect(readWorkflowProjection(h.runDir).agentCount).toBe(0);
 });
