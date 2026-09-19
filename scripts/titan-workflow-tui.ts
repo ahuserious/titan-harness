@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const args = process.argv.slice(2), at = args.indexOf('--run');
 if (at < 0 || !args[at+1] || args.includes('--help')) {
- console.log('Usage: bun scripts/titan-workflow-tui.ts --run <run-directory> [--once]\nRead-only workflow observer. J/K navigate, Enter expand, [/] scroll, H help, Q exit.');
+ console.log('Usage: bun scripts/titan-workflow-tui.ts --run <run-directory> [--once]\nRead-only workflow observer. A/R/F workflow groups, J/K navigate, Enter expand, [/] or mouse wheel scroll, H help, Q exit.');
  process.exit(at < 0 && !args.includes('--help') ? 2 : 0);
 }
 const runDir = path.resolve(args[at+1]);
