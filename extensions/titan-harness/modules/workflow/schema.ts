@@ -63,6 +63,9 @@ export const READONLY_TOOL_NAMES = ["read", "grep", "find", "ls"];
 
 // ═══ Document types ══════════════════════════════════════════════════════════
 
+export const JSON_SCHEMA_TYPES = ["string", "number", "integer", "boolean", "object", "array", "null"] as const;
+export type JsonSchemaType = (typeof JSON_SCHEMA_TYPES)[number];
+
 export interface JsonSchema {
 	type?: string | string[];
 	properties?: Record<string, JsonSchema>;
@@ -82,6 +85,8 @@ export interface InputSpec {
 	required?: boolean;
 	default?: unknown;
 	description?: string;
+	type?: JsonSchemaType | JsonSchemaType[];
+	schema?: JsonSchema;
 }
 
 export interface WorkflowTitan {
@@ -266,7 +271,7 @@ export type NodeDoc = NodeBase &
 // ═══ Known keys (unknown-key warnings live in the validator) ═════════════════
 
 export const TOP_LEVEL_KEYS = new Set(["apiVersion", "name", "description", "version", "inputs", "returns", "phases", "provider", "model", "thinking", "trigger", "titan", "nodes"]);
-export const INPUT_KEYS = new Set(["required", "default", "description"]);
+export const INPUT_KEYS = new Set(["required", "default", "description", "type", "schema"]);
 export const PHASE_KEYS = new Set(["title", "detail"]);
 export const TRIGGER_KEYS = new Set(["cron", "every", "event", "entity_profile"]);
 export const TITAN_KEYS = new Set(["level", "shape", "tier", "modes", "evidence", "elevation", "watchdog", "budget", "personas", "parent_run"]);

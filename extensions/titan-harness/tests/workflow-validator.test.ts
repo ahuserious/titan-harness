@@ -57,6 +57,58 @@ nodes:
     when: "$classify.output.kind == 'bug'"
 `;
 
+describe("validator: typed inputs", () => {
+  test("accepts shorthand, schemas, defaults, supported refs and equivalent type lists without warnings", () => {
+    const specs = {
+      title: { type: "string", default: "hi" },
+      count: { type: "integer", schema: { minimum: 1 }, default: 3 },
+      choice: { schema: { enum: ["a", "b"] }, default: "a" },
+      config: { schema: { type: "object", properties: { count: { type: "integer" } }, required: ["count"] }, default: { count: 3 } },
+      nullable: { type: ["string", "null"], schema: { type: ["null", "string"] }, default: null },
+      same: { type: "boolean", schema: { type: ["boolean"] }, default: false },
+      verdict: { schema: { $ref: "titan://schemas/audit-verdict" }, default: { verdict: "PASS", summary: "ok" } },
+      nestedRef: { schema: { type: "array", items: { $ref: "titan://schemas/audit-verdict" } } },
+    };
+    const result = validate(one("bash: echo ok", `inputs: ${JSON.stringify(specs)}\n`));
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(result.normalized?.inputs).toEqual(specs);
+  });
+
+  test.each<[string, unknown, string]>([
+    ["unknown shorthand type", { type: "str" }, "inputs.value.type"],
+    ["unknown union member", { type: ["string", "bogus"] }, "inputs.value.type"],
+    ["empty union", { type: [] }, "inputs.value.type"],
+    ["non-string type", { type: 7 }, "inputs.value.type"],
+    ["null type name must be quoted in YAML", { type: null }, "inputs.value.type"],
+    ["string schema", { schema: "string" }, "schema must be a mapping"],
+    ["array schema", { schema: [] }, "schema must be a mapping"],
+    ["null schema", { schema: null }, "schema must be a mapping"],
+    ["unknown schema type", { schema: { type: "str" } }, "inputs.value.schema.type"],
+    ["nested unknown type", { schema: { properties: { count: { type: "int" } } } }, "schema.properties.count.type"],
+    ["unknown ref", { schema: { $ref: "titan://schemas/missing" } }, "unresolvable $ref"],
+    ["foreign ref", { schema: { $ref: "https://example.test/schema" } }, "unresolvable $ref"],
+    ["nested ref", { schema: { items: { $ref: "missing" } } }, "schema.items.$ref"],
+    ["additional property ref", { schema: { additionalProperties: { $ref: "missing" } } }, "schema.additionalProperties.$ref"],
+    ["conflicting declarations", { type: "string", schema: { type: "integer" } }, "must equal schema.type"],
+    ["overlapping declarations are unequal", { type: "string", schema: { type: ["string", "null"] } }, "must equal schema.type"],
+    ["bad default type", { type: "integer", default: "3" }, "inputs.value.default $: expected integer"],
+    ["bad default enum", { schema: { enum: ["a", "b"] }, default: "c" }, "inputs.value.default $: expected one of"],
+    ["bad nested default", { schema: { type: "object", properties: { count: { type: "integer" } } }, default: { count: "bad" } }, "inputs.value.default $.count: expected integer"],
+    ["bad required default", { required: true, type: "integer", default: "bad" }, "inputs.value.default $: expected integer"],
+    ["null default is a value", { type: "string", default: null }, "inputs.value.default $: expected string"],
+    ["malformed enum", { schema: { enum: "a" }, default: "a" }, "schema.enum: must be a list"],
+    ["malformed required", { schema: { required: false }, default: {} }, "schema.required"],
+    ["malformed properties", { schema: { properties: [] } }, "schema.properties"],
+    ["malformed items", { schema: { items: false } }, "schema.items"],
+    ["malformed bounds", { schema: { minLength: -1 } }, "schema.minLength"],
+  ])("rejects %s", (_label, spec, message) => {
+    const result = validate(one("bash: echo ok", `inputs: { value: ${JSON.stringify(spec)} }\n`));
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((error) => error.rule === "inputs" && error.message.includes(message))).toBe(true);
+  });
+});
+
 describe("validator: green fixtures", () => {
   test("the base fixture is valid with no warnings and a normalized copy", () => {
     const result = validate(BASE);
@@ -377,7 +429,7 @@ describe("validator: warnings", () => {
     ["unknown node key", one(`prompt: "x"\ncolour: red`), "unknown-key", "colour"],
     ["unknown titan key", `${BASE}titan: { levels: 3 }\n`, "unknown-key", "titan.levels"],
     ["unknown loop key", one(`loop: { prompt: "p", until: X, max_iterations: 2, retries: 3 }`), "unknown-key", "loop.retries"],
-    ["unknown inputs key", `${BASE}inputs:\n  spec: { required: true, type: string }\n`, "unknown-key", "inputs.spec.type"],
+    ["unknown inputs key", `${BASE}inputs:\n  spec: { required: true, typo: string }\n`, "unknown-key", "inputs.spec.typo"],
     ["AI key on a bash node", one(`bash: "ls"\nmodel: xai/grok-4.6`), "ignored-key", "ignored on bash"],
     ["AI key on a script node", one(`script: "print(1)"\nruntime: uv\nallowed_tools: []`), "ignored-key", "ignored on script"],
     ["runtime on a prompt node", one(`prompt: "x"\nruntime: bun`), "ignored-key", "only applies to script"],

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AUDIT_VERDICT_SCHEMA, jsonTypeOf, resolveRef, validateJson } from "../modules/workflow/json-schema.ts";
+import { AUDIT_VERDICT_SCHEMA, jsonTypeOf, resolveRef, validateJson, validateSchema } from "../modules/workflow/json-schema.ts";
 import {
   AI_NODE_TYPES,
   API_VERSION,
@@ -149,6 +149,18 @@ describe("parseWhen", () => {
 });
 
 describe("json-schema validateJson", () => {
+  test.each([NaN, Infinity, -Infinity])("number schemas reject non-finite value %s", (value) => {
+    expect(validateJson(value, { type: "number" })).toEqual([{ path: "$", message: expect.stringContaining("expected number") }]);
+  });
+
+  test("schema definition validation rejects cycles while allowing shared subschemas", () => {
+    const cyclic: any = { type: "object", properties: {} };
+    cyclic.properties.self = cyclic;
+    expect(validateSchema(cyclic)).toEqual([{ path: "$.properties.self", message: "schema must not contain a cycle" }]);
+    const sub = { type: "integer" };
+    expect(validateSchema({ properties: { a: sub, b: sub } })).toEqual([]);
+  });
+
   test("jsonTypeOf names integers, numbers, arrays, objects and null", () => {
     expect([1, 1.5, "s", true, null, [], {}, undefined].map(jsonTypeOf)).toEqual(["integer", "number", "string", "boolean", "null", "array", "object", "undefined"]);
   });

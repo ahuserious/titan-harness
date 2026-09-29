@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -21,6 +21,7 @@ import {
   executeWorkflow,
   formatPlan,
   resolveInputs,
+  WorkflowInputError,
 } from "../modules/workflow/executor.ts";
 import type { LoadedWorkflow } from "../modules/workflow/loader.ts";
 import { resolveTools } from "../modules/workflow/nodes/ai.ts";
@@ -654,6 +655,38 @@ describe("executor: process nodes, mcp_tool, workflow and P4 stubs", () => {
 });
 
 describe("executor: inputs, parallelism, dry run and abort", () => {
+  test("typed input refusal precedes all node handlers, events, logs and dry-run notifications", async () => {
+    const h = harness();
+    const nodes: NodeDoc[] = [{ id: "a", prompt: "x" }, { id: "b", bash: "echo x" }, { id: "s", script: "console.log(1)", runtime: "bun" }];
+    const doc: Partial<WorkflowDoc> = { inputs: { count: { type: "integer" }, title: { type: "string" } } };
+    for (const dryRun of [false, true]) {
+      const failure = await run(h, nodes, { inputs: { count: 1.5, title: false }, dryRun }, doc).catch((error) => error);
+      expect(failure).toBeInstanceOf(WorkflowInputError);
+      expect(failure.errors.map((error: { input: string }) => error.input)).toEqual(["count", "title"]);
+      expect(failure.message).toContain("count $: expected integer");
+      expect(failure.message).toContain("title $: expected string");
+    }
+    expect(h.agentCalls).toEqual([]);
+    expect(h.bashCalls).toEqual([]);
+    expect(h.scriptCalls).toEqual([]);
+    expect(h.notices).toEqual([]);
+    expect(events(h)).toEqual([]);
+    expect(existsSync(join(h.runDir, "events.jsonl"))).toBe(false);
+    expect(readdirSync(join(h.runDir, "artifacts", "nodes"))).toEqual([]);
+  });
+
+  test("a workflow node passes parent inputs into a typed child, which refuses before its nodes run", async () => {
+    const child = harness();
+    const parent = harness({ runWorkflow: async (_name, inputs) => run(child, [{ id: "child-node", prompt: "x" }], { inputs }, { inputs: { count: { type: "integer" } } }) });
+    const result = await run(parent, [{ id: "child", workflow: { name: "typed-child" }, retry: { max_attempts: 1 } }], { inputs: { count: "bad" } });
+    expect(result.status).toBe("failed");
+    expect(result.nodes.child.error).toContain("count $: expected integer");
+    expect(child.agentCalls).toEqual([]);
+    expect(child.notices).toEqual([]);
+    expect(events(child)).toEqual([]);
+    expect(existsSync(join(child.runDir, "events.jsonl"))).toBe(false);
+  });
+
   test("inputs: required, defaults and $inputs.key", async () => {
     const doc = { inputs: { spec: { required: true }, design: { default: "design/dashboard.png" } } } as Partial<WorkflowDoc>;
     expect(resolveInputs({ apiVersion: "titan.harness/v1", name: "t", nodes: [], ...doc } as WorkflowDoc, { spec: "s.md", extra: 1 })).toEqual({ spec: "s.md", design: "design/dashboard.png", extra: 1 });
