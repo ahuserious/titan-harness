@@ -87,20 +87,12 @@ export function limitFrom(budget: DeclaredBudget | undefined): BudgetLimit {
 	return limit;
 }
 
-/**
- * The worst case one agent call may cost: the node's per-call cap, else the workflow's
- * (titan.budget.per_call_*), else the defaults; never more than the node's own total budget.
- * The defaults are deliberately not clamped to a workflow total: an undeclared worst case is
- * one full child session, and a budget smaller than that must say what one call may cost.
- */
-export function perCallCap(node: DeclaredBudget | undefined, workflow: DeclaredBudget | undefined): BudgetAmount {
-	const usd = [node?.per_call_usd, workflow?.per_call_usd].find((v) => finite(v) && v >= 0) ?? DEFAULT_PER_CALL_USD;
-	const tokens = [node?.per_call_tokens, workflow?.per_call_tokens].find((v) => finite(v) && v >= 0) ?? DEFAULT_PER_CALL_TOKENS;
-	let usdMicros = usdToMicrosCeil(usd);
-	let tok = tokensInt(tokens);
-	if (node && finite(node.usd) && node.usd >= 0) usdMicros = Math.min(usdMicros, usdToMicrosFloor(node.usd));
-	if (node && finite(node.tokens) && node.tokens >= 0) tok = Math.min(tok, Math.floor(node.tokens));
-	return { usdMicros, tokens: tok };
+/** A declared budget's per-call worst case (per_call_*), only the dimensions it names (> 0). */
+export function perCallFrom(budget: DeclaredBudget | undefined): Partial<BudgetAmount> {
+	const out: Partial<BudgetAmount> = {};
+	if (budget && finite(budget.per_call_usd) && budget.per_call_usd > 0) out.usdMicros = usdToMicrosCeil(budget.per_call_usd);
+	if (budget && finite(budget.per_call_tokens) && budget.per_call_tokens > 0) out.tokens = tokensInt(budget.per_call_tokens);
+	return out;
 }
 
 // ═══ Scopes ══════════════════════════════════════════════════════════════════
@@ -110,23 +102,101 @@ interface Root {
 	nextReservation: number;
 }
 
+export interface BudgetScopeOptions {
+	/** "workflow" for a run's titan.budget scope, "node" for a node's (default). */
+	kind?: "workflow" | "node";
+	/** The per_call_* this scope's document declares (perCallFrom). Inherited by every scope below it. */
+	perCall?: Partial<BudgetAmount>;
+	/** Workflow scopes: titan.budget.allow_unmetered_runners. */
+	allowUnmeteredRunners?: boolean;
+}
+
 export class BudgetScope {
 	readonly spent: BudgetAmount = { usdMicros: 0, tokens: 0 };
 	readonly reserved: BudgetAmount = { usdMicros: 0, tokens: 0 };
 	/** Charges above their reservation, summed (already included in `spent`). */
 	readonly overrun: BudgetAmount = { usdMicros: 0, tokens: 0 };
 	private readonly root: Root;
+	readonly kind: "workflow" | "node";
+	readonly perCall: Partial<BudgetAmount>;
+	readonly allowUnmeteredRunners: boolean;
 
 	constructor(
 		readonly label: string,
 		readonly limit: BudgetLimit = {},
 		readonly parent?: BudgetScope,
+		options: BudgetScopeOptions = {},
 	) {
 		this.root = parent ? parent.root : { waiters: [], nextReservation: 0 };
+		this.kind = options.kind ?? "node";
+		this.perCall = { ...(options.perCall ?? {}) };
+		this.allowUnmeteredRunners = options.allowUnmeteredRunners === true;
 	}
 
-	child(label: string, limit: BudgetLimit = {}): BudgetScope {
-		return new BudgetScope(label, limit, this);
+	child(label: string, limit: BudgetLimit = {}, options: BudgetScopeOptions = {}): BudgetScope {
+		return new BudgetScope(label, limit, this, options);
+	}
+
+	/**
+	 * The per-call worst case this scope inherits: per dimension, the LARGEST per_call_* declared
+	 * anywhere on the chain (so a child workflow or a node can never lower what its ancestors
+	 * reserve per call), else the default.
+	 */
+	effectivePerCall(): BudgetAmount {
+		let usd: number | undefined;
+		let tokens: number | undefined;
+		for (const s of this.chain()) {
+			if (s.perCall.usdMicros !== undefined) usd = Math.max(usd ?? 0, s.perCall.usdMicros);
+			if (s.perCall.tokens !== undefined) tokens = Math.max(tokens ?? 0, s.perCall.tokens);
+		}
+		return { usdMicros: usd ?? usdToMicrosCeil(DEFAULT_PER_CALL_USD), tokens: tokens ?? DEFAULT_PER_CALL_TOKENS };
+	}
+
+	/** True when any scope of the chain limits `dimension`. */
+	limits(dimension: BudgetDimension): boolean {
+		return this.chain().some((s) => (dimension === "usd" ? s.limit.usdMicros : s.limit.tokens) !== undefined);
+	}
+
+	/** The smallest limit − spent (reservations NOT subtracted) over the chain's limited scopes; undefined when none limits `dimension`. */
+	unspent(dimension: BudgetDimension): number | undefined {
+		let min: number | undefined;
+		for (const s of this.chain()) {
+			const limit = dimension === "usd" ? s.limit.usdMicros : s.limit.tokens;
+			if (limit === undefined) continue;
+			const left = limit - s.used(dimension);
+			min = min === undefined ? left : Math.min(min, left);
+		}
+		return min;
+	}
+
+	/** The smallest limit − spent − reserved over the chain's limited scopes; undefined when none limits `dimension`. */
+	chainRemaining(dimension: BudgetDimension): number | undefined {
+		let min: number | undefined;
+		for (const s of this.chain()) {
+			const left = s.remaining(dimension);
+			if (left === undefined) continue;
+			min = min === undefined ? left : Math.min(min, left);
+		}
+		return min;
+	}
+
+	/**
+	 * May a paid verify runner that spends outside the agent seam run here? Only when every
+	 * workflow on the chain whose own scope or node scope (on this chain) carries a limit
+	 * declares titan.budget.allow_unmetered_runners: true — a child can never opt its parent in.
+	 */
+	unmeteredRunnersAllowed(): boolean {
+		let limitedBelow = false;
+		for (const s of this.chain()) {
+			const limited = s.limit.usdMicros !== undefined || s.limit.tokens !== undefined;
+			if (s.kind === "node") {
+				limitedBelow = limitedBelow || limited;
+				continue;
+			}
+			if ((limited || limitedBelow) && !s.allowUnmeteredRunners) return false;
+			limitedBelow = false;
+		}
+		return !limitedBelow;
 	}
 
 	/** This scope and every ancestor, leaf first. */
@@ -158,6 +228,27 @@ export class BudgetScope {
 	}
 }
 
+/**
+ * The reservation one agent call takes NOW (computed at reserve time, again after every wait):
+ * per limited dimension, min(effectivePerCall, the chain's smallest limit − spent), floored at
+ * 1 micro-USD / 1 token — never 0, so a zero or exhausted budget always refuses and a fan-out
+ * can never over-commit on free reservations. With no per_call_* anywhere the default is
+ * clamped the same way, so a node or workflow budget can be spent to its last micro across
+ * retries, loop iterations and fan-out calls. A dimension no scope limits reserves the
+ * effective per-call amount (it is tracked, never refused).
+ */
+export function reservationFor(scope: BudgetScope): BudgetAmount {
+	const effective = scope.effectivePerCall();
+	const out: BudgetAmount = { ...effective };
+	for (const dimension of ["usd", "tokens"] as const) {
+		const unspent = scope.unspent(dimension);
+		if (unspent === undefined) continue;
+		const key = dimension === "usd" ? "usdMicros" : "tokens";
+		out[key] = Math.max(1, Math.min(effective[key], unspent));
+	}
+	return out;
+}
+
 export interface BudgetReservation {
 	id: string;
 	scope: BudgetScope;
@@ -178,7 +269,9 @@ export interface BudgetRefusal {
 export type ReserveResult = { ok: true; reservation: BudgetReservation } | { ok: false; refusal: BudgetRefusal };
 
 export function reserve(scope: BudgetScope, amount: BudgetAmount, idPrefix = "res"): ReserveResult {
-	const need: BudgetAmount = { usdMicros: Math.max(0, Math.ceil(amount.usdMicros)), tokens: tokensInt(amount.tokens) };
+	// A limited dimension never reserves 0, so remaining ≤ 0 always refuses (a zero or spent budget is fail-closed).
+	const floor = (dimension: BudgetDimension, value: number): number => Math.max(scope.limits(dimension) ? 1 : 0, Math.ceil(finite(value) ? value : 0));
+	const need: BudgetAmount = { usdMicros: floor("usd", amount.usdMicros), tokens: floor("tokens", amount.tokens) };
 	let firstHard: BudgetRefusal | undefined;
 	let firstTransient: BudgetRefusal | undefined;
 	for (const s of scope.chain()) {
@@ -205,49 +298,116 @@ export function reserve(scope: BudgetScope, amount: BudgetAmount, idPrefix = "re
 	return { ok: true, reservation: { id: `${idPrefix}-${root.nextReservation}`, scope, amount: need } };
 }
 
+/**
+ * Where a call's usage came from (the agent runner sets it on AgentResult.usage.provenance):
+ *   complete        the child ran to its own exit and reported usage → charge what it reported
+ *   partial         interrupted (aborted, timed out, pre-empted, budget-halted, thrown) after
+ *                   reporting some usage: the turn in progress is unbilled → charge
+ *                   max(reported, reservation) per dimension
+ *   none            no usage is known (thrown / aborted before any usage event / exited
+ *                   without reporting) → charge the full reservation
+ *   not-dispatched  provably no child was started (no model, aborted while queued, a
+ *                   held-spend refusal, a synchronous agent throw) → charge 0
+ * Undefined provenance (a runner that predates it) is treated as "complete": its reported
+ * numbers are charged and any dimension it did not report is charged at the reservation.
+ */
+export type UsageProvenance = "complete" | "partial" | "none" | "not-dispatched";
+
 export interface BudgetActual {
 	usd?: number;
 	tokens?: number;
+	provenance?: UsageProvenance;
 }
+
+export type SettlementBasis = "reported" | "reservation" | "partial" | "not-dispatched";
 
 export interface BudgetSettlement {
 	reservationId: string;
 	reserved: BudgetAmount;
 	charged: BudgetAmount;
-	/** Per dimension: "reported" = the child's usage, "reservation" = unknown, charged at the full reservation. */
-	basis: { usd: "reported" | "reservation"; tokens: "reported" | "reservation" };
+	/**
+	 * Per dimension: "reported" = the child's usage; "reservation" = unknown, charged at the full
+	 * reservation; "partial" = max(reported, reservation) for an interrupted call;
+	 * "not-dispatched" = no child ran, charged 0.
+	 */
+	basis: { usd: SettlementBasis; tokens: SettlementBasis };
+	/** Tokens were reported but cost was 0 under a USD limit: the USD reservation was charged instead of $0. */
+	costUnknown?: boolean;
 	overrun?: BudgetAmount;
 }
 
 export function settle(reservation: BudgetReservation, actual?: BudgetActual): BudgetSettlement {
 	if (reservation.settled) return reservation.settled;
-	const usdKnown = finite(actual?.usd) && actual!.usd! >= 0;
-	const tokensKnown = finite(actual?.tokens) && actual!.tokens! >= 0;
-	const charged: BudgetAmount = {
-		usdMicros: usdKnown ? usdToMicrosCeil(actual!.usd!) : reservation.amount.usdMicros,
-		tokens: tokensKnown ? tokensInt(actual!.tokens!) : reservation.amount.tokens,
-	};
-	const over: BudgetAmount = { usdMicros: Math.max(0, charged.usdMicros - reservation.amount.usdMicros), tokens: Math.max(0, charged.tokens - reservation.amount.tokens) };
+	const provenance: UsageProvenance = actual?.provenance ?? "complete";
+	const res = reservation.amount;
+	const charged: BudgetAmount = { usdMicros: 0, tokens: 0 };
+	const basis: BudgetSettlement["basis"] = { usd: "not-dispatched", tokens: "not-dispatched" };
+	let costUnknown = false;
+	if (provenance !== "not-dispatched") {
+		const usdKnown = provenance !== "none" && finite(actual?.usd) && actual!.usd! >= 0;
+		const tokensKnown = provenance !== "none" && finite(actual?.tokens) && actual!.tokens! >= 0;
+		const observedUsd = usdKnown ? usdToMicrosCeil(actual!.usd!) : 0;
+		const observedTokens = tokensKnown ? tokensInt(actual!.tokens!) : 0;
+		const pick = (known: boolean, observed: number, reserved: number): [number, SettlementBasis] =>
+			!known ? [reserved, "reservation"] : provenance === "partial" ? [Math.max(observed, reserved), "partial"] : [observed, "reported"];
+		[charged.usdMicros, basis.usd] = pick(usdKnown, observedUsd, res.usdMicros);
+		[charged.tokens, basis.tokens] = pick(tokensKnown, observedTokens, res.tokens);
+		// Tokens but a $0 cost (subscription/OAuth or unpriced models) never settles a USD budget at $0.
+		if (basis.usd === "reported" && charged.usdMicros === 0 && observedTokens > 0 && reservation.scope.limits("usd")) {
+			charged.usdMicros = res.usdMicros;
+			basis.usd = "reservation";
+			costUnknown = true;
+		}
+	}
+	const over: BudgetAmount = { usdMicros: Math.max(0, charged.usdMicros - res.usdMicros), tokens: Math.max(0, charged.tokens - res.tokens) };
 	for (const s of reservation.scope.chain()) {
-		s.reserved.usdMicros -= reservation.amount.usdMicros;
-		s.reserved.tokens -= reservation.amount.tokens;
+		s.reserved.usdMicros -= res.usdMicros;
+		s.reserved.tokens -= res.tokens;
 		s.spent.usdMicros += charged.usdMicros;
 		s.spent.tokens += charged.tokens;
 		s.overrun.usdMicros += over.usdMicros;
 		s.overrun.tokens += over.tokens;
 	}
-	const settlement: BudgetSettlement = {
-		reservationId: reservation.id,
-		reserved: { ...reservation.amount },
-		charged,
-		basis: { usd: usdKnown ? "reported" : "reservation", tokens: tokensKnown ? "reported" : "reservation" },
-	};
+	const settlement: BudgetSettlement = { reservationId: reservation.id, reserved: { ...res }, charged, basis };
+	if (costUnknown) settlement.costUnknown = true;
 	if (over.usdMicros > 0 || over.tokens > 0) settlement.overrun = over;
 	reservation.settled = settlement;
-	const root = reservation.scope._root();
-	const waiters = root.waiters.splice(0);
-	for (const wake of waiters) wake();
+	wakeWaiters(reservation.scope);
 	return settlement;
+}
+
+function wakeWaiters(scope: BudgetScope): void {
+	const waiters = scope._root().waiters.splice(0);
+	for (const wake of waiters) wake();
+}
+
+/**
+ * Charge spend that had no reservation (an opted-in unmetered verify runner's reported
+ * externalCostUsd) to every scope of the chain. It can push a scope past its limit; later
+ * reservations are then refused.
+ */
+export function chargeUnreserved(scope: BudgetScope, amount: BudgetAmount): void {
+	const add = { usdMicros: Math.max(0, Math.ceil(amount.usdMicros)), tokens: Math.max(0, Math.ceil(amount.tokens)) };
+	for (const s of scope.chain()) {
+		s.spent.usdMicros += add.usdMicros;
+		s.spent.tokens += add.tokens;
+	}
+	wakeWaiters(scope);
+}
+
+/**
+ * The live in-flight cap of a dispatched reservation, per limited dimension: min(the
+ * reservation, the reservation + what the chain has left now). Re-read on every usage event
+ * so an overrun elsewhere shrinks it. Undefined for a dimension no scope limits.
+ */
+export function spendCapOf(reservation: BudgetReservation): { usdMicros?: number; tokens?: number } {
+	const cap: { usdMicros?: number; tokens?: number } = {};
+	const scope = reservation.scope;
+	const usdLeft = scope.chainRemaining("usd");
+	if (usdLeft !== undefined) cap.usdMicros = Math.max(0, Math.min(reservation.amount.usdMicros, reservation.amount.usdMicros + usdLeft));
+	const tokensLeft = scope.chainRemaining("tokens");
+	if (tokensLeft !== undefined) cap.tokens = Math.max(0, Math.min(reservation.amount.tokens, reservation.amount.tokens + tokensLeft));
+	return cap;
 }
 
 /** Resolve at the next settle under `scope`'s root; reject (name "AbortError") when `signal` fires. */

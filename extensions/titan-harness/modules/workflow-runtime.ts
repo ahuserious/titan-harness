@@ -40,6 +40,7 @@ import type { runChild as RunChild } from "./child-runner.ts";
 import type { ModelSlot, Thinking } from "./model-stack.ts";
 import type { RunStore } from "./run-store.ts";
 import { type AgentRun, newRun, type Role, runError, runOk } from "./runtime.ts";
+import type { UsageProvenance } from "./workflow/budget.ts";
 import type { StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
@@ -112,6 +113,21 @@ const PRIORITY_ROLES: SlotRole[] = ["auditor", "verifier", "watchdog"];
 
 const asThinking = (value: string | undefined): Thinking => (THINKING_ORDER.includes(value as Thinking) ? (value as Thinking) : "medium");
 
+/**
+ * How far a settled run's usage can be trusted for workflow budgets (budget.ts UsageProvenance):
+ *   not-dispatched  no child process was started (aborted while queued, a held-spend refusal)
+ *   none            the child threw, or ended (aborted, crashed, timed out, exited) before any usage event
+ *   partial         it reported usage but was interrupted (aborted, timed out, pre-empted, budget-halted,
+ *                   killed/crashed without a clean exit): the turn in progress was never billed
+ *   complete        it exited on its own with usage reported
+ */
+export function usageProvenanceOf(run: AgentRun, threw = false): UsageProvenance {
+	if (run.notDispatched) return "not-dispatched";
+	if (threw || !run.usageSeen) return "none";
+	const interrupted = run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || run.exitCode !== 0;
+	return interrupted ? "partial" : "complete";
+}
+
 /** The AgentResult a settled AgentRun means. */
 export function resultOf(run: AgentRun): AgentResult {
 	const ok = run.status === "done" && runOk(run);
@@ -120,7 +136,7 @@ export function resultOf(run: AgentRun): AgentResult {
 		text: run.text,
 		sessionRef: run.sessionRef,
 		usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds },
-		error: ok ? undefined : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
+		error: ok ? undefined : run.budgetHalted ? "stopped: budget in-flight cap exceeded" : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
 		toolCalls: run.toolCalls,
 		model: run.model,
 	};
@@ -132,7 +148,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 	const resultCounters = new Map<string, number>();
 	return async (req) => {
 		if (!req.model) {
-			return { ok: false, text: "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 }, error: `${req.nodeId}: no model resolved for role ${req.role}`, toolCalls: 0 };
+			return { ok: false, text: "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 }, usageProvenance: "not-dispatched", error: `${req.nodeId}: no model resolved for role ${req.role}`, toolCalls: 0 };
 		}
 		const slot = host.slotFor?.(req);
 		const run = newRun(transcriptRole(req.role), req.model, slot);
@@ -154,6 +170,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 			extraTools.push(SUBMIT_RESULT_TOOL);
 			if (!prompt.trimEnd().endsWith(SUBMIT_RESULT_INSTRUCTION)) prompt = `${prompt}\n\n${SUBMIT_RESULT_INSTRUCTION}`;
 		}
+		let threw = false;
 		try {
 			await host.runChild({
 				run,
@@ -170,8 +187,10 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 				priority: PRIORITY_ROLES.includes(req.role),
 				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks), ...schemaEnvironment },
 				...(extraTools.length ? { extraTools } : {}),
+				...(req.spendCap ? { spendCap: req.spendCap } : {}),
 			});
 		} catch (error) {
+			threw = true;
 			run.status = "failed";
 			run.errorMessage = error instanceof Error ? error.message : String(error);
 		}
@@ -193,6 +212,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 			/* bookkeeping never fails a node */
 		}
 		const result: StructuredAgentResult = resultOf(run);
+		result.usageProvenance = usageProvenanceOf(run, threw);
 		if (resultPath) result.resultPath = resultPath;
 		if (value !== undefined) result.value = value;
 		return result;

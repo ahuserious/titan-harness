@@ -41,6 +41,30 @@ export function piInvocation(args: string[]): { command: string; args: string[] 
 	return { command: "pi", args };
 }
 
+/** A live in-flight spend cap (workflow budgets): micro-USD and/or tokensIn+tokensOut; an absent dimension is uncapped. */
+export interface SpendCap {
+	usdMicros?: number;
+	tokens?: number;
+}
+
+/**
+ * May the watchdog pre-empt this child (halt it, run an inspector on the architect's model,
+ * then re-dispatch)? Not when a workflow budget meters the call (`spendCap` set): the
+ * inspector and the re-dispatch would spend outside the call's reservation, so pre-emption
+ * is refused for budgeted calls and the child simply runs on under its in-flight cap.
+ */
+export function watchdogPreemptionAllowed(opts: { spendCap?: unknown }): boolean {
+	return !opts.spendCap;
+}
+
+/** True when the run's observed spend exceeds `cap` in any capped dimension. */
+export function overSpendCap(run: Pick<AgentRun, "costUsd" | "tokensIn" | "tokensOut">, cap: SpendCap | undefined): boolean {
+	if (!cap) return false;
+	if (typeof cap.usdMicros === "number" && Math.ceil(Math.round(run.costUsd * 1e9) / 1e3) > cap.usdMicros) return true;
+	if (typeof cap.tokens === "number" && run.tokensIn + run.tokensOut > cap.tokens) return true;
+	return false;
+}
+
 /**
  * Spawn one `pi --mode json -p` child agent and stream its JSON events into `run`.
  * Final answer = last assistant text part. The child writes its session into a
@@ -77,6 +101,7 @@ export function runChild(opts: {
 	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
 	extraTools?: string[]; // extension tools appended AFTER the /stack policy (structured output v2: `submit_result` must survive subagentTools=off and --no-tools)
 	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
+	spendCap?: () => SpendCap | undefined; // workflow budgets: re-read after every usage update; observed spend above it kills the child at once (run.budgetHalted = true) — the overrun is bounded by one message
 }): Promise<AgentRun> {
 	const run = opts.run;
 	run.thinking = opts.thinking;
@@ -124,6 +149,7 @@ export function runChild(opts: {
 		(lease) => runChildWithLease(opts, args, lease),
 		() => {
 			// Aborted while queued behind the cap: settle without spawning.
+			run.notDispatched = true;
 			run.status = "aborted";
 			run.startedAt = Date.now();
 			run.endedAt = run.startedAt;
@@ -145,6 +171,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 		// Already stopped before this stage began (e.g. escape during the previous agent):
 		// settle without spawning, so an abort never starts new model work.
 		if (opts.signal?.aborted) {
+			run.notDispatched = true;
 			run.status = "aborted";
 			run.startedAt = started;
 			run.endedAt = started;
@@ -182,6 +209,20 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				/* the watchdog never breaks a child */
 			}
 		};
+		// Workflow budgets: a child whose observed spend passes its cap is killed at once (not at a tool boundary).
+		const checkSpend = () => {
+			if (!opts.spendCap || run.budgetHalted || closed) return;
+			let cap: SpendCap | undefined;
+			try {
+				cap = opts.spendCap();
+			} catch {
+				return;
+			}
+			if (overSpendCap(run, cap)) {
+				run.budgetHalted = true;
+				killChild();
+			}
+		};
 		// One line of the child's JSON event stream → the relevant AgentRun mutation.
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
@@ -213,6 +254,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				if (msg.stopReason) run.stopReason = msg.stopReason;
 				if (msg.errorMessage) run.errorMessage = msg.errorMessage;
 				if (msg.usage) {
+					run.usageSeen = true;
 					// Prompt tokens = input + cacheRead + cacheWrite (pi's own definition, see
 					// core/cache-stats.ts). cacheWrite is NOT optional accounting: on a cold
 					// cache the WHOLE prompt is billed as a write and `input` is only the few
@@ -236,6 +278,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 					// an assignment, not a sum, so counting one would clobber a real reading with 0.
 					if (ctxTokens > 0) run.ctxTokens = ctxTokens;
 					checkUsage();
+					checkSpend();
 				}
 			} else if (event.type === "tool_execution_start") {
 				run.toolCalls++;
@@ -278,6 +321,11 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 			if (run.preempted) {
 				run.status = "aborted";
 				run.stopReason = "preempted";
+			}
+			if (run.budgetHalted) {
+				run.status = "aborted";
+				run.stopReason = "budget";
+				run.errorMessage = "stopped: observed spend exceeded the workflow budget's in-flight cap";
 			}
 			run.streamText = "";
 			run.streamThinking = "";

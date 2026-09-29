@@ -24,12 +24,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { NodeHandler, NodeOutcome } from "../executor.ts";
-import { isBudgetExceeded } from "../budget.ts";
+import { chargeUnreserved, isBudgetExceeded, usdToMicrosCeil } from "../budget.ts";
 import { buildEvidence, type CitationDoc, type EvidenceArtifact, type EvidenceKind, type EvidenceSource, hashArtifact, writeEvidencePackage } from "../evidence.ts";
 import { isRunnerName, type RunnerContext, type RunnerResult, RUNNERS, runnerFetch } from "../runners/index.ts";
 import type { JsonSchema, SlotRole, VerifySpec } from "../schema.ts";
 import { evidenceRequirement, tierFor } from "../tiers.ts";
 import { callAgent } from "./ai.ts";
+
+/**
+ * Verify runners that spend real money outside the agent seam (Cursor background agents, Kane,
+ * TestMu and Momentic cloud runs). Under a workflow budget they are refused unless every
+ * limited workflow on the chain sets titan.budget.allow_unmetered_runners: true; an opted-in
+ * run's reported externalCostUsd (cursor-cloud reports one) is charged to the chain afterwards.
+ */
+export const UNMETERED_PAID_RUNNERS = new Set(["cursor-cloud", "kane", "testmu", "momentic"]);
 
 const SUBSTITUTED_PROMPT_FIELDS = ["objective", "input", "ref", "repo", "api_base"];
 
@@ -81,6 +89,13 @@ export const runVerifyNode: NodeHandler = async (ctx): Promise<NodeOutcome> => {
 	const raw = (ctx.node as { verify?: VerifySpec }).verify;
 	if (!raw || typeof raw !== "object") return { status: "failed", output: undefined, error: "verify node has no verify: mapping", retryable: false };
 	if (!isRunnerName(raw.runner)) return { status: "failed", output: undefined, error: `verify.runner ${JSON.stringify(raw.runner)} is not a runner (bash, kane, testmu, momentic, cursor-cloud, orca-browser, verifier)`, retryable: false };
+	const budgetScope = ctx.budgetScope;
+	if (UNMETERED_PAID_RUNNERS.has(raw.runner) && budgetScope?.enforced() && !budgetScope.unmeteredRunnersAllowed()) {
+		const error = `budget: verify runner ${raw.runner} spends outside the workflow budget (unmetered); refused while a budget applies — set titan.budget.allow_unmetered_runners: true to allow it`;
+		ctx.log("budget.refused", { runner: raw.runner, unmetered: true, scope: budgetScope.label, error });
+		ctx.notify(`${ctx.node.id}: ${error}`, "error");
+		return { status: "failed", output: undefined, error, retryable: false, meta: { budget: { scope: budgetScope.label, unmeteredRunner: raw.runner } } };
+	}
 	const spec: VerifySpec = { ...raw };
 	for (const field of SUBSTITUTED_PROMPT_FIELDS) if (typeof spec[field] === "string") spec[field] = ctx.subst(spec[field] as string, "prompt");
 	if (typeof spec.command === "string") spec.command = ctx.subst(spec.command, "bash");
@@ -129,6 +144,12 @@ export const runVerifyNode: NodeHandler = async (ctx): Promise<NodeOutcome> => {
 	const meta: Record<string, unknown> = { verification: { runner: spec.runner, runnerStatus: result.status, evidenceStatus: pkg.status, missing: pkg.missingInformation, evidencePath: written.path, evidenceSha256: written.sha256 } };
 	const rawResult = result.raw && typeof result.raw === "object" ? (result.raw as Record<string, unknown>) : undefined;
 	if (rawResult?.provider === "cursor") meta.externalLedger = { provider: "cursor", source: "external", origin: "cursor", costUsd: typeof rawResult.externalCostUsd === "number" ? rawResult.externalCostUsd : 0, agentId: rawResult.agentId };
+	// An opted-in unmetered runner under a budget: charge what it reported (nothing reserved, so it may overrun).
+	if (UNMETERED_PAID_RUNNERS.has(spec.runner) && budgetScope?.enforced()) {
+		const externalCostUsd = typeof rawResult?.externalCostUsd === "number" && Number.isFinite(rawResult.externalCostUsd) && rawResult.externalCostUsd >= 0 ? rawResult.externalCostUsd : undefined;
+		if (externalCostUsd !== undefined) chargeUnreserved(budgetScope, { usdMicros: usdToMicrosCeil(externalCostUsd), tokens: 0 });
+		ctx.log("budget.unmetered", { runner: spec.runner, externalCostUsd, charged: externalCostUsd !== undefined, workflow: budgetScope.label });
+	}
 	const text = `${result.summary}\nevidence: ${pkg.status}${pkg.missingInformation.length ? `\n${pkg.missingInformation.map((line) => `- ${line}`).join("\n")}` : ""}`;
 	if (result.status === "skipped") {
 		if (spec.optional === true) return { status: "success", output, text, meta };

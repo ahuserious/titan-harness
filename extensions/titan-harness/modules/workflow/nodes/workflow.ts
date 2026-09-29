@@ -10,7 +10,8 @@
  * runtime without deps.runWorkflow fails the node without retries. Every child run gets this
  * node's budget scope as `parentBudget` (budget.ts): a child — or a fan-out of children
  * together — can never spend more than this node's, this workflow's and every ancestor's
- * remainder, whatever the child declares.
+ * remainder, whatever the child declares. A child run that failed on a hard budget refusal
+ * (RunResult.budgetRefused) fails this node with retryable:false.
  */
 import type { NodeHandler, RunResult } from "../executor.ts";
 import type { TriggerRule } from "../schema.ts";
@@ -43,7 +44,9 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 		const child = await run(spec.name, baseInputs, { parentBudget: ctx.budgetScope });
 		const text = typeof child.returns === "string" ? child.returns : child.returns === undefined ? "" : `${JSON.stringify(child.returns, null, 2)}\n`;
 		if (child.status === "completed") return { status: "success", output: child.returns, text, meta: { childRunId: child.runId } };
-		return { status: "failed", output: undefined, text, error: `child workflow ${spec.name} ${child.status}${child.error ? `: ${child.error}` : ""}`, meta: { childRunId: child.runId } };
+		// A child that failed on a hard budget refusal is never re-run: a retry would spend its early nodes again and be refused anyway.
+		const refused = child.budgetRefused;
+		return { status: "failed", output: undefined, text, error: `child workflow ${spec.name} ${child.status}${child.error ? `: ${child.error}` : ""}`, meta: { childRunId: child.runId, ...(refused ? { budget: refused } : {}) }, ...(refused ? { retryable: false } : {}) };
 	}
 	const source = resolveReference(spec.fan_out.source, ctx.substitution());
 	if (!source.found || source.rest || !Array.isArray(source.value)) {
@@ -55,5 +58,6 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 	const text = `${JSON.stringify(output, null, 2)}\n`;
 	const meta = { childRunIds: children.map((c) => c.runId), join: spec.fan_out.join ?? "all_success", fanOut: children.length };
 	if (joined.ok) return { status: "success", output, text, meta };
-	return { status: "failed", output: undefined, text, error: `fan-out of ${spec.name}: ${joined.reason}`, meta };
+	const refused = children.find((c) => c.budgetRefused)?.budgetRefused;
+	return { status: "failed", output: undefined, text, error: `fan-out of ${spec.name}: ${joined.reason}`, meta: { ...meta, ...(refused ? { budget: refused } : {}) }, ...(refused ? { retryable: false } : {}) };
 };

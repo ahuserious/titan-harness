@@ -33,6 +33,7 @@ import { parse as parseYaml } from "yaml";
 import { resolveThinking } from "../model-stack.ts";
 import { normalizeThinking } from "../thinking.ts";
 import { resolveRef, validateInput, validateSchema } from "./json-schema.ts";
+import { DEFAULT_PER_CALL_USD } from "./budget.ts";
 import {
 	AI_ONLY_NODE_KEYS,
 	API_VERSION,
@@ -426,10 +427,15 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 				else {
 					const budget = titan.budget;
 					for (const key of Object.keys(budget)) if (!TITAN_BUDGET_KEYS.has(key)) issues.warn("unknown-key", `titan.budget.${key} is unknown and ignored`);
-					if (budget.usd !== undefined && (typeof budget.usd !== "number" || !(budget.usd >= 0))) issues.error("titan", `titan.budget.usd must be a non-negative number`);
-					if (budget.tokens !== undefined && (!isInt(budget.tokens) || budget.tokens < 0)) issues.error("titan", `titan.budget.tokens must be a non-negative integer`);
-					if (budget.per_call_usd !== undefined && (typeof budget.per_call_usd !== "number" || !(budget.per_call_usd >= 0))) issues.error("titan", `titan.budget.per_call_usd must be a non-negative number`);
-					if (budget.per_call_tokens !== undefined && (!isInt(budget.per_call_tokens) || budget.per_call_tokens < 0)) issues.error("titan", `titan.budget.per_call_tokens must be a non-negative integer`);
+					if (budget.usd !== undefined && (typeof budget.usd !== "number" || !(budget.usd > 0) || !Number.isFinite(budget.usd))) issues.error("titan", `titan.budget.usd must be a positive number`);
+					if (budget.tokens !== undefined && (!isInt(budget.tokens) || budget.tokens < 1)) issues.error("titan", `titan.budget.tokens must be a positive integer`);
+					if (budget.per_call_usd !== undefined && (typeof budget.per_call_usd !== "number" || !(budget.per_call_usd > 0) || !Number.isFinite(budget.per_call_usd))) issues.error("titan", `titan.budget.per_call_usd must be a positive number`);
+					if (budget.per_call_tokens !== undefined && (!isInt(budget.per_call_tokens) || budget.per_call_tokens < 1)) issues.error("titan", `titan.budget.per_call_tokens must be a positive integer`);
+					if (budget.allow_unmetered_runners !== undefined && typeof budget.allow_unmetered_runners !== "boolean") issues.error("titan", `titan.budget.allow_unmetered_runners must be true or false`);
+					// Without per_call_usd each call reserves min(default $5, what is left): a total below the default serialises every call.
+					if (typeof budget.usd === "number" && budget.usd > 0 && budget.usd < DEFAULT_PER_CALL_USD && budget.per_call_usd === undefined) {
+						issues.warn("budget", `titan.budget.usd ${budget.usd} is below the default per-call reservation ($${DEFAULT_PER_CALL_USD}) and no per_call_usd is declared: every agent call reserves the whole remainder, so calls run one at a time — declare titan.budget.per_call_usd`);
+					}
 					if (budget.context_budget !== undefined && (!isInt(budget.context_budget) || budget.context_budget < 1)) issues.error("titan", `titan.budget.context_budget must be a positive integer`);
 					if (budget.max_concurrent_children !== undefined && (!isInt(budget.max_concurrent_children) || budget.max_concurrent_children < 1 || budget.max_concurrent_children > 16)) {
 						issues.error("titan", `titan.budget.max_concurrent_children must be an integer between 1 and 16; found ${show(budget.max_concurrent_children)}`);
@@ -612,11 +618,11 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 		if (node.budget !== undefined) {
 			if (!isMapping(node.budget)) issues.error("type", `budget must be a mapping {usd, tokens}; found ${show(node.budget)}`, id);
 			else {
-				if (node.budget.usd !== undefined && (typeof node.budget.usd !== "number" || !(node.budget.usd >= 0))) issues.error("type", `budget.usd must be a non-negative number`, id);
-				if (node.budget.tokens !== undefined && (!isInt(node.budget.tokens) || node.budget.tokens < 0)) issues.error("type", `budget.tokens must be a non-negative integer`, id);
+				if (node.budget.usd !== undefined && (typeof node.budget.usd !== "number" || !(node.budget.usd > 0) || !Number.isFinite(node.budget.usd))) issues.error("type", `budget.usd must be a positive number`, id);
+				if (node.budget.tokens !== undefined && (!isInt(node.budget.tokens) || node.budget.tokens < 1)) issues.error("type", `budget.tokens must be a positive integer`, id);
 				for (const key of Object.keys(node.budget)) if (!NODE_BUDGET_KEYS.has(key)) issues.warn("unknown-key", `budget.${key} is unknown and ignored`, id);
-				if (node.budget.per_call_usd !== undefined && (typeof node.budget.per_call_usd !== "number" || !(node.budget.per_call_usd >= 0))) issues.error("type", `budget.per_call_usd must be a non-negative number`, id);
-				if (node.budget.per_call_tokens !== undefined && (!isInt(node.budget.per_call_tokens) || node.budget.per_call_tokens < 0)) issues.error("type", `budget.per_call_tokens must be a non-negative integer`, id);
+				if (node.budget.per_call_usd !== undefined && (typeof node.budget.per_call_usd !== "number" || !(node.budget.per_call_usd > 0) || !Number.isFinite(node.budget.per_call_usd))) issues.error("type", `budget.per_call_usd must be a positive number`, id);
+				if (node.budget.per_call_tokens !== undefined && (!isInt(node.budget.per_call_tokens) || node.budget.per_call_tokens < 1)) issues.error("type", `budget.per_call_tokens must be a positive integer`, id);
 			}
 		}
 		if (node.isolation !== undefined && !(ISOLATION_MODES as readonly unknown[]).includes(node.isolation)) issues.error("type", `isolation must be none or worktree; found ${show(node.isolation)}`, id);

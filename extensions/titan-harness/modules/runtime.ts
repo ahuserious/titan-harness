@@ -104,6 +104,9 @@ export interface AgentRun {
 	errorMessage?: string;
 	preempted?: boolean; // the watchdog halted this child at ≥ preemptAtContextFraction (or a child compaction); settled as aborted + stopReason "preempted"
 	compactionSeen?: boolean; // a compaction_start event appeared on the child's JSON stream
+	usageSeen?: boolean; // at least one message_end with a usage block arrived (workflow budgets: usage provenance)
+	budgetHalted?: boolean; // killed because its observed spend exceeded the workflow budget's in-flight cap; settled as aborted + stopReason "budget"
+	notDispatched?: boolean; // provably no child process was started (aborted while queued / before spawn, held-spend refusal)
 	stderr: string;
 }
 

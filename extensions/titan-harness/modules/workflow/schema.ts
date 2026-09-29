@@ -106,7 +106,7 @@ export interface WorkflowTitan {
 		inspector_timeout_ms?: number;
 	};
 	/** usd/tokens are enforced by the executor (budget.ts); per_call_* is the worst case one agent call reserves. */
-	budget?: { usd?: number; tokens?: number; per_call_usd?: number; per_call_tokens?: number; max_concurrent_children?: number; context_budget?: number };
+	budget?: { usd?: number; tokens?: number; per_call_usd?: number; per_call_tokens?: number; allow_unmetered_runners?: boolean; max_concurrent_children?: number; context_budget?: number };
 	personas?: string[];
 	/** The run this workflow repairs or elevates (`/create-workflow --elevate|--from-findings`): the store records it as parentRunId. */
 	parent_run?: string;
@@ -279,7 +279,7 @@ export const TITAN_KEYS = new Set(["level", "shape", "tier", "modes", "evidence"
 export const MIMEOGRAPH_KEYS = new Set(["personas", "models", "judge", "criteria"]);
 export const TITAN_EVIDENCE_KEYS = new Set(["require", "dir"]);
 export const TITAN_WATCHDOG_KEYS = new Set(["enabled", "model", "thinking", "cadence_tools", "stalemate_repeats", "on_compaction", "inspector_timeout_ms"]);
-export const TITAN_BUDGET_KEYS = new Set(["usd", "tokens", "per_call_usd", "per_call_tokens", "max_concurrent_children", "context_budget"]);
+export const TITAN_BUDGET_KEYS = new Set(["usd", "tokens", "per_call_usd", "per_call_tokens", "allow_unmetered_runners", "max_concurrent_children", "context_budget"]);
 export const NODE_BUDGET_KEYS = new Set(["usd", "tokens", "per_call_usd", "per_call_tokens"]);
 export const NODE_BASE_KEYS = new Set([
 	"id", "depends_on", "when", "trigger_rule", "idle_timeout", "timeout", "retry", "phase", "role", "callsign", "persona", "mimeograph", "tier",

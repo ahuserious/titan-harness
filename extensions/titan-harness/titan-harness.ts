@@ -76,7 +76,7 @@ import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult
 import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
 import type { ValidateContext } from "./modules/workflow/validator.ts";
 import { normalizeThinking } from "./modules/thinking.ts";
-import { piInvocation, runChild } from "./modules/child-runner.ts";
+import { piInvocation, runChild, watchdogPreemptionAllowed } from "./modules/child-runner.ts";
 import {
 	cloneStack,
 	expandFanout,
@@ -2299,6 +2299,7 @@ export default function (pi: ExtensionAPI) {
 		const s = readStackSettings();
 		if (s.budgetUsd !== null && sessionSpendUsd() > s.budgetUsd) {
 			opts.run.status = "failed";
+			opts.run.notDispatched = true; // nothing spawned: a workflow budget settles this call at 0
 			opts.run.errorMessage = `held-spend: this session's ledger ($${sessionSpendUsd().toFixed(2)}) is over budgetUsd ($${s.budgetUsd}); raise it with /stack budget`;
 			opts.run.startedAt = Date.now();
 			opts.run.endedAt = opts.run.startedAt;
@@ -2308,7 +2309,8 @@ export default function (pi: ExtensionAPI) {
 			} catch {}
 			return opts.run;
 		}
-		const wd = s.watchdog.enabled ? getWatchdog() : undefined;
+		// A budgeted workflow call is never pre-empted: the inspector and the re-dispatch would spend outside its reservation.
+		const wd = s.watchdog.enabled && watchdogPreemptionAllowed(opts) ? getWatchdog() : undefined;
 		const agentId = opts.run.slot?.id ?? opts.run.role.toLowerCase();
 		const window = contextWindowOf(opts.run.model);
 		const first = await runChild({
