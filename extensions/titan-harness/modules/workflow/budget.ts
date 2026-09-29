@@ -348,10 +348,12 @@ export function settle(reservation: BudgetReservation, actual?: BudgetActual): B
 		const tokensKnown = provenance !== "none" && finite(actual?.tokens) && actual!.tokens! >= 0;
 		const observedUsd = usdKnown ? usdToMicrosCeil(actual!.usd!) : 0;
 		const observedTokens = tokensKnown ? tokensInt(actual!.tokens!) : 0;
-		const pick = (known: boolean, observed: number, reserved: number): [number, SettlementBasis] =>
-			!known ? [reserved, "reservation"] : provenance === "partial" ? [Math.max(observed, reserved), "partial"] : [observed, "reported"];
-		[charged.usdMicros, basis.usd] = pick(usdKnown, observedUsd, res.usdMicros);
-		[charged.tokens, basis.tokens] = pick(tokensKnown, observedTokens, res.tokens);
+		// Interrupted: the turn in progress was never billed, and the in-flight cap bounds it by the reservation
+		// (plus one message) — so a limited dimension charges max(observed, reservation). An unlimited one charges what was observed.
+		const pick = (dimension: BudgetDimension, known: boolean, observed: number, reserved: number): [number, SettlementBasis] =>
+			!known ? [reserved, "reservation"] : provenance === "partial" && reservation.scope.limits(dimension) ? [Math.max(observed, reserved), "partial"] : [observed, "reported"];
+		[charged.usdMicros, basis.usd] = pick("usd", usdKnown, observedUsd, res.usdMicros);
+		[charged.tokens, basis.tokens] = pick("tokens", tokensKnown, observedTokens, res.tokens);
 		// Tokens but a $0 cost (subscription/OAuth or unpriced models) never settles a USD budget at $0.
 		if (basis.usd === "reported" && charged.usdMicros === 0 && observedTokens > 0 && reservation.scope.limits("usd")) {
 			charged.usdMicros = res.usdMicros;

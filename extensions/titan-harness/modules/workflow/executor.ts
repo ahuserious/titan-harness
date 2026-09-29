@@ -576,7 +576,8 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		}
 		return scope;
 	};
-	let budgetActive = workflowScope.enforced();
+	// Active when any scope of this run's chain, or any node budget, sets a limit (a workflow: node's budget has no agent call here).
+	let budgetActive = workflowScope.enforced() || doc.nodes.some((node) => Object.keys(limitFrom(node.budget as DeclaredBudget | undefined)).length > 0);
 	/** The first hard budget refusal that failed a node (RunResult.budgetRefused). */
 	let budgetRefusal: BudgetRefusal | undefined;
 	/**
