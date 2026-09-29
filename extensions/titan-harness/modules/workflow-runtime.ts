@@ -116,15 +116,16 @@ const asThinking = (value: string | undefined): Thinking => (THINKING_ORDER.incl
 /**
  * How far a settled run's usage can be trusted for workflow budgets (budget.ts UsageProvenance):
  *   not-dispatched  no child process was started (aborted while queued, a held-spend refusal)
- *   none            the child threw, or ended (aborted, crashed, timed out, exited) before any usage event
- *   partial         it reported usage but was interrupted (aborted, timed out, pre-empted, budget-halted,
- *                   killed/crashed without a clean exit): the turn in progress was never billed
+ *   none            no usage event arrived (thrown, aborted, crashed, timed out or exited before any)
+ *   partial         it reported usage but did not finish cleanly (thrown after usage, aborted, timed out,
+ *                   pre-empted, budget-halted, killed/crashed): the turn in progress may be unbilled, so
+ *                   settlement charges max(reported, reservation) — reported usage is never dropped
  *   complete        it exited on its own with usage reported
  */
 export function usageProvenanceOf(run: AgentRun, threw = false): UsageProvenance {
 	if (run.notDispatched) return "not-dispatched";
-	if (threw || !run.usageSeen) return "none";
-	const interrupted = run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || run.exitCode !== 0;
+	if (!run.usageSeen) return "none";
+	const interrupted = threw || run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || run.exitCode !== 0;
 	return interrupted ? "partial" : "complete";
 }
 

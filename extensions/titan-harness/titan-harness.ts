@@ -2171,7 +2171,7 @@ export default function (pi: ExtensionAPI) {
 					parentRunId: parentRunId ?? runId,
 					status: "running",
 				});
-				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs, parentBudget: runOpts?.parentBudget });
+				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs, parentBudget: runOpts?.parentBudget, signal: runOpts?.signal });
 				try {
 					runStore().updateRun(opened.dir, { status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "aborted" : "failed", endedAt: new Date().toISOString() });
 				} catch {}

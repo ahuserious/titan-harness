@@ -98,21 +98,22 @@ describe("budget.ts: integer reservations across a scope chain", () => {
     expect(limitFrom(undefined)).toEqual({});
   });
 
-  test("reservation: the largest per_call along the chain (else the default), clamped to what the chain has unspent, floored at 1", () => {
+  test("reservation = the worst case: the largest per_call along the chain (else the default), never shrunk to the remainder or a node total, floored at 1", () => {
     const wf = (budget?: Parameters<typeof perCallFrom>[0]) => new BudgetScope("wf", limitFrom(budget), undefined, { kind: "workflow", perCall: perCallFrom(budget) });
     const node = (parent: BudgetScope, budget?: Parameters<typeof perCallFrom>[0]) => parent.child("node", limitFrom(budget), { perCall: perCallFrom(budget) });
     expect(reservationFor(node(wf()))).toEqual({ usdMicros: DEFAULT_PER_CALL_USD * 1e6, tokens: DEFAULT_PER_CALL_TOKENS });
     // a node can raise the per-call worst case but never lower what an ancestor declared
     expect(reservationFor(node(wf({ per_call_usd: 1, per_call_tokens: 900 }), { per_call_usd: 0.5 }))).toEqual({ usdMicros: 1_000_000, tokens: 900 });
     expect(reservationFor(node(wf({ per_call_usd: 0.2 }), { per_call_usd: 0.5 }))).toEqual({ usdMicros: 500_000, tokens: DEFAULT_PER_CALL_TOKENS });
-    expect(reservationFor(node(wf({ per_call_usd: 1 }), { usd: 0.2, tokens: 10 }))).toEqual({ usdMicros: 200_000, tokens: 10 });
-    // spent budget shrinks the reservation; an exhausted one still reserves 1 (so it refuses)
-    const n = node(wf({ usd: 1 }));
-    n.parent!.spent.usdMicros = 999_999;
-    expect(reservationFor(n).usdMicros).toBe(1);
-    n.parent!.spent.usdMicros = 1_000_000;
-    expect(reservationFor(n).usdMicros).toBe(1);
-    expect(reserve(n, reservationFor(n)).ok).toBe(false);
+    // a tiny node TOTAL does not lower the ancestor's per_call: the node reserves $1 and is refused against its own $0.20
+    const tiny = node(wf({ usd: 5, per_call_usd: 1 }), { usd: 0.2, tokens: 10 });
+    expect(reservationFor(tiny)).toEqual({ usdMicros: 1_000_000, tokens: DEFAULT_PER_CALL_TOKENS });
+    expect(reserve(tiny, reservationFor(tiny))).toMatchObject({ ok: false, refusal: { scope: "node", transient: false } });
+    // spent budget never shrinks the reservation: $0.40 needed against $0.30 left is refused, not admitted at $0.30
+    const n = node(wf({ usd: 1, per_call_usd: 0.4 }));
+    n.parent!.spent.usdMicros = 700_000;
+    expect(reservationFor(n).usdMicros).toBe(400_000);
+    expect(reserve(n, reservationFor(n))).toEqual({ ok: false, refusal: { scope: "wf", dimension: "usd", limit: 1_000_000, remaining: 300_000, needed: 400_000, transient: false } });
     // per_call 0 is not a declaration (the validator rejects it): the default applies, never a free call
     expect(perCallFrom({ per_call_usd: 0, per_call_tokens: 0 })).toEqual({});
   });
@@ -140,32 +141,32 @@ describe("budget.ts: integer reservations across a scope chain", () => {
 // ═══ Executor enforcement ════════════════════════════════════════════════════
 
 describe("executor: budgets are enforced before dispatch", () => {
-  test("a node whose budget is spent is refused before dispatch: the agent is never called (a per_call above the remainder reserves the remainder)", async () => {
-    const h = harness({ answers: { first: [(req) => { expect(req.spendCap!()).toEqual({ usdMicros: 1_000_000 }); return { usage: usage(1) }; }] } });
-    const result = await run(h, [{ id: "first", prompt: "go", budget: { per_call_usd: 2 } } as NodeDoc, { id: "big", prompt: "go", depends_on: ["first"], budget: { per_call_usd: 2 } } as NodeDoc], { titan: { budget: { usd: 1 } } });
-    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual([1_000_000]);
-    expect(h.agentCalls.map((c) => c.nodeId)).toEqual(["first"]);
+  test("a node whose reservation exceeds the remaining budget is refused before dispatch: the agent is never called", async () => {
+    const h = harness();
+    const result = await run(h, [{ id: "big", prompt: "go", budget: { per_call_usd: 2 } } as NodeDoc], { titan: { budget: { usd: 1 } } });
+    expect(h.agentCalls).toHaveLength(0);
     expect(result.status).toBe("failed");
-    expect(result.nodes.big).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $0, needed $0.000001" });
-    expect(data(h, "budget.refused")).toEqual([expect.objectContaining({ nodeId: "big", scope: "workflow:t", dimension: "usd", remaining: 0, needed: 1, transient: false })]);
-    expect(data(h, "agent.start").map((d) => d.nodeId)).toEqual(["first"]);
-    expect(readLedger(h.runDir).map((r) => r.agentId)).toEqual(["first"]);
+    expect(result.nodes.big).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $1, needed $2" });
+    expect(data(h, "budget.refused")).toEqual([expect.objectContaining({ nodeId: "big", scope: "workflow:t", dimension: "usd", remaining: 1_000_000, needed: 2_000_000, transient: false })]);
+    expect(data(h, "budget.reserve")).toHaveLength(0);
+    expect(events(h, "agent.start")).toHaveLength(0);
+    expect(readLedger(h.runDir)).toHaveLength(0);
     expect(h.notices.some((n) => n.level === "error" && n.text.includes("budget exceeded"))).toBe(true);
     expect(verifyChain(join(h.runDir, "events.jsonl")).ok).toBe(true);
   });
 
-  test("retries near the cap never overshoot: each attempt reserves what is left (the tail is spendable), then the spent budget refuses", async () => {
-    // budget $1.00, per call $0.40; attempts 1 and 2 spend $0.35 → attempt 3 reserves the $0.30 left and spends it → attempt 4 refused.
-    const fail = (usd: number): Answer => () => ({ ok: false, text: "", error: "flaky", usage: usage(usd) });
-    const h = harness({ answers: { n: [fail(0.35), fail(0.35), fail(0.3), fail(0.3)] } });
-    const result = await run(h, [{ id: "n", prompt: "go", retry: { max_attempts: 4, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 0.4 } } });
-    expect(h.agentCalls).toHaveLength(3);
-    expect(result.nodes.n).toMatchObject({ status: "failed", attempts: 4, error: "budget exceeded: workflow:t remaining $0, needed $0.000001" });
-    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual([400_000, 400_000, 300_000]);
-    expect(data(h, "budget.settle").map((d) => d.chargedUsdMicros)).toEqual([350_000, 350_000, 300_000]);
-    expect(result.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+  test("three retries near the cap never overshoot: each attempt reserves, the one that would overshoot is refused", async () => {
+    // budget $1.00, per call $0.40; attempts 1 and 2 fail after spending $0.35 each → $0.30 left < $0.40 → attempt 3 refused.
+    const fail: Answer = () => ({ ok: false, text: "", error: "flaky", usage: usage(0.35) });
+    const h = harness({ answers: { n: [fail, fail, fail] } });
+    const result = await run(h, [{ id: "n", prompt: "go", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 0.4 } } });
+    expect(h.agentCalls).toHaveLength(2);
+    expect(result.nodes.n).toMatchObject({ status: "failed", attempts: 3, error: "budget exceeded: workflow:t remaining $0.3, needed $0.4" });
+    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual([400_000, 400_000]);
+    expect(data(h, "budget.settle").map((d) => d.chargedUsdMicros)).toEqual([350_000, 350_000]);
+    expect(result.budget).toMatchObject({ spentUsdMicros: 700_000, reservedUsdMicros: 0 });
     expect(spentFromEvents(h).usdMicros).toBeLessThanOrEqual(1_000_000);
-    expect(data(h, "budget.summary")[0].workflow).toMatchObject({ spentUsdMicros: 1_000_000 });
+    expect(data(h, "budget.summary")[0].workflow).toMatchObject({ spentUsdMicros: 700_000 });
   });
 
   test("retry settles failed attempts at the full reservation when usage is unknown", async () => {
@@ -201,31 +202,28 @@ describe("executor: budgets are enforced before dispatch", () => {
   });
 
   test("the token budget is enforced like the USD budget", async () => {
-    const h = harness({ answers: { a: [() => ({ usage: usage(0, 600, 300) })], b: [() => ({ usage: usage(0, 400, 200) })] } });
+    const h = harness({ answers: { a: [() => ({ usage: usage(0, 600, 300) })] } });
     const result = await run(h, [
       { id: "a", prompt: "a" } as NodeDoc,
       { id: "b", prompt: "b", depends_on: ["a"] } as NodeDoc,
-      { id: "c", prompt: "c", depends_on: ["b"] } as NodeDoc,
     ], { titan: { budget: { tokens: 1500, per_call_tokens: 1000 } } });
-    // b reserves the 600 tokens left (not 1000) and spends them; c is refused on the spent budget
-    expect(h.agentCalls.map((c) => c.nodeId)).toEqual(["a", "b"]);
-    expect(data(h, "budget.reserve").map((d) => d.tokens)).toEqual([1000, 600]);
-    expect(result.nodes.c).toMatchObject({ status: "failed", error: "budget exceeded: workflow:t remaining 0 tokens, needed 1 tokens" });
+    expect(h.agentCalls.map((c) => c.nodeId)).toEqual(["a"]);
+    expect(result.nodes.b).toMatchObject({ status: "failed", error: "budget exceeded: workflow:t remaining 600 tokens, needed 1000 tokens" });
   });
 
   test("a node-level budget is enforced on its own scope, beside the workflow budget", async () => {
-    // node loop: budget $0.5, per call $0.25; iteration 1 spends $0.3, iteration 2 reserves the $0.2 left and spends it → iteration 3 refused.
-    const h = harness({ answers: { l: [() => ({ text: "not yet", usage: usage(0.3) }), () => ({ text: "not yet", usage: usage(0.2) }), () => ({ text: "DONE" })] } });
+    // node loop: budget $0.5, per call $0.25; iteration 1 spends $0.3 → $0.2 left < $0.25 → iteration 2 refused.
+    const h = harness({ answers: { l: [() => ({ text: "not yet", usage: usage(0.3) }), () => ({ text: "DONE" })] } });
     const result = await run(h, [
       { id: "l", loop: { prompt: "work", until: "DONE", max_iterations: 3 }, budget: { usd: 0.5, per_call_usd: 0.25 } } as NodeDoc,
       { id: "other", prompt: "unaffected", depends_on: ["l"], trigger_rule: "all_done" } as NodeDoc,
     ]);
-    expect(h.agentCalls.map((c) => c.nodeId)).toEqual(["l", "l", "other"]);
-    expect(result.nodes.l).toMatchObject({ status: "failed", error: "budget exceeded: workflow:t/node:l remaining $0, needed $0.000001" });
+    expect(h.agentCalls.map((c) => c.nodeId)).toEqual(["l", "other"]);
+    expect(result.nodes.l).toMatchObject({ status: "failed", error: "budget exceeded: workflow:t/node:l remaining $0.2, needed $0.25" });
     expect(result.nodes.other.status).toBe("success");
     // only a node budget applied: the workflow scope has no limit, yet it still records the spend
-    expect(data(h, "budget.settle").map((d) => d.nodeId)).toEqual(["l", "l"]);
-    expect(result.budget).toMatchObject({ spentUsdMicros: 500_000 });
+    expect(data(h, "budget.settle").map((d) => d.nodeId)).toEqual(["l"]);
+    expect(result.budget).toMatchObject({ spentUsdMicros: 300_000 });
   });
 
   test("fan-outs reserve per call: a best_of candidate that does not fit yet waits for a settlement; one that never fits is refused", async () => {
@@ -241,11 +239,11 @@ describe("executor: budgets are enforced before dispatch", () => {
     expect(data(h, "budget.wait").length).toBeGreaterThan(0);
     expect(spentFromEvents(h).usdMicros).toBe(350_000);
 
-    // a fan-out under a spent budget is refused, not dispatched (and not retried)
-    const tight = harness({ answers: { first: [() => ({ usage: usage(0.3) })] } });
-    const refused = await run(tight, [{ id: "first", prompt: "spend it all" } as NodeDoc, { id: "pick", best_of: { n: 3, prompt: "solve" }, depends_on: ["first"] } as NodeDoc], { titan: { budget: { usd: 0.3, per_call_usd: 0.4 } } });
-    expect(tight.agentCalls.map((c) => c.nodeId)).toEqual(["first"]);
-    expect(refused.nodes.pick).toMatchObject({ attempts: 1, error: "budget exceeded: workflow:t remaining $0, needed $0.000001" });
+    // a fan-out whose calls cannot fit even once everything settles is refused, not dispatched (and not retried)
+    const tight = harness();
+    const refused = await run(tight, [{ id: "pick", best_of: { n: 3, prompt: "solve" } } as NodeDoc], { titan: { budget: { usd: 0.3, per_call_usd: 0.4 } } });
+    expect(tight.agentCalls).toHaveLength(0);
+    expect(refused.nodes.pick).toMatchObject({ attempts: 1, error: "budget exceeded: workflow:t remaining $0.3, needed $0.4" });
   });
 
   test("an interrupted call settles max(late usage, reservation) as partial; one that never reports settles at the reservation", async () => {
@@ -283,27 +281,27 @@ describe("executor: nested workflows draw from the parent's remainder", () => {
       { id: "c2", prompt: "two", depends_on: ["c1"] } as NodeDoc,
     ], { name: "sub", titan: { budget: { usd: 100, per_call_usd: 0.5 } } });
     const runWorkflow = async (_name: string, _inputs: Record<string, unknown>, opts?: RunWorkflowOptions): Promise<RunResult> => {
-      const ch = harness({ store, answers: { c1: [() => ({ usage: usage(0.7) })] } });
+      const ch = harness({ store, answers: { c1: [() => ({ usage: usage(0.4) })] } });
       childRuns.push(ch);
-      return executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget });
+      return executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget, signal: opts?.signal });
     };
     const h = harness({ store, runWorkflow, answers: { first: [() => ({ usage: usage(0.3) })] } });
     const result = await run(h, [
       { id: "first", prompt: "spend some" } as NodeDoc,
       { id: "sub", workflow: { name: "sub" }, depends_on: ["first"] } as NodeDoc,
     ], { titan: { budget: { usd: 1, per_call_usd: 0.5 } } });
-    // parent $1: first spends $0.30; child c1 reserves $0.50 (fits $0.70), spends $0.70 → the PARENT is spent, c2 is refused there.
+    // parent $1: first spends $0.30; child c1 reserves $0.50 (fits $0.70), spends $0.40; c2 needs $0.50 > $0.30 left in the PARENT.
     const ch = childRuns[0];
     expect(ch.agentCalls.map((c) => c.nodeId)).toEqual(["c1"]);
-    expect(data(ch, "budget.refused")).toEqual([expect.objectContaining({ nodeId: "c2", scope: "workflow:t", remaining: 0, needed: 1 })]);
-    expect(result.nodes.sub).toMatchObject({ status: "failed", attempts: 1, error: expect.stringContaining("budget exceeded: workflow:t remaining $0, needed $0.000001") });
+    expect(data(ch, "budget.refused")).toEqual([expect.objectContaining({ nodeId: "c2", scope: "workflow:t", remaining: 300_000, needed: 500_000 })]);
+    expect(result.nodes.sub).toMatchObject({ status: "failed", attempts: 1, error: expect.stringContaining("budget exceeded: workflow:t remaining $0.3, needed $0.5") });
     // item 9: a child that failed on a budget refusal is not re-run by the parent
     expect(childRuns).toHaveLength(1);
-    expect(result.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+    expect(result.budget).toMatchObject({ spentUsdMicros: 700_000, reservedUsdMicros: 0 });
     expect(result.budget!.spentUsdMicros as number).toBeLessThanOrEqual(1_000_000);
   });
 
-  test("a node budget on the workflow: node caps its children too (a child with no per_call reserves what the node has left)", async () => {
+  test("a node budget on the workflow: node caps its children too (the child's default worst case is refused, never shrunk to fit)", async () => {
     const store = new RunStore(scratch());
     const child = loaded([{ id: "c1", prompt: "one" } as NodeDoc], { name: "sub" });
     const calls: string[] = [];
@@ -315,9 +313,9 @@ describe("executor: nested workflows draw from the parent's remainder", () => {
     };
     const h = harness({ store, runWorkflow });
     const result = await run(h, [{ id: "sub", workflow: { name: "sub" }, budget: { usd: 0.01 }, retry: { max_attempts: 1 } } as NodeDoc]);
-    expect(calls).toEqual(["c1"]);
-    expect(result.nodes.sub.status).toBe("success");
-    expect(result.budget).toMatchObject({ spentUsdMicros: 1000 });
+    expect(calls).toEqual([]);
+    expect(result.nodes.sub.error).toContain("budget exceeded: workflow:t/node:sub remaining $0.01, needed $5"); // the child declares no per_call: the default applies
+    expect(result.budget).toMatchObject({ spentUsdMicros: 0, reservedUsdMicros: 0 });
   });
 });
 
@@ -343,21 +341,33 @@ describe("executor: no budget declared → behaviour unchanged", () => {
 
 // ═══ Repair round 1 (gate N3-09): regressions for the gate probes P1–P7 and items 1–11 ═══
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { overSpendCap, runChild, watchdogPreemptionAllowed } from "../modules/child-runner.ts";
 import { newRun } from "../modules/runtime.ts";
 import { createAgentRunner, usageProvenanceOf } from "../modules/workflow-runtime.ts";
 import { RUNNERS } from "../modules/workflow/runners/index.ts";
 
 const settleOf = (h: Harness, nodeId?: string) => data(h, "budget.settle").filter((d) => !nodeId || d.nodeId === nodeId);
+/** A stand-in `pi --mode json` child: one assistant message_end costing `usd` every 30 ms, 50 times. */
+function fakePi(dir: string, usd: number): string {
+  const script = join(dir, "fake-pi.ts");
+  writeFileSync(script, `
+    const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+    out({ type: "session", id: "s1" });
+    let i = 0;
+    const tick = () => { i++; out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "m" + i }], usage: { input: 10, output: 10, cost: { total: ${usd} } } } }); if (i < 50) setTimeout(tick, 30); };
+    tick();
+  `);
+  return script;
+}
 
 describe("repair: zero budgets and zero reservations are fail-closed (item 3, P1, P2)", () => {
   test("P1: a node with budget usd 0 is never dispatched (validator rejects it; the executor refuses it anyway)", async () => {
     const h = harness({ answers: { a: [() => ({ usage: usage(0.5) })] } });
     const r = await run(h, [{ id: "a", prompt: "x", budget: { usd: 0 } } as NodeDoc]);
     expect(h.agentCalls).toHaveLength(0);
-    expect(r.nodes.a).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t/node:a remaining $0, needed $0.000001" });
-    expect(r.budgetRefused).toMatchObject({ scope: "workflow:t/node:a", dimension: "usd", remaining: 0, needed: 1 });
+    expect(r.nodes.a).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t/node:a remaining $0, needed $5" });
+    expect(r.budgetRefused).toMatchObject({ scope: "workflow:t/node:a", dimension: "usd", remaining: 0, needed: 5_000_000 });
   });
 
   test("P2: per_call_usd 0 never makes calls free — a best_of fan-out stays inside the workflow cap", async () => {
@@ -432,7 +442,7 @@ describe("repair: unknown usage is never settled at zero (item 1, P3, item 2, P4
     expect(data(h, "budget.cost_unknown")).toHaveLength(2);
     // a token-only budget does not invent a USD charge
     const t = harness({ answers: { a: [() => ({ usage: usage(0, 50, 50) })] } });
-    const tr = await run(t, [{ id: "a", prompt: "x" } as NodeDoc], { titan: { budget: { tokens: 1000 } } });
+    const tr = await run(t, [{ id: "a", prompt: "x" } as NodeDoc], { titan: { budget: { tokens: 1000, per_call_tokens: 500 } } });
     expect(tr.budget).toMatchObject({ spentUsdMicros: 0, spentTokens: 100 });
   });
 
@@ -479,20 +489,17 @@ describe("repair: in-flight hard cap (item 4, P6)", () => {
     if (!one.ok || !two.ok) throw new Error("unreachable");
     settle(one.reservation, { usd: 0.9, tokens: 0 });
     expect(spendCapOf(two.reservation)).toEqual({ usdMicros: 100_000 });
-    expect(overSpendCap({ costUsd: 0.1000011, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 })).toBe(true);
-    expect(overSpendCap({ costUsd: 0.1, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 })).toBe(false);
+    // at the cap there is no room for another message (>=); one more message of the largest size seen must also fit
+    expect(overSpendCap({ costUsd: 0.1, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 })).toBe(true);
+    expect(overSpendCap({ costUsd: 0.099999, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 })).toBe(false);
+    expect(overSpendCap({ costUsd: 0.06, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 }, { usdMicros: 40_000 })).toBe(true);
+    expect(overSpendCap({ costUsd: 0.05, tokensIn: 0, tokensOut: 0 }, { usdMicros: 100_000 }, { usdMicros: 40_000 })).toBe(false);
+    expect(overSpendCap({ costUsd: 0, tokensIn: 60, tokensOut: 30 }, { tokens: 100 }, { tokens: 10 })).toBe(true);
   });
 
-  test("P6: the REAL runChild kills a child as soon as its observed spend passes the cap (overrun bounded by one message)", async () => {
+  test("P6: a real runChild never exceeds the $1 cap: it is stopped before the message that would pass it", async () => {
     const dir = scratch();
-    const script = join(dir, "fake-pi.ts");
-    writeFileSync(script, `
-      const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
-      out({ type: "session", id: "s1" });
-      let i = 0;
-      const tick = () => { i++; out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "m" + i }], usage: { input: 10, output: 10, cost: { total: 0.4 } } } }); if (i < 50) setTimeout(tick, 30); };
-      tick();
-    `);
+    const script = fakePi(dir, 0.4);
     const saved = process.argv[1];
     process.argv[1] = script;
     try {
@@ -501,8 +508,29 @@ describe("repair: in-flight hard cap (item 4, P6)", () => {
       expect(r.budgetHalted).toBe(true);
       expect(r.status).toBe("aborted");
       expect(r.stopReason).toBe("budget");
-      expect(Math.round(r.costUsd * 10)).toBe(12); // 3 messages × $0.40: stopped on the first message over $1, not after 50
+      // $0.40, $0.80 — a third $0.40 message would reach $1.20, so the child is killed at $0.80 (not after 50 messages)
+      expect(Math.round(r.costUsd * 100)).toBe(80);
+      expect(r.costUsd).toBeLessThanOrEqual(1);
       expect(usageProvenanceOf(r)).toBe("partial");
+    } finally {
+      process.argv[1] = saved;
+    }
+  });
+
+  test("P6: through the executor, the REAL agent runner + runChild under usd 1 / per_call 1 never spends past $1", async () => {
+    const dir = scratch();
+    const script = fakePi(dir, 0.4);
+    const saved = process.argv[1];
+    process.argv[1] = script;
+    try {
+      const h = harness();
+      h.deps.agent = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild }) as any;
+      const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc, { id: "b", prompt: "y", depends_on: ["a"], trigger_rule: "all_done" } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 1 } } });
+      // a: reserves $1, observed $0.80 when halted → settles max($0.80, $1) = $1 (partial); its retries and b are refused
+      expect(settleOf(h)).toHaveLength(1);
+      expect(settleOf(h)[0]).toMatchObject({ reservedUsdMicros: 1_000_000, chargedUsdMicros: 1_000_000, provenance: "partial" });
+      expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0, overrunUsdMicros: 0 });
+      expect(r.nodes.b.error).toBe("budget exceeded: workflow:t remaining $0, needed $1");
     } finally {
       process.argv[1] = saved;
     }
@@ -517,12 +545,17 @@ describe("repair: in-flight hard cap (item 4, P6)", () => {
 });
 
 describe("repair: reservations follow the remaining budget and the scope chain (items 5, 6, 10, P5, P7)", () => {
-  test("P7 / item 5: a node usd budget without per_call allows retries until the node budget is actually spent", async () => {
+  test("P7 / item 5: a node usd budget with a per_call allows retries while the worst case still fits", async () => {
     const h = harness({ answers: { a: [() => ({ ok: false, text: "", error: "flaky", usage: usage(0.05) }), () => ({ usage: usage(0.05) })] } });
-    const r = await run(h, [{ id: "a", prompt: "x", budget: { usd: 1 }, retry: { max_attempts: 2, delay_ms: 0 } } as NodeDoc]);
+    const r = await run(h, [{ id: "a", prompt: "x", budget: { usd: 1, per_call_usd: 0.4 }, retry: { max_attempts: 2, delay_ms: 0 } } as NodeDoc]);
     expect(h.agentCalls).toHaveLength(2);
     expect(r.nodes.a.status).toBe("success");
-    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual([1_000_000, 950_000]);
+    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual([400_000, 400_000]);
+    // without a per_call the $5 default worst case never fits a $1 node: refused before dispatch (the validator warns)
+    const d = harness();
+    const dr = await run(d, [{ id: "a", prompt: "x", budget: { usd: 1 } } as NodeDoc]);
+    expect(d.agentCalls).toHaveLength(0);
+    expect(dr.nodes.a.error).toBe("budget exceeded: workflow:t/node:a remaining $1, needed $5");
   });
 
   test("P5 / item 6: parent $3 with per_call $0.5 — a child declaring nothing inherits the parent's per_call and runs", async () => {
@@ -563,14 +596,15 @@ describe("repair: reservations follow the remaining budget and the scope chain (
     expect(validateWorkflow(doc({ usd: 25 }), {}).warnings).toEqual([]);
   });
 
-  test("item 10: a $25 budget with no per_call (the shipped workflows) can spend its last $5", async () => {
+  test("item 10: a $25 budget with no per_call (the shipped workflows) refuses the call whose $5 worst case no longer fits", async () => {
     const answers = Array.from({ length: 6 }, () => () => ({ usage: usage(4.5) }));
     const h = harness({ answers: { l: answers as Answer[] } });
     const r = await run(h, [{ id: "l", loop: { prompt: "work", until: "NEVER", max_iterations: 6 } } as NodeDoc], { titan: { budget: { usd: 25 } } });
-    // 5 × $4.50 = $22.50, then the 6th iteration reserves the $2.50 left (not refused at the $5 default) and overruns on the stub
-    expect(h.agentCalls).toHaveLength(6);
-    expect(data(h, "budget.reserve").map((d) => d.usdMicros).slice(-1)).toEqual([2_500_000]);
-    expect(r.nodes.l.error).toContain("loop did not complete");
+    // 5 × $4.50 = $22.50; the 6th iteration needs its full $5 worst case against $2.50 left → refused, never admitted at $2.50
+    expect(h.agentCalls).toHaveLength(5);
+    expect(data(h, "budget.reserve").map((d) => d.usdMicros)).toEqual(Array(5).fill(5_000_000));
+    expect(r.nodes.l.error).toBe("budget exceeded: workflow:t remaining $2.5, needed $5");
+    expect(r.budget).toMatchObject({ spentUsdMicros: 22_500_000, reservedUsdMicros: 0 });
   });
 });
 
@@ -587,7 +621,7 @@ describe("repair: settlements are drained and siblings stopped (item 7)", () => 
     const r = await run(h, [{ id: "p", best_of: { n: 3, prompt: "x" }, retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 0.4 } } }, { budgetAbortGraceMs: 500 });
     expect(siblingAborted).toBe(true);
     expect(h.agentCalls).toHaveLength(2);
-    expect(r.nodes.p).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $0, needed $0.000001" });
+    expect(r.nodes.p).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $0, needed $0.4" });
     expect(data(h, "budget.refused")).toHaveLength(1);
     const types = events(h).map((e) => e.type);
     const settles = types.flatMap((t, i) => (t === "budget.settle" ? [i] : []));
@@ -666,5 +700,249 @@ describe("repair: paid paths outside runAgent (item 11)", () => {
     const source = readFileSync(join(import.meta.dir, "..", "titan-harness.ts"), "utf8");
     expect(source).toContain("s.watchdog.enabled && watchdogPreemptionAllowed(opts) ? getWatchdog() : undefined");
     expect(source).toMatch(/opts\.run\.notDispatched = true;/);
+  });
+});
+
+// ═══ Repair round 2 (gate N3-09-wf-r1-astra): blockers 1–4 ═══════════════════════════════════
+
+describe("repair 2: a thrown child keeps its reported usage (blocker 2)", () => {
+  test("the REAL createAgentRunner: runChild records $0.40 then rejects → settled at max($0.40, reservation) as partial, not the reservation alone", async () => {
+    const h = harness();
+    h.deps.agent = createAgentRunner({
+      sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd,
+      runChild: (async (o: any) => { o.run.usageSeen = true; o.run.costUsd = 0.4; o.run.tokensIn = 300; o.run.tokensOut = 100; throw new Error("stream broke after a turn"); }) as any,
+    }) as any;
+    const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 0.01 } } });
+    expect(settleOf(h)[0]).toMatchObject({ reservedUsdMicros: 10_000, chargedUsdMicros: 400_000, chargedTokens: 400, provenance: "partial", basis: { usd: "partial", tokens: "reported" } });
+    expect(r.budget).toMatchObject({ spentUsdMicros: 400_000, reservedUsdMicros: 0 });
+    const run0 = newRun("BUILDER", "m");
+    expect(usageProvenanceOf({ ...run0, usageSeen: true, status: "failed", exitCode: 0 }, true)).toBe("partial");
+    expect(usageProvenanceOf({ ...run0, status: "failed" }, true)).toBe("none");
+  });
+});
+
+describe("repair 2: settlement is exception-safe and complete (blocker 3)", () => {
+  const within = <T>(p: Promise<T>, ms = 4000): Promise<T> => Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`hung for ${ms} ms`)), ms))]);
+
+  test("a store failure before dispatch releases the reservation at $0 and never hangs the final drain", async () => {
+    const h = harness();
+    const upsert = h.store.upsertAgent.bind(h.store);
+    h.store.upsertAgent = ((dir: string, patch: any) => { if (patch.state === "dispatched-working") throw new Error("disk full"); return upsert(dir, patch); }) as any;
+    const r = await within(run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 1 } } }));
+    expect(h.agentCalls).toHaveLength(0);
+    expect(r.nodes.a).toMatchObject({ status: "failed", error: "disk full" });
+    expect(r.budget).toMatchObject({ spentUsdMicros: 0, reservedUsdMicros: 0 });
+    expect(settleOf(h)[0]).toMatchObject({ chargedUsdMicros: 0, provenance: "not-dispatched" });
+  });
+
+  test("agent.start / budget.reserve record failures after the reservation still settle it", async () => {
+    const h = harness();
+    const append = h.store.appendEvent.bind(h.store);
+    h.store.appendEvent = ((dir: string, type: string, d: Record<string, unknown>, agentId?: string) => { if (type === "budget.reserve") throw new Error("disk full"); return append(dir, type, d, agentId); }) as any;
+    const r = await within(run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 1 } } }));
+    expect(h.agentCalls).toHaveLength(0);
+    expect(r.budget).toMatchObject({ spentUsdMicros: 0, reservedUsdMicros: 0 });
+  });
+
+  test("error-path bookkeeping failures (agent record + agent.end) never skip the settlement", async () => {
+    const h = harness();
+    h.deps.agent = async () => { throw new Error("agent boom"); };
+    const upsert = h.store.upsertAgent.bind(h.store);
+    h.store.upsertAgent = ((dir: string, patch: any) => { if (patch.state === "failed") throw new Error("disk full"); return upsert(dir, patch); }) as any;
+    const append = h.store.appendEvent.bind(h.store);
+    h.store.appendEvent = ((dir: string, type: string, d: Record<string, unknown>, agentId?: string) => { if (type === "agent.end") throw new Error("disk full"); return append(dir, type, d, agentId); }) as any;
+    const r = await within(run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 1 } } }));
+    expect(r.nodes.a.error).toBe("agent boom");
+    expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+    expect(h.notices.some((n) => n.text.includes("agent.end record failed: disk full"))).toBe(true);
+  });
+
+  test("success-path bookkeeping failures after the call keep the settlement at the reported usage", async () => {
+    const h = harness({ answers: { a: [() => ({ usage: usage(0.2) })] } });
+    const upsert = h.store.upsertAgent.bind(h.store);
+    h.store.upsertAgent = ((dir: string, patch: any) => { if (patch.state === "done-unverified") throw new Error("disk full"); return upsert(dir, patch); }) as any;
+    const r = await within(run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 1 } } }));
+    expect(r.budget).toMatchObject({ spentUsdMicros: 200_000, reservedUsdMicros: 0 });
+    expect(settleOf(h)).toHaveLength(1);
+  });
+
+  test("nested cancellation: the child run gets the attempt's signal, stops, and settles BEFORE the parent's budget.summary", async () => {
+    const store = new RunStore(scratch());
+    const controller = new AbortController();
+    let childAgentAborted = false;
+    let childFinished = false;
+    const child = loaded([{ id: "c1", prompt: "long" } as NodeDoc], { name: "sub" });
+    const runWorkflow = async (_n: string, _i: Record<string, unknown>, opts?: RunWorkflowOptions) => {
+      const ch = harness({ store }); // no deps.signal: only the propagated attempt signal can stop it
+      ch.deps.agent = (req) => new Promise((resolve) => req.signal!.addEventListener("abort", () => { childAgentAborted = true; setTimeout(() => resolve({ ok: false, text: "", error: "killed", usage: usage(0.3), toolCalls: 0 }), 30); }));
+      const result = await executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget, signal: opts?.signal, budgetAbortGraceMs: 500 });
+      childFinished = true;
+      return result;
+    };
+    const h = harness({ store, runWorkflow, signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    const r = await within(run(h, [{ id: "sub", workflow: { name: "sub" } } as NodeDoc], { titan: { budget: { usd: 5, per_call_usd: 1 } } }));
+    expect(r.status).toBe("cancelled");
+    expect(childAgentAborted).toBe(true);
+    expect(childFinished).toBe(true);
+    // the child's interrupted call settled max($0.30, $1) = $1 into the PARENT scope before the parent summarised
+    expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+    expect(data(h, "budget.summary")[0].workflow).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+  });
+
+  test("a handler that swallows a hard refusal and returns success still fails the node, non-retryable", async () => {
+    const saved = RUNNERS.verifier;
+    let swallowed = 0;
+    (RUNNERS as any).verifier = async (_spec: unknown, ctx: any) => {
+      try {
+        await ctx.agent("check", { role: "verifier" });
+      } catch {
+        swallowed++;
+      }
+      return { status: "pass", artifacts: [], checks: {}, summary: "swallowed the refusal" };
+    };
+    try {
+      const h = harness({ answers: { first: [() => ({ usage: usage(0.8) })] } });
+      const r = await run(h, [
+        { id: "first", prompt: "spend" } as NodeDoc,
+        { id: "v", verify: { runner: "verifier", input: "x" }, depends_on: ["first"], retry: { max_attempts: 3, delay_ms: 0 } } as unknown as NodeDoc,
+      ], { titan: { budget: { usd: 1, per_call_usd: 0.5 } } });
+      expect(swallowed).toBe(1);
+      expect(r.nodes.v).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $0.2, needed $0.5" });
+      expect(r.budgetRefused).toMatchObject({ scope: "workflow:t", needed: 500_000 });
+    } finally {
+      (RUNNERS as any).verifier = saved;
+    }
+  });
+
+  test("a mimeograph whose judge no longer fits after its cells spent the budget fails once, non-retryable", async () => {
+    const h = harness();
+    let n = 0;
+    h.deps.agent = async (req) => { h.agentCalls.push(req); n++; return { ok: true, text: `cell ${n}`, usage: usage(n === 1 ? 0.9 : 0.1), toolCalls: 0 }; };
+    const r = await run(h, [{ id: "m", prompt: "x", mimeograph: "implementer,contrarian", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 0.5 } } });
+    expect(h.agentCalls).toHaveLength(2);
+    expect(r.nodes.m).toMatchObject({ status: "failed", attempts: 1, error: "budget exceeded: workflow:t remaining $0, needed $0.5" });
+    expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0 });
+  });
+});
+
+describe("repair 2: every agent dispatch path reserves and settles (blocker 4)", () => {
+  test("every AI node path under a budget: one budget.reserve and one budget.settle per deps.agent call, nothing left reserved", async () => {
+    const h = harness();
+    writeFileSync(join(h.deps.cwd, "vision.md"), "# Vision\n\n## Goals\nShip the dashboard.\n");
+    const commandsDir = scratch();
+    writeFileSync(join(commandsDir, "do-it.md"), "Do the command thing.");
+    const reasks = new Map<string, number>();
+    h.deps.agent = async (req) => {
+      h.agentCalls.push(req);
+      const base = { ok: true, sessionRef: `s-${h.agentCalls.length}`, usage: usage(0.01), toolCalls: 0, model: req.model };
+      const props = (req.outputSchema as any)?.properties ?? {};
+      if (props.winner) return { ...base, text: "```json\n" + JSON.stringify({ winner: 1, summary: "one" }) + "\n```" };
+      if (props.alignment) return { ...base, text: "```json\n" + JSON.stringify({ ok: true, alignment: [{ claim: "dashboard", source: "vision.md", section: "goals", status: "aligned" }], executionClaims: [], summary: "aligned" }) + "\n```" };
+      if (props.verdict || req.nodeId === "audit") return { ...base, text: "```json\n" + JSON.stringify({ verdict: "PASS", summary: "ok" }) + "\n```" };
+      if (props.answer) {
+        const n = (reasks.get(req.nodeId) ?? 0) + 1;
+        reasks.set(req.nodeId, n);
+        return { ...base, text: n === 1 ? "not json" : "```json\n{\"answer\": 42}\n```" };
+      }
+      return { ...base, text: `${req.nodeId} DONE` };
+    };
+    let asked = 0;
+    h.deps.approval = async () => (++asked === 1 ? { approved: false, response: "redo" } : { approved: true });
+    h.deps.bash = async () => ({ code: 1, stdout: "still red\n", stderr: "" });
+    h.deps.familyMax = () => "stub/max";
+    const nodes = [
+      { id: "prompt", prompt: "p" },
+      { id: "structured", prompt: "s", output_format: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"] } },
+      { id: "cmd", command: "do-it" },
+      { id: "loop", loop: { prompt: "l", until: "NEVER", until_bash: "false", max_iterations: 3 } },
+      { id: "gate", approval: { message: "ok?", on_reject: { prompt: "rework $REJECTION_REASON", max_attempts: 1 } } },
+      { id: "bo", best_of: { n: 2, prompt: "b" } },
+      { id: "mimeo", prompt: "m", mimeograph: "implementer,contrarian" },
+      { id: "il", interleave: { segments: 2, prompt: "seg $SEGMENT" } },
+      { id: "ver", verify: { runner: "verifier", input: "Build the dashboard per vision.md#goals." } },
+      { id: "audit", prompt: "audit", role: "auditor", depends_on: ["prompt"], output_format: { $ref: "titan://schemas/audit-verdict" } },
+    ].map((n) => ({ retry: { max_attempts: 1 }, ...n })) as unknown as NodeDoc[];
+    const wf = loaded(nodes, { titan: { budget: { usd: 1000, per_call_usd: 1 } } });
+    (wf as any).commands = { "do-it": join(commandsDir, "do-it.md") };
+    const r = await executeWorkflow(wf, h.deps, {});
+    const calls = h.agentCalls.length;
+    const byNode = (list: Array<{ nodeId: string }>) => list.reduce((acc, c) => ({ ...acc, [c.nodeId]: (acc[c.nodeId] ?? 0) + 1 }), {} as Record<string, number>);
+    // every path dispatched at least once, and the multi-call paths dispatched all their calls
+    expect(byNode(h.agentCalls)).toEqual({ prompt: 1, structured: 2, cmd: 1, loop: 3, gate: 1, bo: 3, mimeo: 3, il: 3, ver: 1, audit: 1 });
+    expect(h.agentCalls.filter((c) => c.nodeId === "loop").map((c) => c.model)).toContain("stub/max"); // the familyMax ladder step
+    expect(data(h, "budget.reserve")).toHaveLength(calls);
+    expect(settleOf(h)).toHaveLength(calls);
+    expect(byNode(data(h, "budget.reserve") as any)).toEqual(byNode(h.agentCalls));
+    expect(h.agentCalls.every((c) => typeof c.spendCap === "function")).toBe(true);
+    expect(r.budget).toMatchObject({ spentUsdMicros: calls * 10_000, reservedUsdMicros: 0 });
+  });
+
+  test("source audit: deps.agent has exactly one call site (executor runAgent); no workflow module spawns runChild or fetches a model directly", () => {
+    const root = join(import.meta.dir, "..", "modules");
+    const files: string[] = [];
+    const walk = (dir: string) => { for (const e of readdirSync(dir, { withFileTypes: true })) { const p = join(dir, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith(".ts")) files.push(p); } };
+    walk(root);
+    const hits = (re: RegExp) => files.flatMap((f) => readFileSync(f, "utf8").split("\n").map((line, i) => [f.slice(root.length + 1), i + 1, line] as const).filter(([, , line]) => re.test(line) && !/^\s*(\*|\/\/)/.test(line)));
+    const agentCalls = hits(/deps\.agent\(/);
+    expect(agentCalls.map(([f]) => f)).toEqual(["workflow/executor.ts"]);
+    expect(hits(/\.runAgent\(/).every(([f]) => f.startsWith("workflow/"))).toBe(true);
+    // workflow modules reach models only through ctx.runAgent / callAgent: no runChild, no createAgentRunner
+    expect(hits(/\brunChild\(|createAgentRunner\(/).filter(([f]) => f.startsWith("workflow/"))).toEqual([]);
+    // the runner-side agent seam of verify runners is callAgent (→ ctx.runAgent)
+    expect(readFileSync(join(root, "workflow", "nodes", "verify.ts"), "utf8")).toMatch(/agent: async \(prompt[^)]*\) => \{\s*const call = await callAgent\(ctx,/);
+    // the one runtime deps.agent is createAgentRunner, which forwards spendCap to runChild
+    expect(readFileSync(join(root, "workflow-runtime.ts"), "utf8")).toContain("...(req.spendCap ? { spendCap: req.spendCap } : {})");
+  });
+});
+
+describe("repair 2: worst-case admission across the chain (blocker 1)", () => {
+  test("a child node with a tiny TOTAL cannot undercut the parent's per_call: it reserves $0.50 and is refused, never a micro-dollar", async () => {
+    const store = new RunStore(scratch());
+    const child = loaded([{ id: "c1", prompt: "one", budget: { usd: 0.000001 } } as NodeDoc], { name: "sub" });
+    const childRuns: Harness[] = [];
+    const runWorkflow = async (_n: string, _i: Record<string, unknown>, opts?: RunWorkflowOptions) => {
+      const ch = harness({ store });
+      childRuns.push(ch);
+      return executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget });
+    };
+    const h = harness({ store, runWorkflow });
+    const r = await run(h, [{ id: "sub", workflow: { name: "sub" }, retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 3, per_call_usd: 0.5 } } });
+    expect(childRuns[0].agentCalls).toHaveLength(0);
+    expect(data(childRuns[0], "budget.refused")[0]).toMatchObject({ nodeId: "c1", scope: "workflow:t/node:sub/workflow:sub/node:c1", remaining: 1, needed: 500_000, transient: false });
+    expect(r.nodes.sub.error).toContain("needed $0.5");
+    expect(r.budget).toMatchObject({ spentUsdMicros: 0, reservedUsdMicros: 0 });
+  });
+
+  test("a fan-out of children shares the parent's remainder: concurrent worst cases never exceed it", async () => {
+    const store = new RunStore(scratch());
+    const child = loaded([{ id: "c1", prompt: "one" } as NodeDoc], { name: "sub" });
+    let inFlight = 0;
+    let peak = 0;
+    const runWorkflow = async (_n: string, _i: Record<string, unknown>, opts?: RunWorkflowOptions) => {
+      const ch = harness({ store });
+      ch.deps.agent = async (req) => { inFlight++; peak = Math.max(peak, inFlight); await new Promise((res) => setTimeout(res, 10)); inFlight--; return { ok: true, text: "c", usage: usage(0.1), toolCalls: 0, model: req.model }; };
+      return executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget, signal: opts?.signal });
+    };
+    const h = harness({ store, runWorkflow });
+    const r = await run(h, [
+      { id: "list", bash: "echo" } as NodeDoc,
+      { id: "fan", workflow: { name: "sub", fan_out: { source: "$inputs.items", as: "item", join: "all_done" } }, retry: { max_attempts: 1 } } as unknown as NodeDoc,
+    ], { titan: { budget: { usd: 1, per_call_usd: 0.4 } } }, { inputs: { items: [1, 2, 3, 4, 5] } });
+    // $1 / $0.40 worst case → at most 2 children in flight at once; the rest wait for settlements, all five eventually run
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(r.budget).toMatchObject({ spentUsdMicros: 500_000, reservedUsdMicros: 0 });
+  });
+
+  test("validator: a per_call above the total it sits beside (or a node total below the chain's per_call) is an error", () => {
+    const doc = (titan: Record<string, unknown>, node: Record<string, unknown> = {}) => validateWorkflow({ apiVersion: "titan.harness/v1", name: "t", nodes: [{ id: "a", prompt: "x", ...node }], titan: { budget: titan } }, {});
+    expect(doc({ usd: 1, per_call_usd: 2 }).errors.some((e) => e.message.includes("exceeds titan.budget.usd"))).toBe(true);
+    expect(doc({ tokens: 100, per_call_tokens: 200 }).errors.some((e) => e.message.includes("exceeds titan.budget.tokens"))).toBe(true);
+    expect(doc({ usd: 5, per_call_usd: 1 }, { budget: { usd: 0.5 } }).errors.some((e) => e.message.includes("could never dispatch"))).toBe(true);
+    expect(doc({ usd: 5, per_call_usd: 1 }, { budget: { usd: 2, per_call_usd: 0.5 } }).ok).toBe(true);
+    const warned = doc({ usd: 50 }, { budget: { usd: 1 } });
+    expect(warned.ok).toBe(true);
+    expect(warned.warnings.some((w) => w.rule === "budget" && w.message.includes("budget.per_call_usd"))).toBe(true);
+    expect(doc({ tokens: 1000 }).warnings.some((w) => w.message.includes("per_call_tokens"))).toBe(true);
   });
 });

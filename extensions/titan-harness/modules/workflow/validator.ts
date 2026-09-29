@@ -33,7 +33,7 @@ import { parse as parseYaml } from "yaml";
 import { resolveThinking } from "../model-stack.ts";
 import { normalizeThinking } from "../thinking.ts";
 import { resolveRef, validateInput, validateSchema } from "./json-schema.ts";
-import { DEFAULT_PER_CALL_USD } from "./budget.ts";
+import { DEFAULT_PER_CALL_TOKENS, DEFAULT_PER_CALL_USD } from "./budget.ts";
 import {
 	AI_ONLY_NODE_KEYS,
 	API_VERSION,
@@ -432,9 +432,19 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 					if (budget.per_call_usd !== undefined && (typeof budget.per_call_usd !== "number" || !(budget.per_call_usd > 0) || !Number.isFinite(budget.per_call_usd))) issues.error("titan", `titan.budget.per_call_usd must be a positive number`);
 					if (budget.per_call_tokens !== undefined && (!isInt(budget.per_call_tokens) || budget.per_call_tokens < 1)) issues.error("titan", `titan.budget.per_call_tokens must be a positive integer`);
 					if (budget.allow_unmetered_runners !== undefined && typeof budget.allow_unmetered_runners !== "boolean") issues.error("titan", `titan.budget.allow_unmetered_runners must be true or false`);
-					// Without per_call_usd each call reserves min(default $5, what is left): a total below the default serialises every call.
+					// Worst-case admission (budget.ts reservationFor): every call reserves the declared per_call (default $5 /
+					// 2M tokens) in full, so a total below it can never admit a call.
+					if (typeof budget.usd === "number" && typeof budget.per_call_usd === "number" && budget.per_call_usd > budget.usd) {
+						issues.error("budget", `titan.budget.per_call_usd ${budget.per_call_usd} exceeds titan.budget.usd ${budget.usd}: no agent call could ever be admitted`);
+					}
+					if (isInt(budget.tokens) && isInt(budget.per_call_tokens) && budget.per_call_tokens > budget.tokens) {
+						issues.error("budget", `titan.budget.per_call_tokens ${budget.per_call_tokens} exceeds titan.budget.tokens ${budget.tokens}: no agent call could ever be admitted`);
+					}
 					if (typeof budget.usd === "number" && budget.usd > 0 && budget.usd < DEFAULT_PER_CALL_USD && budget.per_call_usd === undefined) {
-						issues.warn("budget", `titan.budget.usd ${budget.usd} is below the default per-call reservation ($${DEFAULT_PER_CALL_USD}) and no per_call_usd is declared: every agent call reserves the whole remainder, so calls run one at a time — declare titan.budget.per_call_usd`);
+						issues.warn("budget", `titan.budget.usd ${budget.usd} is below the default per-call reservation ($${DEFAULT_PER_CALL_USD}) and no per_call_usd is declared: every agent call reserves the full default and is refused (unless a parent workflow declares a smaller per_call_usd) — declare titan.budget.per_call_usd`);
+					}
+					if (isInt(budget.tokens) && budget.tokens < DEFAULT_PER_CALL_TOKENS && budget.per_call_tokens === undefined) {
+						issues.warn("budget", `titan.budget.tokens ${budget.tokens} is below the default per-call reservation (${DEFAULT_PER_CALL_TOKENS} tokens) and no per_call_tokens is declared: every agent call is refused (unless a parent workflow declares a smaller per_call_tokens) — declare titan.budget.per_call_tokens`);
 					}
 					if (budget.context_budget !== undefined && (!isInt(budget.context_budget) || budget.context_budget < 1)) issues.error("titan", `titan.budget.context_budget must be a positive integer`);
 					if (budget.max_concurrent_children !== undefined && (!isInt(budget.max_concurrent_children) || budget.max_concurrent_children < 1 || budget.max_concurrent_children > 16)) {
@@ -623,6 +633,14 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 				for (const key of Object.keys(node.budget)) if (!NODE_BUDGET_KEYS.has(key)) issues.warn("unknown-key", `budget.${key} is unknown and ignored`, id);
 				if (node.budget.per_call_usd !== undefined && (typeof node.budget.per_call_usd !== "number" || !(node.budget.per_call_usd > 0) || !Number.isFinite(node.budget.per_call_usd))) issues.error("type", `budget.per_call_usd must be a positive number`, id);
 				if (node.budget.per_call_tokens !== undefined && (!isInt(node.budget.per_call_tokens) || node.budget.per_call_tokens < 1)) issues.error("type", `budget.per_call_tokens must be a positive integer`, id);
+				// Worst-case admission: the node's calls reserve the largest per_call declared on its chain (its own or titan.budget's).
+				const titanBudget: Record<string, unknown> = isMapping(top.titan) && isMapping(top.titan.budget) ? top.titan.budget : {};
+				const perCallUsd = Math.max(typeof node.budget.per_call_usd === "number" ? node.budget.per_call_usd : 0, typeof titanBudget.per_call_usd === "number" ? titanBudget.per_call_usd : 0);
+				const perCallTokens = Math.max(isInt(node.budget.per_call_tokens) ? node.budget.per_call_tokens : 0, isInt(titanBudget.per_call_tokens) ? titanBudget.per_call_tokens : 0);
+				if (typeof node.budget.usd === "number" && perCallUsd > node.budget.usd) issues.error("budget", `budget.usd ${node.budget.usd} is below the per-call reservation $${perCallUsd} (per_call_usd here or in titan.budget): this node could never dispatch an agent call`, id);
+				if (isInt(node.budget.tokens) && perCallTokens > node.budget.tokens) issues.error("budget", `budget.tokens ${node.budget.tokens} is below the per-call reservation ${perCallTokens} tokens: this node could never dispatch an agent call`, id);
+				if (typeof node.budget.usd === "number" && node.budget.usd < DEFAULT_PER_CALL_USD && perCallUsd === 0) issues.warn("budget", `budget.usd ${node.budget.usd} is below the default per-call reservation ($${DEFAULT_PER_CALL_USD}) and no per_call_usd applies: every agent call of this node is refused — declare budget.per_call_usd`, id);
+				if (isInt(node.budget.tokens) && node.budget.tokens < DEFAULT_PER_CALL_TOKENS && perCallTokens === 0) issues.warn("budget", `budget.tokens ${node.budget.tokens} is below the default per-call reservation (${DEFAULT_PER_CALL_TOKENS} tokens) and no per_call_tokens applies: every agent call of this node is refused — declare budget.per_call_tokens`, id);
 			}
 		}
 		if (node.isolation !== undefined && !(ISOLATION_MODES as readonly unknown[]).includes(node.isolation)) issues.error("type", `isolation must be none or worktree; found ${show(node.isolation)}`, id);

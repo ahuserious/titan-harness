@@ -57,13 +57,21 @@ export function watchdogPreemptionAllowed(opts: { spendCap?: unknown }): boolean
 	return !opts.spendCap;
 }
 
-/** True when the run's observed spend exceeds `cap` in any capped dimension. */
-export function overSpendCap(run: Pick<AgentRun, "costUsd" | "tokensIn" | "tokensOut">, cap: SpendCap | undefined): boolean {
+/**
+ * True when the run has reached `cap` in any capped dimension (observed spend ≥ cap — at the
+ * cap there is no room for another message), or, given the largest single message seen so far,
+ * when one more message of that size would pass the cap. The child is then stopped before it
+ * starts its next model turn, so a child whose messages do not grow never passes its cap.
+ */
+export function overSpendCap(run: Pick<AgentRun, "costUsd" | "tokensIn" | "tokensOut">, cap: SpendCap | undefined, largestMessage: SpendCap = {}): boolean {
 	if (!cap) return false;
-	if (typeof cap.usdMicros === "number" && Math.ceil(Math.round(run.costUsd * 1e9) / 1e3) > cap.usdMicros) return true;
-	if (typeof cap.tokens === "number" && run.tokensIn + run.tokensOut > cap.tokens) return true;
+	if (typeof cap.usdMicros === "number" && usdMicrosOf(run.costUsd) + (largestMessage.usdMicros ?? 0) >= cap.usdMicros) return true;
+	if (typeof cap.tokens === "number" && run.tokensIn + run.tokensOut + (largestMessage.tokens ?? 0) >= cap.tokens) return true;
 	return false;
 }
+
+/** USD → micro-USD rounded up (budget.ts usdToMicrosCeil; duplicated to keep child-runner free of workflow imports). */
+const usdMicrosOf = (usd: number): number => Math.max(0, Math.ceil(Math.round(usd * 1e9) / 1e3));
 
 /**
  * Spawn one `pi --mode json -p` child agent and stream its JSON events into `run`.
@@ -101,7 +109,7 @@ export function runChild(opts: {
 	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
 	extraTools?: string[]; // extension tools appended AFTER the /stack policy (structured output v2: `submit_result` must survive subagentTools=off and --no-tools)
 	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
-	spendCap?: () => SpendCap | undefined; // workflow budgets: re-read after every usage update; observed spend above it kills the child at once (run.budgetHalted = true) — the overrun is bounded by one message
+	spendCap?: () => SpendCap | undefined; // workflow budgets: re-read after every usage update; spend at the cap, or one more message of the largest size seen would pass it, kills the child before its next turn (run.budgetHalted = true)
 }): Promise<AgentRun> {
 	const run = opts.run;
 	run.thinking = opts.thinking;
@@ -209,16 +217,20 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				/* the watchdog never breaks a child */
 			}
 		};
-		// Workflow budgets: a child whose observed spend passes its cap is killed at once (not at a tool boundary).
+		// Workflow budgets: a child at its cap, or one message short of passing it, is killed at once (not at a tool boundary).
+		const largestMessage = { usdMicros: 0, tokens: 0 };
 		const checkSpend = () => {
 			if (!opts.spendCap || run.budgetHalted || closed) return;
 			let cap: SpendCap | undefined;
 			try {
 				cap = opts.spendCap();
 			} catch {
+				// A cap that cannot be read is treated as reached (fail closed).
+				run.budgetHalted = true;
+				killChild();
 				return;
 			}
-			if (overSpendCap(run, cap)) {
+			if (overSpendCap(run, cap, largestMessage)) {
 				run.budgetHalted = true;
 				killChild();
 			}
@@ -255,6 +267,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				if (msg.errorMessage) run.errorMessage = msg.errorMessage;
 				if (msg.usage) {
 					run.usageSeen = true;
+					const before = { usdMicros: usdMicrosOf(run.costUsd), tokens: run.tokensIn + run.tokensOut };
 					// Prompt tokens = input + cacheRead + cacheWrite (pi's own definition, see
 					// core/cache-stats.ts). cacheWrite is NOT optional accounting: on a cold
 					// cache the WHOLE prompt is billed as a write and `input` is only the few
@@ -277,6 +290,8 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 					// Children emit an opening message_end whose usage fields are all null; this is
 					// an assignment, not a sum, so counting one would clobber a real reading with 0.
 					if (ctxTokens > 0) run.ctxTokens = ctxTokens;
+					largestMessage.usdMicros = Math.max(largestMessage.usdMicros, usdMicrosOf(run.costUsd) - before.usdMicros);
+					largestMessage.tokens = Math.max(largestMessage.tokens, run.tokensIn + run.tokensOut - before.tokens);
 					checkUsage();
 					checkSpend();
 				}

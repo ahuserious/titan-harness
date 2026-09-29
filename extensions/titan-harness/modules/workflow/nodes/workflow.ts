@@ -8,7 +8,8 @@
  * array of child returns (null where a child did not complete). `isolation: worktree` is
  * forwarded to the runtime through the input `__isolation` (P4 wires worktrees). A
  * runtime without deps.runWorkflow fails the node without retries. Every child run gets this
- * node's budget scope as `parentBudget` (budget.ts): a child — or a fan-out of children
+ * node's budget scope as `parentBudget` (budget.ts) and the attempt's abort signal, and is
+ * registered with ctx.trackBudgetWork so the parent's summary waits for it: a child — or a fan-out of children
  * together — can never spend more than this node's, this workflow's and every ancestor's
  * remainder, whatever the child declares. A child run that failed on a hard budget refusal
  * (RunResult.budgetRefused) fails this node with retryable:false.
@@ -40,8 +41,15 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 	if (!run) return { status: "failed", output: undefined, error: `workflow ${spec.name}: this runtime cannot run child workflows (deps.runWorkflow is absent)`, retryable: false };
 	const baseInputs: Record<string, unknown> = { ...ctx.inputs };
 	if (spec.isolation) baseInputs.__isolation = spec.isolation;
+	// Each child run gets this attempt's signal (so a cancelled or abandoned attempt stops it) and is tracked by the
+	// executor, which waits for it — and so for every reservation it holds — before writing budget.summary.
+	const start = (inputs: Record<string, unknown>): Promise<RunResult> => {
+		const child = Promise.resolve().then(() => run(spec.name, inputs, { parentBudget: ctx.budgetScope, signal: ctx.signal }));
+		ctx.trackBudgetWork(child);
+		return child;
+	};
 	if (!spec.fan_out) {
-		const child = await run(spec.name, baseInputs, { parentBudget: ctx.budgetScope });
+		const child = await start(baseInputs);
 		const text = typeof child.returns === "string" ? child.returns : child.returns === undefined ? "" : `${JSON.stringify(child.returns, null, 2)}\n`;
 		if (child.status === "completed") return { status: "success", output: child.returns, text, meta: { childRunId: child.runId } };
 		// A child that failed on a hard budget refusal is never re-run: a retry would spend its early nodes again and be refused anyway.
@@ -52,7 +60,7 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 	if (!source.found || source.rest || !Array.isArray(source.value)) {
 		return { status: "failed", output: undefined, error: `fan_out.source ${spec.fan_out.source} did not resolve to an array`, retryable: false };
 	}
-	const children = await Promise.all(source.value.map((item) => run(spec.name, { ...baseInputs, [spec.fan_out!.as]: item }, { parentBudget: ctx.budgetScope })));
+	const children = await Promise.all(source.value.map((item) => start({ ...baseInputs, [spec.fan_out!.as]: item })));
 	const joined = joinChildren(children, spec.fan_out.join);
 	const output = children.map((c) => (c.status === "completed" ? (c.returns ?? null) : null));
 	const text = `${JSON.stringify(output, null, 2)}\n`;
