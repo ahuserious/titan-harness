@@ -218,6 +218,8 @@ export interface ApprovalSpec {
 	preset_key?: string;
 	/** Content bound to an approval (and preset receipt), substituted raw; default = the substituted message. */
 	content?: string;
+	/** Hosted approvals only: actors allowed to decide, intersected with the host ActorPolicy. */
+	reviewers?: string[];
 }
 
 export interface VerifySpec {
@@ -292,7 +294,7 @@ export const RETRY_KEYS = new Set(["max_attempts", "delay_ms"]);
 export const ON_FAIL_KEYS = new Set(["action", "max"]);
 export const SUBAGENTS_KEYS = new Set(["enabled", "tools", "cap"]);
 export const LOOP_KEYS = new Set(["prompt", "until", "until_bash", "max_iterations", "fresh_context", "interactive", "gate_message"]);
-export const APPROVAL_KEYS = new Set(["message", "capture_response", "on_reject", "preset_key", "content"]);
+export const APPROVAL_KEYS = new Set(["message", "capture_response", "on_reject", "preset_key", "content", "reviewers"]);
 export const ON_REJECT_KEYS = new Set(["prompt", "max_attempts"]);
 export const BEST_OF_KEYS = new Set(["n", "judge", "criteria", "prompt"]);
 export const INTERLEAVE_KEYS = new Set(["segments", "by", "synthesize", "reauthor", "prompt"]);

@@ -19,8 +19,13 @@
  *
  * Single writer = the host process; children never write here. Every JSON file is
  * written in canonical key order; files are 0600, directories 0700. Pure Node, no pi.
+ *
+ * Hosted (web) approvals need a RUNNER store: `openRunnerStore(root)` takes the exclusive
+ * `<root>/runner.lock` (O_EXCL; pid + process start time; a dead holder's lock is taken
+ * over), refuses DEFAULT_RUN_ROOT (the TUI's shared root), runs recoverInterruptedRuns once
+ * and registers the store; `assertRunnerStore` is what the hosted approval path checks.
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -370,34 +375,47 @@ export class RunStore {
 	 * Synchronous read/check/append (no await or user callback): atomic between consumers on
 	 * the same JS event loop, including separate RunStore instances. Cross-process/worker
 	 * access requires the existing SINGLE WRITER per run directory contract; no file lock.
-	 * The expected binding comes from the runner, never from the delivered decision.
+	 * The expected binding comes from the runner, never from the delivered decision:
+	 * `artifactSha256` is the runner's re-read of the releasable content and `actorAuthorized`
+	 * is the runner's host-policy verdict for the snapshot's actor (anything but `true` refuses).
+	 * The delivered decision is snapshotted once; checks, the log and the return use that copy.
+	 * The MAX_APPROVAL_REFUSALS-th refusal of a pending request expires it (fail closed).
 	 */
-	consumeDecision(dir: string, decision: ApprovalDecision, expected: { requestId: string; artifactSha256: string }): { ok: true } | { ok: false; reason: string } {
-		const entry = approvalIndex(dir).get(expected.requestId);
+	consumeDecision(dir: string, delivered: unknown, expected: { requestId: string; artifactSha256: string; actorAuthorized?: boolean }): { ok: true; decision: ApprovalDecision } | { ok: false; reason: string } {
+		const index = approvalIndex(dir);
+		const entry = index.get(expected.requestId);
 		const req = entry?.request;
 		const now = Date.now();
+		const snap = snapshotDecision(delivered);
+		const decision = snap.ok ? snap.decision : undefined;
 		let reason: string | undefined;
 		if (!entry) reason = "request not pending";
 		else if (entry.state === "consumed") reason = "request already consumed";
 		else if (entry.state !== "pending") reason = "request not pending";
-		else if (decision.requestId !== req!.requestId) reason = "requestId mismatch";
-		else if (decision.runId !== req!.runId || decision.runId !== this.runIdOf(dir)) reason = "runId mismatch";
-		else if (decision.nodeId !== req!.nodeId) reason = "nodeId mismatch";
-		else if (decision.artifactSha256 !== req!.artifactSha256) reason = "artifactSha256 mismatch";
+		else if (entry.decided) reason = "request already decided"; // crash or truncation after decided: never decide twice
+		else if (!snap.ok) reason = snap.reason;
+		else if (decision!.requestId !== req!.requestId) reason = "requestId mismatch";
+		else if (decision!.runId !== req!.runId || decision!.runId !== this.runIdOf(dir)) reason = "runId mismatch";
+		else if (decision!.nodeId !== req!.nodeId) reason = "nodeId mismatch";
+		else if (decision!.artifactSha256 !== req!.artifactSha256) reason = "artifactSha256 mismatch";
 		else if (expected.artifactSha256 !== req!.artifactSha256) reason = "stale artifact";
-		else if (typeof decision.actor !== "string" || !decision.actor.trim()) reason = "empty actor";
-		else if (decision.decision !== "approve" && decision.decision !== "reject") reason = "invalid decision";
-		else if (typeof decision.nonce !== "string" || !decision.nonce.trim()) reason = "empty nonce";
-		else if (!Number.isFinite(Date.parse(decision.decidedAt)) || !Number.isFinite(Date.parse(req!.expiresAt))) reason = "invalid timestamp";
-		else if (Date.parse(decision.decidedAt) > Date.parse(req!.expiresAt) || now > Date.parse(req!.expiresAt)) reason = "approval expired";
+		else if (!decision!.actor.trim()) reason = "empty actor";
+		else if (decision!.decision !== "approve" && decision!.decision !== "reject") reason = "invalid decision";
+		else if (!decision!.nonce.trim()) reason = "empty nonce";
+		else if (!Number.isFinite(Date.parse(decision!.decidedAt)) || !Number.isFinite(Date.parse(req!.expiresAt))) reason = "invalid timestamp";
+		else if (Date.parse(decision!.decidedAt) > Date.parse(req!.expiresAt) || now > Date.parse(req!.expiresAt)) reason = "approval expired";
+		else if (req!.actorPolicy?.allowedActors && !req!.actorPolicy.allowedActors.includes(decision!.actor)) reason = "actor_not_authorized";
+		else if (expected.actorAuthorized !== true) reason = "actor_not_authorized";
 		if (reason) {
-			this.appendApproval(dir, "approval.refused", { requestId: expected.requestId, decision, reason });
-			this.expireApproval(dir, expected.requestId);
+			this.appendApproval(dir, "approval.refused", { requestId: expected.requestId, ...(decision ? { decision } : {}), reason });
+			if (entry?.state === "pending" && entry.refusals + 1 >= MAX_APPROVAL_REFUSALS) {
+				this.appendApproval(dir, "approval.expired", { requestId: expected.requestId, reason: "refusal limit" });
+			} else if (entry?.state === "pending") this.expireApproval(dir, expected.requestId);
 			return { ok: false, reason };
 		}
 		this.appendApproval(dir, "approval.decided", { requestId: expected.requestId, decision });
-		this.appendApproval(dir, "approval.consumed", { requestId: expected.requestId, nonce: decision.nonce, actor: decision.actor });
-		return { ok: true };
+		this.appendApproval(dir, "approval.consumed", { requestId: expected.requestId, nonce: decision!.nonce, actor: decision!.actor });
+		return { ok: true, decision: decision! };
 	}
 
 	private runIdOf(dir: string): string {
@@ -442,18 +460,80 @@ function readChainOrEmpty(file: string): ChainRow[] {
 	return readChain(file);
 }
 
-/** Rebuilt from the verified log, not a second mutable source of truth. */
-function approvalIndex(dir: string): Map<string, { request: ApprovalRequest; state: "pending" | "consumed" | "expired" }> {
+/** Refusals a single request tolerates before the runner expires it (bounds log growth and waiting). */
+export const MAX_APPROVAL_REFUSALS = 20;
+/** Largest delivered `response` the runner accepts (UTF-8 bytes); larger is refused, not truncated. */
+export const MAX_APPROVAL_RESPONSE_BYTES = 64 * 1024;
+
+/**
+ * One explicit copy of a delivered decision: every field is read exactly once and must be a
+ * string (`response`: string or absent). Non-objects, arrays and throwing getters are malformed.
+ * Checks, the audit log and the node's outcome all use this copy, never the delivered object.
+ */
+export function snapshotDecision(value: unknown): { ok: true; decision: ApprovalDecision } | { ok: false; reason: string } {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, reason: "malformed decision" };
+	let copy: Record<string, unknown>;
+	try {
+		const v = value as Record<string, unknown>;
+		copy = { requestId: v.requestId, runId: v.runId, nodeId: v.nodeId, artifactSha256: v.artifactSha256, actor: v.actor, decision: v.decision, response: v.response, decidedAt: v.decidedAt, nonce: v.nonce };
+	} catch {
+		return { ok: false, reason: "malformed decision" };
+	}
+	for (const key of ["requestId", "runId", "nodeId", "artifactSha256", "actor", "decision", "decidedAt", "nonce"]) {
+		if (typeof copy[key] !== "string") return { ok: false, reason: "malformed decision" };
+	}
+	if (copy.response !== undefined && typeof copy.response !== "string") return { ok: false, reason: "malformed decision" };
+	if (typeof copy.response === "string" && Buffer.byteLength(copy.response, "utf8") > MAX_APPROVAL_RESPONSE_BYTES) return { ok: false, reason: "response too large" };
+	if (copy.response === undefined) delete copy.response;
+	return { ok: true, decision: copy as unknown as ApprovalDecision };
+}
+
+interface ApprovalEntry {
+	request: ApprovalRequest;
+	state: "pending" | "consumed" | "expired";
+	/** The last decided snapshot; the consumed decision once state is "consumed". */
+	decided?: ApprovalDecision;
+	refusals: number;
+}
+
+/**
+ * Rebuilt from the verified log, not a second mutable source of truth. Lifecycle rules are
+ * part of validity: a duplicate `approval.requested`, a decided/consumed/expired row for an
+ * unknown or non-pending request, a second decided row, a consumed row without a decided row, or an unknown row
+ * type makes the chain invalid and every approval operation throws (fail closed).
+ * `approval.refused` rows never change state, so they may name any request.
+ */
+function approvalIndex(dir: string): Map<string, ApprovalEntry> {
 	const file = path.join(dir, APPROVALS_FILE);
 	const verified = verifyChain(file);
 	if (!verified.ok) throw new Error(`approval chain invalid: ${verified.reason}`);
-	const index = new Map<string, { request: ApprovalRequest; state: "pending" | "consumed" | "expired" }>();
+	const index = new Map<string, ApprovalEntry>();
+	const invalid = (row: ChainRow, why: string): never => { throw new Error(`approval chain invalid: seq ${row.seq} ${why}`); };
 	for (const row of readChain(file)) {
-		const data = row.data as { request?: ApprovalRequest; requestId?: string };
-		if (row.type === "approval.requested" && data.request) index.set(data.request.requestId, { request: data.request, state: "pending" });
-		const entry = data.requestId ? index.get(data.requestId) : undefined;
-		if (entry && row.type === "approval.consumed") entry.state = "consumed";
-		if (entry && row.type === "approval.expired") entry.state = "expired";
+		const data = (row.data ?? {}) as { request?: ApprovalRequest; requestId?: string; decision?: ApprovalDecision };
+		if (row.type === "approval.requested") {
+			const id = data.request?.requestId;
+			if (typeof id !== "string" || !id) invalid(row, "request without requestId");
+			if (index.has(id!)) invalid(row, `duplicate request ${id}`);
+			index.set(id!, { request: data.request!, state: "pending", refusals: 0 });
+			continue;
+		}
+		const entry = typeof data.requestId === "string" ? index.get(data.requestId) : undefined;
+		if (row.type === "approval.refused") {
+			if (entry) entry.refusals++;
+			continue;
+		}
+		if (row.type !== "approval.decided" && row.type !== "approval.consumed" && row.type !== "approval.expired") invalid(row, `unknown row type ${String(row.type)}`);
+		if (!entry) invalid(row, `${String(row.type)} for unknown request`);
+		if (entry!.state !== "pending") invalid(row, `${String(row.type)} for ${entry!.state} request`);
+		if (row.type === "approval.decided") {
+			if (entry!.decided) invalid(row, "second decision for one request");
+			entry!.decided = data.decision;
+		}
+		else if (row.type === "approval.consumed") {
+			if (!entry!.decided) invalid(row, "consumed without a decision");
+			entry!.state = "consumed";
+		} else entry!.state = "expired";
 	}
 	return index;
 }
@@ -461,6 +541,22 @@ function approvalIndex(dir: string): Map<string, { request: ApprovalRequest; sta
 /** Pending means no consumed/expired event; reading (including recovery) never expires requests. */
 export function listPendingApprovals(dir: string): ApprovalRequest[] {
 	return [...approvalIndex(dir).values()].filter(e => e.state === "pending").map(e => e.request);
+}
+
+/**
+ * The hosted preset tally, from the runner's approvals.jsonl only: DISTINCT actors among
+ * consumed approve decisions of this run whose request carried `presetKey` and was bound to
+ * `contentSha256`. Receipt files and reviewer names typed into responses never count.
+ */
+export function tallyPresetApprovals(dir: string, presetKey: string, contentSha256: string): { approve: number; reject: number; reviewers: string[] } {
+	const reviewers: string[] = [];
+	let reject = 0;
+	for (const entry of approvalIndex(dir).values()) {
+		if (entry.state !== "consumed" || !entry.decided || entry.request.presetKey !== presetKey || entry.request.artifactSha256 !== contentSha256) continue;
+		if (entry.decided.decision === "reject") reject++;
+		else if (entry.decided.decision === "approve" && !reviewers.includes(entry.decided.actor)) reviewers.push(entry.decided.actor);
+	}
+	return { approve: reviewers.length, reject, reviewers };
 }
 
 /**
@@ -477,4 +573,151 @@ export function recoverInterruptedRuns(store: RunStore): RunMeta[] {
 		recovered.push(store.updateRun(dir, { status: "interrupted" }));
 	}
 	return recovered;
+}
+
+// ═══ Runner store: exclusive root + startup recovery ═══════════════════════════
+
+export const RUNNER_LOCK_FILE = "runner.lock";
+
+interface RunnerLockBody {
+	pid: number;
+	/** /proc/<pid>/stat starttime (clock ticks since boot); absent off Linux. Detects pid reuse. */
+	procStart?: string;
+	token: string;
+	acquiredAt: string;
+}
+
+/** A RunStore whose root this process holds exclusively (see openRunnerStore). */
+export interface RunnerStore extends RunStore {
+	readonly lockPath: string;
+	/** Runs found `running` at open and marked `interrupted`. */
+	readonly recovered: RunMeta[];
+	/** Drop the lock (only if it is still ours) and unregister the store. */
+	release(): void;
+}
+
+const runnerStores = new WeakMap<RunStore, { lockPath: string; token: string }>();
+
+function procStartOf(pid: number): string | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function lockHolderAlive(body: Partial<RunnerLockBody> | undefined): boolean {
+	const pid = Number(body?.pid);
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+	}
+	// Same pid, different process start → the pid was reused; the recorded holder is gone.
+	const now = procStartOf(pid);
+	return !(body?.procStart && now && body.procStart !== now);
+}
+
+function readLockBody(file: string): Partial<RunnerLockBody> | undefined {
+	try {
+		const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+		return raw && typeof raw === "object" ? raw : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function realish(p: string): string {
+	try { return fs.realpathSync.native(p); } catch { return path.resolve(p); }
+}
+
+function nested(a: string, b: string): boolean {
+	const rel = path.relative(a, b);
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/**
+ * Open the runner's own store: refuse DEFAULT_RUN_ROOT (and any root nested in or around
+ * it), take `<root>/runner.lock` with O_EXCL, then run recoverInterruptedRuns exactly once.
+ * A lock whose holder pid is dead (or reused, by /proc start time) is taken over by
+ * renaming it aside and re-checking that the renamed file is the stale one observed; a
+ * live holder, including this same process, is refused. The hosted approval path accepts
+ * only stores returned here (assertRunnerStore).
+ */
+export function openRunnerStore(root: string, opts: { defaultRoot?: string } = {}): RunnerStore {
+	const resolved = path.resolve(root);
+	const shared = realish(opts.defaultRoot ?? DEFAULT_RUN_ROOT);
+	const refuse = (real: string) => {
+		if (nested(real, shared) || nested(shared, real)) throw new Error(`openRunnerStore: refusing the shared TUI run root ${shared}; give the runner its own root`);
+	};
+	refuse(realish(resolved)); // before creating anything
+	fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+	refuse(realish(resolved)); // and again once symlinks resolve
+	const lockPath = path.join(resolved, RUNNER_LOCK_FILE);
+	const body: RunnerLockBody = { pid: process.pid, procStart: procStartOf(process.pid), token: randomUUID(), acquiredAt: new Date().toISOString() };
+	let acquired = false;
+	for (let attempt = 0; attempt < 3 && !acquired; attempt++) {
+		try {
+			const fd = fs.openSync(lockPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+			try {
+				fs.writeSync(fd, `${JSON.stringify(body)}\n`);
+				fs.fsyncSync(fd);
+			} finally {
+				fs.closeSync(fd);
+			}
+			acquired = true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			const holder = readLockBody(lockPath);
+			if (lockHolderAlive(holder)) throw new Error(`openRunnerStore: ${resolved} is locked by live runner pid ${holder!.pid}`);
+			if (holder === undefined && attempt === 0) continue; // a creator may be mid-write; look again
+			const aside = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+			try {
+				fs.renameSync(lockPath, aside);
+			} catch (renameError) {
+				if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
+				throw renameError;
+			}
+			const moved = readLockBody(aside);
+			if (holder && moved?.token !== holder.token) {
+				// We displaced a fresh lock that replaced the stale one: put it back and refuse.
+				try { fs.linkSync(aside, lockPath); } catch {}
+				try { fs.unlinkSync(aside); } catch {}
+				throw new Error(`openRunnerStore: ${resolved} was taken by another runner during stale-lock takeover`);
+			}
+			fs.unlinkSync(aside);
+		}
+	}
+	if (!acquired) throw new Error(`openRunnerStore: could not lock ${resolved}`);
+	if (readLockBody(lockPath)?.token !== body.token) throw new Error(`openRunnerStore: lost ${lockPath} while acquiring it`);
+	const store = new RunStore(resolved) as RunnerStore;
+	let recovered: RunMeta[];
+	try {
+		recovered = recoverInterruptedRuns(store);
+	} catch (error) {
+		try { if (readLockBody(lockPath)?.token === body.token) fs.unlinkSync(lockPath); } catch {}
+		throw error;
+	}
+	runnerStores.set(store, { lockPath, token: body.token });
+	Object.defineProperties(store, {
+		lockPath: { value: lockPath, enumerable: true },
+		recovered: { value: recovered, enumerable: true },
+		release: {
+			value: () => {
+				runnerStores.delete(store);
+				try { if (readLockBody(lockPath)?.token === body.token) fs.unlinkSync(lockPath); } catch {}
+			},
+		},
+	});
+	return store;
+}
+
+/** Throws unless `store` came from openRunnerStore in this process and still holds its lock; `runDir`, when given, must be inside its root. */
+export function assertRunnerStore(store: RunStore, runDir?: string): void {
+	const held = runnerStores.get(store);
+	if (!held) throw new Error("hosted approvals require a runner store opened with openRunnerStore(root) (exclusive lock + startup recovery)");
+	if (readLockBody(held.lockPath)?.token !== held.token) throw new Error(`hosted approvals: runner lock ${held.lockPath} is no longer held by this store`);
+	if (runDir !== undefined && !nested(store.root, path.resolve(runDir))) throw new Error(`hosted approvals: run directory ${runDir} is outside the runner store root ${store.root}`);
 }

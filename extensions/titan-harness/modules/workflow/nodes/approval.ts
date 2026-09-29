@@ -15,9 +15,24 @@
  * `receipts` counts distinct approve receipts for that content, so a ship node's
  * `when: $gate.output.receipts >= 3` gates on receipts, never on prose. An unknown or
  * invalid preset fails the node without retries.
+ *
+ * Content binding: attempt 1 binds sha256 of `content` (substituted raw; default the
+ * substituted message). From attempt 2 on, after an on_reject rework, the artifact this
+ * node releases (`text`, the artifact body) is the rework's text, so the request binds
+ * and consumption re-reads exactly that text; presets hash the same bytes.
+ *
+ * Hosted (runner-store) approvals: `reviewers:` (optional) narrows the host ActorPolicy;
+ * the preset tally is `tallyPresetApprovals` over the runner's approvals.jsonl (distinct
+ * consumed approve actors for this preset key + content sha), never receipt files under
+ * ARTIFACTS_DIR (agent-writable) and never names typed into a response; `reviewers` in
+ * the output are actors. Receipt files are still written (reviewer = the actor) for
+ * compatibility but never counted. A hosted outcome without a consumed decision (timeout,
+ * unavailable, refusal limit) is not a human rejection: no rework, no receipt, the node
+ * ends cancelled.
  */
 import { sha256 } from "../../hash-chain.ts";
 import type { AgentResult, NodeHandler } from "../executor.ts";
+import { tallyPresetApprovals } from "../../run-store.ts";
 import { type ContentPreset, countApprovals, parseReviewResponse, presetByKey, receiptsDirFor, writeReceipt } from "../presets.ts";
 import type { ApprovalSpec } from "../schema.ts";
 import { type AgentCallResult, callAgent } from "./ai.ts";
@@ -39,9 +54,10 @@ export const runApprovalNode: NodeHandler = async (ctx) => {
 	}
 	let contentSha256: string;
 	const receiptsDir = preset ? receiptsDirFor(ctx.deps.artifactsDir, preset) : undefined;
-	const receipt = (decision: "approve" | "reject", response: string | undefined): string | undefined => {
+	const receipt = (decision: "approve" | "reject", response: string | undefined, actor?: string): string | undefined => {
 		if (!preset || !receiptsDir || !contentSha256) return undefined;
 		const parsed = parseReviewResponse(response);
+		if (actor !== undefined) parsed.reviewer = actor; // hosted: the runner-checked actor, never typed prose
 		const file = writeReceipt(receiptsDir, { presetKey: preset.key, reviewer: parsed.reviewer, decision, rubricScores: parsed.rubricScores, ts: new Date().toISOString(), contentSha256, runId: ctx.deps.runId, nodeId: ctx.node.id, response: response?.trim() || undefined });
 		ctx.log("evidence.captured", { kind: "approval-receipt", presetKey: preset.key, decision, reviewer: parsed.reviewer, contentSha256, path: file });
 		return file;
@@ -50,14 +66,21 @@ export const runApprovalNode: NodeHandler = async (ctx) => {
 	let lastRework: AgentCallResult | undefined;
 	for (;;) {
 		const message = ctx.subst(spec.message, "prompt");
-		// Bind the declared content, re-substituting after rework and at consumption.
-		const content = () => spec.content !== undefined ? ctx.subst(spec.content, "raw") : ctx.subst(spec.message, "prompt");
+		// Bind what this node will release: the declared content on attempt 1, the rework text
+		// after a rework (the declared `$dep.output` is stale by then). Re-read at consumption.
+		const rework = lastRework;
+		const content = rework ? () => rework.text ?? "" : () => spec.content !== undefined ? ctx.subst(spec.content, "raw") : ctx.subst(spec.message, "prompt");
 		contentSha256 = sha256(content());
-		const gate = await ctx.deps.approval(message, { captureResponse: Boolean(spec.capture_response || spec.on_reject || preset), nodeId: ctx.node.id, attempt: reworks + 1, content, signal: ctx.signal });
+		const gate = await ctx.deps.approval(message, { captureResponse: Boolean(spec.capture_response || spec.on_reject || preset), nodeId: ctx.node.id, attempt: reworks + 1, content, reviewers: spec.reviewers, presetKey: preset?.key, signal: ctx.signal });
+		if (gate.hosted && gate.actor === undefined) {
+			// No consumed human decision: fail closed without rework or a synthetic receipt.
+			const error = `approval not decided: ${gate.response ?? "no decision"}`;
+			return { status: "cancelled", output: gate.response ?? "", text: lastRework?.text, error, cancelRun: `${ctx.node.id}: ${error}`, usage, sessionRef: lastRework?.sessionRef, meta: { reworks } };
+		}
 		if (gate.approved) {
-			const file = receipt("approve", gate.response);
+			const file = receipt("approve", gate.response, gate.actor);
 			if (preset && receiptsDir && contentSha256) {
-				const tally = countApprovals(receiptsDir, contentSha256);
+				const tally = gate.hosted ? tallyPresetApprovals(ctx.deps.runDir, preset.key, contentSha256) : countApprovals(receiptsDir, contentSha256);
 				return {
 					status: "success",
 					output: { approved: true, receipts: tally.approve, required: preset.reviewers.human_min, presetKey: preset.key, contentSha256, reviewers: tally.reviewers, response: gate.response ?? "" },
@@ -76,7 +99,7 @@ export const runApprovalNode: NodeHandler = async (ctx) => {
 				meta: { reworks, presetKey: spec.preset_key, response: spec.capture_response ? gate.response : undefined },
 			};
 		}
-		receipt("reject", gate.response);
+		receipt("reject", gate.response, gate.actor);
 		const reason = gate.response?.trim() || "rejected";
 		if (!spec.on_reject || reworks >= max) {
 			const error = spec.on_reject ? `approval rejected after ${reworks}/${max} rework attempts: ${reason}` : `approval rejected: ${reason}`;
