@@ -7,7 +7,10 @@
  * run concurrently, joined by the trigger rule (default all_success) — the output is the
  * array of child returns (null where a child did not complete). `isolation: worktree` is
  * forwarded to the runtime through the input `__isolation` (P4 wires worktrees). A
- * runtime without deps.runWorkflow fails the node without retries.
+ * runtime without deps.runWorkflow fails the node without retries. Every child run gets this
+ * node's budget scope as `parentBudget` (budget.ts): a child — or a fan-out of children
+ * together — can never spend more than this node's, this workflow's and every ancestor's
+ * remainder, whatever the child declares.
  */
 import type { NodeHandler, RunResult } from "../executor.ts";
 import type { TriggerRule } from "../schema.ts";
@@ -37,7 +40,7 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 	const baseInputs: Record<string, unknown> = { ...ctx.inputs };
 	if (spec.isolation) baseInputs.__isolation = spec.isolation;
 	if (!spec.fan_out) {
-		const child = await run(spec.name, baseInputs);
+		const child = await run(spec.name, baseInputs, { parentBudget: ctx.budgetScope });
 		const text = typeof child.returns === "string" ? child.returns : child.returns === undefined ? "" : `${JSON.stringify(child.returns, null, 2)}\n`;
 		if (child.status === "completed") return { status: "success", output: child.returns, text, meta: { childRunId: child.runId } };
 		return { status: "failed", output: undefined, text, error: `child workflow ${spec.name} ${child.status}${child.error ? `: ${child.error}` : ""}`, meta: { childRunId: child.runId } };
@@ -46,7 +49,7 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 	if (!source.found || source.rest || !Array.isArray(source.value)) {
 		return { status: "failed", output: undefined, error: `fan_out.source ${spec.fan_out.source} did not resolve to an array`, retryable: false };
 	}
-	const children = await Promise.all(source.value.map((item) => run(spec.name, { ...baseInputs, [spec.fan_out!.as]: item })));
+	const children = await Promise.all(source.value.map((item) => run(spec.name, { ...baseInputs, [spec.fan_out!.as]: item }, { parentBudget: ctx.budgetScope })));
 	const joined = joinChildren(children, spec.fan_out.join);
 	const output = children.map((c) => (c.status === "completed" ? (c.returns ?? null) : null));
 	const text = `${JSON.stringify(output, null, 2)}\n`;

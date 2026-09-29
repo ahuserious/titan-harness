@@ -24,6 +24,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { NodeHandler, NodeOutcome } from "../executor.ts";
+import { isBudgetExceeded } from "../budget.ts";
 import { buildEvidence, type CitationDoc, type EvidenceArtifact, type EvidenceKind, type EvidenceSource, hashArtifact, writeEvidencePackage } from "../evidence.ts";
 import { isRunnerName, type RunnerContext, type RunnerResult, RUNNERS, runnerFetch } from "../runners/index.ts";
 import type { JsonSchema, SlotRole, VerifySpec } from "../schema.ts";
@@ -113,7 +114,8 @@ export const runVerifyNode: NodeHandler = async (ctx): Promise<NodeOutcome> => {
 	try {
 		result = await RUNNERS[spec.runner](spec, runnerCtx);
 	} catch (error) {
-		if (ctx.signal.aborted) throw error;
+		// An abort or a budget refusal is the executor's to report, never a runner failure to retry.
+		if (ctx.signal.aborted || isBudgetExceeded(error)) throw error;
 		result = { status: "fail", artifacts: [], checks: {}, summary: `${spec.runner} threw: ${error instanceof Error ? error.message : String(error)}`, reason: error instanceof Error ? error.message : String(error) };
 	}
 	const pkg = buildEvidence(

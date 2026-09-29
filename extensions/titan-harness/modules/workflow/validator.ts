@@ -73,6 +73,7 @@ import {
 	SLOT_ROLES,
 	SUBAGENTS_KEYS,
 	TITAN_BUDGET_KEYS,
+	NODE_BUDGET_KEYS,
 	TITAN_EVIDENCE_KEYS,
 	TITAN_KEYS,
 	TITAN_WATCHDOG_KEYS,
@@ -421,12 +422,14 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 				}
 			}
 			if (titan.budget !== undefined) {
-				if (!isMapping(titan.budget)) issues.error("titan", `titan.budget must be a mapping {usd, tokens, max_concurrent_children, context_budget}`);
+				if (!isMapping(titan.budget)) issues.error("titan", `titan.budget must be a mapping {usd, tokens, per_call_usd, per_call_tokens, max_concurrent_children, context_budget}`);
 				else {
 					const budget = titan.budget;
 					for (const key of Object.keys(budget)) if (!TITAN_BUDGET_KEYS.has(key)) issues.warn("unknown-key", `titan.budget.${key} is unknown and ignored`);
 					if (budget.usd !== undefined && (typeof budget.usd !== "number" || !(budget.usd >= 0))) issues.error("titan", `titan.budget.usd must be a non-negative number`);
 					if (budget.tokens !== undefined && (!isInt(budget.tokens) || budget.tokens < 0)) issues.error("titan", `titan.budget.tokens must be a non-negative integer`);
+					if (budget.per_call_usd !== undefined && (typeof budget.per_call_usd !== "number" || !(budget.per_call_usd >= 0))) issues.error("titan", `titan.budget.per_call_usd must be a non-negative number`);
+					if (budget.per_call_tokens !== undefined && (!isInt(budget.per_call_tokens) || budget.per_call_tokens < 0)) issues.error("titan", `titan.budget.per_call_tokens must be a non-negative integer`);
 					if (budget.context_budget !== undefined && (!isInt(budget.context_budget) || budget.context_budget < 1)) issues.error("titan", `titan.budget.context_budget must be a positive integer`);
 					if (budget.max_concurrent_children !== undefined && (!isInt(budget.max_concurrent_children) || budget.max_concurrent_children < 1 || budget.max_concurrent_children > 16)) {
 						issues.error("titan", `titan.budget.max_concurrent_children must be an integer between 1 and 16; found ${show(budget.max_concurrent_children)}`);
@@ -611,6 +614,9 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 			else {
 				if (node.budget.usd !== undefined && (typeof node.budget.usd !== "number" || !(node.budget.usd >= 0))) issues.error("type", `budget.usd must be a non-negative number`, id);
 				if (node.budget.tokens !== undefined && (!isInt(node.budget.tokens) || node.budget.tokens < 0)) issues.error("type", `budget.tokens must be a non-negative integer`, id);
+				for (const key of Object.keys(node.budget)) if (!NODE_BUDGET_KEYS.has(key)) issues.warn("unknown-key", `budget.${key} is unknown and ignored`, id);
+				if (node.budget.per_call_usd !== undefined && (typeof node.budget.per_call_usd !== "number" || !(node.budget.per_call_usd >= 0))) issues.error("type", `budget.per_call_usd must be a non-negative number`, id);
+				if (node.budget.per_call_tokens !== undefined && (!isInt(node.budget.per_call_tokens) || node.budget.per_call_tokens < 0)) issues.error("type", `budget.per_call_tokens must be a non-negative integer`, id);
 			}
 		}
 		if (node.isolation !== undefined && !(ISOLATION_MODES as readonly unknown[]).includes(node.isolation)) issues.error("type", `isolation must be none or worktree; found ${show(node.isolation)}`, id);

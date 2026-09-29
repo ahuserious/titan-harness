@@ -331,7 +331,7 @@ export interface WorkflowRuntimeHost {
 	ui?: RuntimeUi;
 	slotFor?(req: AgentRequest): ModelSlot | undefined;
 	onRun?(run: AgentRun, req: AgentRequest): void;
-	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
+	runWorkflow?: WorkflowRuntimeDeps["runWorkflow"];
 	mcpTool?: WorkflowRuntimeDeps["mcpTool"];
 	/** The max-reasoning model of a model's family (the mechanical ladder's step 2); undefined → stay on the model. */
 	familyMax?(model: string): string | undefined;

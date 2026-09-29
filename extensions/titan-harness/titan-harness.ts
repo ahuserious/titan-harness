@@ -72,7 +72,7 @@ import { readHarnessDefaults, registerTerraformCommand } from "./modules/cmd-ter
 import { registerLocalDevVerifyCommand } from "./modules/cmd-local-dev-verify.ts";
 import { ontologyStage } from "./modules/infranodus.ts";
 import { loadWorkflow } from "./modules/workflow/loader.ts";
-import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult } from "./modules/workflow/executor.ts";
+import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult, type RunWorkflowOptions } from "./modules/workflow/executor.ts";
 import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
 import type { ValidateContext } from "./modules/workflow/validator.ts";
 import { normalizeThinking } from "./modules/thinking.ts";
@@ -2161,7 +2161,7 @@ export default function (pi: ExtensionAPI) {
 				recordRun(run);
 				renderFooterWidget();
 			},
-			runWorkflow: async (name: string, inputs: Record<string, unknown>): Promise<WorkflowRunResult> => {
+			runWorkflow: async (name: string, inputs: Record<string, unknown>, runOpts?: RunWorkflowOptions): Promise<WorkflowRunResult> => {
 				const child = loadWorkflow(name, ctx.cwd, workflowValidateContext(ctx));
 				const opened = runStore().open({
 					projectSlug: RunStore.projectSlug(ctx.cwd),
@@ -2171,7 +2171,7 @@ export default function (pi: ExtensionAPI) {
 					parentRunId: parentRunId ?? runId,
 					status: "running",
 				});
-				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs });
+				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs, parentBudget: runOpts?.parentBudget });
 				try {
 					runStore().updateRun(opened.dir, { status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "aborted" : "failed", endedAt: new Date().toISOString() });
 				} catch {}

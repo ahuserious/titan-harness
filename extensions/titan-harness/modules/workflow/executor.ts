@@ -4,7 +4,8 @@
  * routes with `when` + trigger rules, retries, applies `on_fail`, hands artifacts from node
  * to node through `$id.output` / `$ARTIFACTS_DIR`, and records everything in the run store:
  *
- *   events.jsonl     workflow.start/end, phase.start, node.start/end, agent.start/end, elevation.report
+ *   events.jsonl     workflow.start/end, phase.start, node.start/end, agent.start/end, elevation.report,
+ *                    budget.* (when a budget applies)
  *   ledger.jsonl     one row per agent call (origin "run", or the reviewer roles' own origins)
  *   agents/*.json    one record per agent call (`<nodeId>`, `<nodeId>#2`, …)
  *   artifacts/nodes/<id>.md (+ .meta.json)   every node's text or JSON output
@@ -19,6 +20,22 @@
  * abort handling (deps.signal plus its own cancel controller — every running node ends
  * "cancelled"), artifact writing and the store rows. Roles default to "worker" when a node
  * names none; role "architect" is always read-only (nodes/ai.ts).
+ *
+ * Budgets (LANE-3 N3-09, budget.ts, docs/workflow-budget.md): every agent call of every node
+ * type goes through runAgent below, which reserves the call's worst case (node budget.per_call_*,
+ * else titan.budget.per_call_*, else DEFAULT_PER_CALL_*; never above the node's own budget)
+ * against the node scope, the workflow scope (titan.budget) and — for a child run started by a
+ * `workflow:` node — every ancestor scope (ExecuteOptions.parentBudget) BEFORE deps.agent is
+ * called. A refusal that only in-flight reservations cause waits for them to settle; a hard
+ * refusal throws BudgetExceededError and the node fails "budget exceeded: <scope> remaining X,
+ * needed Y" with retryable:false. After the call the reservation settles at the child's reported
+ * usage (costUsd, tokensIn+tokensOut); a missing dimension settles at the full reservation, an
+ * actual above the reservation is charged in full and flagged; an interrupted call settles at
+ * the late usage if it arrives within ExecuteOptions.budgetAbortGraceMs, else the reservation.
+ * Retries reserve per attempt. events.jsonl carries budget.reserve / budget.wait /
+ * budget.refused / budget.settle / budget.overrun / budget.summary so spend-so-far can be
+ * recomputed from the run dir. No budget anywhere in the chain → no reservations, no budget
+ * events, behaviour as before.
  *
  * Contract deviations (all additive): AgentRequest.signal and the bash/script opts
  * carry the run's AbortSignal; ExecuteOptions.baseBranch/context feed $BASE_BRANCH and
@@ -56,6 +73,20 @@ import type { LoadedWorkflow } from "./loader.ts";
 import { validateInput, type SchemaError } from "./json-schema.ts";
 import type { HooksDoc, JsonSchema, NodeDoc, NodeType, SlotRole, WorkflowDoc } from "./schema.ts";
 import { nodeType } from "./schema.ts";
+import {
+	type BudgetActual,
+	BudgetExceededError,
+	type BudgetReservation,
+	BudgetScope,
+	type DeclaredBudget,
+	isBudgetExceeded,
+	limitFrom,
+	perCallCap,
+	reserve,
+	scopeSnapshot,
+	settle,
+	waitForSettlement,
+} from "./budget.ts";
 import { type NodeStatus, evaluateWhen, layers, readiness } from "./scheduler.ts";
 import { type SubstituteMode, type SubstitutionContext, substitute } from "./substitute.ts";
 import { runAiNode } from "./nodes/ai.ts";
@@ -149,9 +180,14 @@ export interface WorkflowRuntimeDeps {
 	settings: StackSettings;
 	resolveRole(role: SlotRole, node: NodeDoc): ResolvedRole;
 	mcpTool?(server: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
-	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
+	/** `opts.parentBudget`: the calling node's budget scope — pass it to executeWorkflow as ExecuteOptions.parentBudget. */
+	runWorkflow?(name: string, inputs: Record<string, unknown>, opts?: RunWorkflowOptions): Promise<RunResult>;
 	/** The max-reasoning model of `model`'s family for the mechanical ladder's third step (plan §5.3 b); undefined = same model. */
 	familyMax?(model: string): string | undefined;
+}
+
+export interface RunWorkflowOptions {
+	parentBudget?: BudgetScope;
 }
 
 export interface NodeResult {
@@ -184,6 +220,8 @@ export interface RunResult {
 	verified?: { verified: number; unverified: number; failedReview: number };
 	/** True when any reviewed node is not done-verified. */
 	unverified?: boolean;
+	/** The workflow budget scope's totals (only when a budget applied to this run). */
+	budget?: Record<string, unknown>;
 	/** Set when the run froze for re-authoring (run.json status "reauthored"). */
 	frozen?: { kind: EscalationKind; nodeId: string; report: string; reviewedNodeId?: string; verdict?: Verdict };
 }
@@ -196,6 +234,10 @@ export interface ExecuteOptions {
 	onNode?(result: NodeResult): void;
 	baseBranch?: string;
 	context?: string;
+	/** A child run's parent scope (the calling `workflow:` node's): this run can never spend more than its remainder. */
+	parentBudget?: BudgetScope;
+	/** How long an interrupted agent call may take to report its usage before it settles at the full reservation (default 2000 ms). */
+	budgetAbortGraceMs?: number;
 }
 
 // ═══ Node handler contract ═══════════════════════════════════════════════════
@@ -245,6 +287,8 @@ export interface NodeContext {
 	log(type: string, data: Record<string, unknown>): void;
 	/** Direct dependencies that are reviewed nodes without a passing review frame (review-before-report). */
 	unverifiedUpstream(): string[];
+	/** This node's budget scope (under the workflow's); a `workflow:` node hands it to the child run. */
+	readonly budgetScope: BudgetScope;
 }
 
 export type NodeHandler = (ctx: NodeContext) => Promise<NodeOutcome>;
@@ -254,6 +298,7 @@ export const PROCESS_TIMEOUT_MS = 120_000;
 export const DEFAULT_MAX_ATTEMPTS = 2;
 export const DEFAULT_RETRY_DELAY_MS = 3000;
 export const ESCALATION_REPORT = "escalation-report.md";
+export const BUDGET_ABORT_GRACE_MS = 2000;
 
 const HANDLERS: Record<NodeType, NodeHandler> = {
 	prompt: runAiNode,
@@ -493,6 +538,30 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 	const log = (type: string, data: Record<string, unknown>, agentId?: string): void => {
 		store.appendEvent(runDir, type, data, agentId);
 	};
+
+	// Budgets: one workflow scope (under the parent's node scope for child runs), one scope per node.
+	const workflowBudget = doc.titan?.budget as DeclaredBudget | undefined;
+	const workflowLabel = `workflow:${doc.name}`;
+	const workflowScope = opts.parentBudget ? opts.parentBudget.child(`${opts.parentBudget.label}/${workflowLabel}`, limitFrom(workflowBudget)) : new BudgetScope(workflowLabel, limitFrom(workflowBudget));
+	const nodeScopes = new Map<string, BudgetScope>();
+	const nodeScope = (node: NodeDoc): BudgetScope => {
+		let scope = nodeScopes.get(node.id);
+		if (!scope) {
+			scope = workflowScope.child(`${workflowScope.label}/node:${node.id}`, limitFrom(node.budget as DeclaredBudget | undefined));
+			nodeScopes.set(node.id, scope);
+		}
+		return scope;
+	};
+	let budgetActive = workflowScope.enforced();
+	/** Interrupted calls still settling (waiting out the grace period): awaited before budget.summary / workflow.end. */
+	const pendingSettles = new Set<Promise<void>>();
+	const abortGraceMs = opts.budgetAbortGraceMs ?? BUDGET_ABORT_GRACE_MS;
+	const finiteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+	/** The child's reported usage as a settlement: a dimension it did not report stays undefined (→ the full reservation). */
+	const actualOf = (usage: Partial<AgentResult["usage"]> | undefined): BudgetActual => {
+		const tokens = usage && (finiteNumber(usage.tokensIn) || finiteNumber(usage.tokensOut)) ? (finiteNumber(usage.tokensIn) ? usage.tokensIn : 0) + (finiteNumber(usage.tokensOut) ? usage.tokensOut : 0) : undefined;
+		return { usd: usage && finiteNumber(usage.costUsd) ? usage.costUsd : undefined, tokens };
+	};
 	const patchRun = (patch: Parameters<RunStore["updateRun"]>[1]): void => {
 		try {
 			store.updateRun(runDir, patch);
@@ -528,6 +597,35 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 	};
 
 	const runAgent = async (node: NodeDoc, req: AgentRequest): Promise<AgentResult> => {
+		// Worst-case reservation before dispatch (every agent path of every node type lands here).
+		const scope = nodeScope(node);
+		let reservation: BudgetReservation | undefined;
+		if (scope.enforced()) {
+			budgetActive = true;
+			const amount = perCallCap(node.budget as DeclaredBudget | undefined, workflowBudget);
+			for (;;) {
+				if (signal.aborted) throw new AbortError(signal.reason);
+				const attempt = reserve(scope, amount, `${runId}:${node.id}`);
+				if (attempt.ok) {
+					reservation = attempt.reservation;
+					break;
+				}
+				const refusal = attempt.refusal;
+				if (refusal.transient) {
+					log("budget.wait", { nodeId: node.id, ...refusal });
+					try {
+						await waitForSettlement(scope, signal);
+					} catch {
+						throw new AbortError(signal.reason);
+					}
+					continue;
+				}
+				const error = new BudgetExceededError(refusal);
+				log("budget.refused", { nodeId: node.id, role: req.role, label: req.label, ...refusal, requestedUsdMicros: amount.usdMicros, requestedTokens: amount.tokens, error: error.message });
+				deps.notify(`${node.id}: ${error.message}`, "error");
+				throw error;
+			}
+		}
 		const index = (agentCalls.get(node.id) ?? 0) + 1;
 		agentCalls.set(node.id, index);
 		const agentId = index === 1 ? node.id : `${node.id}#${index}`;
@@ -537,15 +635,52 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		lastCallsign.set(node.id, callsign);
 		store.upsertAgent(runDir, { agentId, callsign, role: req.role, model: req.model ?? "", thinking: { requested, effective }, state: "dispatched-working" });
 		log("agent.start", { nodeId: node.id, agentId, role: req.role, model: req.model, thinking: effective, tools: req.tools, context: req.context, label: req.label }, agentId);
+		const settleBudget = (actual: BudgetActual, extra: Record<string, unknown>): void => {
+			if (!reservation) return;
+			const settled = settle(reservation, actual);
+			log("budget.settle", { nodeId: node.id, reservationId: settled.reservationId, reservedUsdMicros: settled.reserved.usdMicros, reservedTokens: settled.reserved.tokens, chargedUsdMicros: settled.charged.usdMicros, chargedTokens: settled.charged.tokens, basis: settled.basis, ...extra, workflow: scopeSnapshot(workflowScope) }, agentId);
+			if (settled.overrun) {
+				log("budget.overrun", { nodeId: node.id, reservationId: settled.reservationId, overrunUsdMicros: settled.overrun.usdMicros, overrunTokens: settled.overrun.tokens, reservedUsdMicros: settled.reserved.usdMicros, reservedTokens: settled.reserved.tokens, chargedUsdMicros: settled.charged.usdMicros, chargedTokens: settled.charged.tokens }, agentId);
+				deps.notify(`${node.id}: budget overrun — ${agentId} used more than its reservation (charged in full)`, "warning");
+			}
+		};
+		if (reservation) log("budget.reserve", { nodeId: node.id, reservationId: reservation.id, usdMicros: reservation.amount.usdMicros, tokens: reservation.amount.tokens, scopes: scope.chain().map((s) => s.label) }, agentId);
 		let result: AgentResult;
+		let dispatched: Promise<AgentResult> | undefined;
 		try {
-			result = await raceAbort(deps.agent({ ...req, signal }), signal);
+			dispatched = deps.agent({ ...req, signal });
+			result = await raceAbort(dispatched, signal);
 		} catch (error) {
 			const aborted = isAbortError(error) || signal.aborted;
 			store.upsertAgent(runDir, { agentId, state: aborted ? "cancelled" : "failed" });
 			log("agent.end", { nodeId: node.id, agentId, ok: false, error: asString(error), aborted }, agentId);
+			if (reservation) {
+				// Interrupted or thrown: settle at the usage the child reports within the grace period, else the full reservation.
+				const pending = dispatched;
+				const settling = (async () => {
+					let late: Partial<AgentResult["usage"]> | undefined;
+					if (aborted && pending) {
+						let timer: ReturnType<typeof setTimeout> | undefined;
+						late = await Promise.race([
+							pending.then((r) => r?.usage, () => undefined),
+							new Promise<undefined>((resolve) => {
+								timer = setTimeout(() => resolve(undefined), abortGraceMs);
+							}),
+						]);
+						if (timer) clearTimeout(timer);
+					}
+					settleBudget(actualOf(late), { ok: false, interrupted: aborted, error: asString(error) });
+				})();
+				pendingSettles.add(settling);
+				try {
+					await settling;
+				} finally {
+					pendingSettles.delete(settling);
+				}
+			}
 			throw aborted ? new AbortError(signal.reason) : error;
 		}
+		settleBudget(actualOf(result.usage), { ok: result.ok });
 		const usage = result.usage ?? { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 };
 		store.upsertAgent(runDir, {
 			agentId,
@@ -617,6 +752,7 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 				const upstream = byId.get(dep);
 				return !!upstream && isReviewedNode(upstream) && results[dep]?.status === "success" && stateOf(dep) !== "done-verified";
 			}),
+			budgetScope: nodeScope(node),
 		};
 		return ctx;
 	};
@@ -704,7 +840,11 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			try {
 				outcome = await raceAbort(handler(makeContext(node, type, attempt)), signal);
 			} catch (error) {
-				outcome = isAbortError(error) || signal.aborted ? { status: "cancelled", output: undefined, error: new AbortError(signal.reason).message } : { status: "failed", output: undefined, error: asString(error) };
+				outcome = isBudgetExceeded(error)
+					? { status: "failed", output: undefined, error: error.message, retryable: false, meta: { budget: error.refusal } }
+					: isAbortError(error) || signal.aborted
+						? { status: "cancelled", output: undefined, error: new AbortError(signal.reason).message }
+						: { status: "failed", output: undefined, error: asString(error) };
 			}
 			if (outcome.status !== "failed") break;
 			if (attempt < budget && outcome.retryable !== false) {
@@ -854,6 +994,8 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			}
 		}
 	}
+	if (pendingSettles.size) await Promise.allSettled([...pendingSettles]);
+	if (budgetActive) log("budget.summary", { workflow: scopeSnapshot(workflowScope), nodes: Object.fromEntries([...nodeScopes].filter(([, s]) => s.spent.usdMicros || s.spent.tokens || s.limit.usdMicros !== undefined || s.limit.tokens !== undefined).map(([id, s]) => [id, scopeSnapshot(s)])) });
 	log("workflow.end", { status, error, returns: doc.returns, nodes: Object.fromEntries(Object.values(results).map((r) => [r.nodeId, r.status])), verification, frozen: frozen?.kind });
 	patchRun({ status: frozen ? "reauthored" : runStatusFor(status), endedAt: new Date().toISOString() });
 	const result: RunResult = { runId, status, nodes: results, returns, error };
@@ -864,5 +1006,6 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		result.unverified = verified.unverified + verified.failedReview > 0;
 	}
 	if (frozen) result.frozen = frozen;
+	if (budgetActive) result.budget = scopeSnapshot(workflowScope);
 	return result;
 }
