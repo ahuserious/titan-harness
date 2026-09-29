@@ -216,7 +216,7 @@ export interface ApprovalSpec {
 	capture_response?: boolean;
 	on_reject?: { prompt: string; max_attempts?: number };
 	preset_key?: string;
-	/** With preset_key: the content the receipt hashes (`$draft.output`); default = the message itself. */
+	/** Content bound to an approval (and preset receipt), substituted raw; default = the substituted message. */
 	content?: string;
 }
 

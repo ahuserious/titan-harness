@@ -37,8 +37,7 @@ export const runApprovalNode: NodeHandler = async (ctx) => {
 		}
 		if (!preset) return { status: "failed", output: undefined, error: `preset "${spec.preset_key}" not found (.titan/presets/content/${spec.preset_key}.yaml or the package catalog)`, retryable: false };
 	}
-	const contentText = preset ? (spec.content ? ctx.subst(spec.content, "raw") : ctx.subst(spec.message, "prompt")) : undefined;
-	const contentSha256 = contentText === undefined ? undefined : sha256(contentText);
+	let contentSha256: string;
 	const receiptsDir = preset ? receiptsDirFor(ctx.deps.artifactsDir, preset) : undefined;
 	const receipt = (decision: "approve" | "reject", response: string | undefined): string | undefined => {
 		if (!preset || !receiptsDir || !contentSha256) return undefined;
@@ -51,7 +50,10 @@ export const runApprovalNode: NodeHandler = async (ctx) => {
 	let lastRework: AgentCallResult | undefined;
 	for (;;) {
 		const message = ctx.subst(spec.message, "prompt");
-		const gate = await ctx.deps.approval(message, { captureResponse: Boolean(spec.capture_response || spec.on_reject || preset) });
+		// Bind the declared content, re-substituting after rework and at consumption.
+		const content = () => spec.content !== undefined ? ctx.subst(spec.content, "raw") : ctx.subst(spec.message, "prompt");
+		contentSha256 = sha256(content());
+		const gate = await ctx.deps.approval(message, { captureResponse: Boolean(spec.capture_response || spec.on_reject || preset), nodeId: ctx.node.id, attempt: reworks + 1, content, signal: ctx.signal });
 		if (gate.approved) {
 			const file = receipt("approve", gate.response);
 			if (preset && receiptsDir && contentSha256) {

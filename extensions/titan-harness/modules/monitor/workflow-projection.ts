@@ -252,6 +252,8 @@ export function readWorkflowProjection(runDir: string): WorkflowProjection {
     }
     const list = [...tasks.values()];
     const unresolved = list.filter(t => !terminal.has(t.state));
+    // Interrupted is deliberately not a completed workflow: keep its literal status
+    // and unresolved tasks visible without inventing a workflow.end receipt.
     const runTerminal = ['completed', 'failed', 'aborted', 'reauthored', 'stalemate'].includes(run.status);
     const receiptStatus = workflowEnd?.frozen ? 'reauthored' : workflowEnd?.status === 'cancelled' ? 'aborted' : workflowEnd?.status;
     const missingTerminalEvidence = runTerminal && (!events.length || !list.length || (run.workflow && (!workflowEnd || receiptStatus !== run.status)));

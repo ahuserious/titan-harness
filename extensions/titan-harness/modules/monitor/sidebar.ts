@@ -45,7 +45,7 @@ export const SIDEBAR_HEADER_COLOR = "#e2e8f0";
 export const SIDEBAR_FOOTER_COLOR = "#475569";
 const DESCRIPTION_MAX = 60;
 const REVIEW_ROLES = new Set<string>(["auditor", "verifier"]);
-const TERMINAL_RUN_STATUSES = new Set<string>(["completed", "failed", "aborted", "reauthored", "stalemate"]);
+const TERMINAL_RUN_STATUSES = new Set<string>(["completed", "failed", "aborted", "reauthored", "stalemate", "interrupted"]);
 const identity = (_hex: string, text: string): string => text;
 
 export interface SidebarNode {

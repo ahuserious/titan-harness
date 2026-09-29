@@ -42,6 +42,7 @@ import type { RunStore } from "./run-store.ts";
 import { type AgentRun, newRun, type Role, runError, runOk } from "./runtime.ts";
 import type { StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
+import { createHostedApproval, type Approver } from "./workflow/approver.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
 import { resolveRef } from "./workflow/json-schema.ts";
@@ -329,6 +330,10 @@ export interface WorkflowRuntimeHost {
 	resolveRole(role: SlotRole, node: NodeDoc): ResolvedRole;
 	/** Absent in headless sessions: approvals are then rejected with a reason. */
 	ui?: RuntimeUi;
+	/** Runner-side web transport; takes precedence over ui. Never passed into a child. */
+	approver?: Approver;
+	/** Runner wall-clock TTL; defaults to 24 hours. */
+	approvalTtlMs?: number;
 	slotFor?(req: AgentRequest): ModelSlot | undefined;
 	onRun?(run: AgentRun, req: AgentRequest): void;
 	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
@@ -378,7 +383,7 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 		agent,
 		bash: (command, opts) => runProcess("bash", ["-c", command], opts),
 		script,
-		approval: createApproval(host.ui),
+		approval: host.approver ? createHostedApproval({ ...host, approver: host.approver }) : createApproval(host.ui),
 		notify: (text, level) => {
 			try {
 				host.ui?.notify(text, level);

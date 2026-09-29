@@ -7,6 +7,7 @@
  *   run.json                          RunMeta — atomic temp + rename, 0600
  *   events.jsonl                      chained {seq, ts, runId, agentId?, type, data, prev, hash}
  *   ledger.jsonl                      chained cost rows           (modules/ledger.ts)
+ *   approvals.jsonl                   chained runner-owned approval lifecycle, index derived on read
  *   provenance.jsonl                  chained tool → file edges   (modules/provenance.ts)
  *   agents/<agentId>.json             AgentRecord with its stateHistory
  *   artifacts/nodes/<id>.md           node output, plus <id>.meta.json {sha256, bytes, ts, …}
@@ -23,7 +24,8 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendChained, canonicalJson, canonicalValue, chainTail, type ChainRow, readChain, sha256, sha256File } from "./hash-chain.ts";
+import { appendChained, canonicalJson, canonicalValue, chainTail, type ChainRow, readChain, sha256, sha256File, verifyChain } from "./hash-chain.ts";
+import type { ApprovalDecision, ApprovalRequest } from "./workflow/approver.ts";
 
 /** Where runs live unless a RunStore is given another root. */
 export const DEFAULT_RUN_ROOT = path.join(os.homedir(), ".pi", "titan-harness", "runs");
@@ -33,9 +35,10 @@ export const EVENTS_FILE = "events.jsonl";
 export const NOTEBOOK_FILE = "notebook.jsonl";
 /** Hypothesis evidence links and decisions (plan A11): chained like the notebook, one row per link or decision. */
 export const HYPOTHESES_FILE = "hypotheses.jsonl";
+export const APPROVALS_FILE = "approvals.jsonl";
 export const INDEX_FILE = "index.jsonl";
 
-export const RUN_STATUSES = ["pending", "running", "paused", "reauthored", "completed", "failed", "aborted", "stalemate"] as const;
+export const RUN_STATUSES = ["pending", "running", "paused", "reauthored", "completed", "failed", "aborted", "stalemate", "interrupted"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** run.json — the run's identity, shape and lifecycle (§6.3). */
@@ -335,6 +338,68 @@ export class RunStore {
 		return appendChained(path.join(dir, HYPOTHESES_FILE), { runId: this.runIdOf(dir), ...row });
 	}
 
+	/** Approval rows are authoritative; events.jsonl is a monitor mirror. Fail closed on either write failure. */
+	private appendApproval(dir: string, type: string, data: Record<string, unknown>): void {
+		const file = path.join(dir, APPROVALS_FILE);
+		appendChained(file, { runId: this.runIdOf(dir), type, data });
+		const fd = fs.openSync(file, "r");
+		try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+		// Persist the directory entry too when approvals.jsonl was newly created.
+		const directory = fs.openSync(dir, "r");
+		try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+		this.appendEvent(dir, type, data);
+	}
+
+	requestApproval(dir: string, request: ApprovalRequest): void {
+		if (request.runId !== this.runIdOf(dir)) throw new Error("approval runId mismatch");
+		if (approvalIndex(dir).has(request.requestId)) throw new Error("approval requestId already exists");
+		this.appendApproval(dir, "approval.requested", { request: { ...request } });
+	}
+
+	listPendingApprovals(dir: string): ApprovalRequest[] { return listPendingApprovals(dir); }
+
+	/** Only the runner clock can expire a pending request; a future-dated forged reply cannot. */
+	expireApproval(dir: string, requestId: string): boolean {
+		const entry = approvalIndex(dir).get(requestId);
+		if (!entry || entry.state !== "pending" || Date.now() <= Date.parse(entry.request.expiresAt)) return false;
+		this.appendApproval(dir, "approval.expired", { requestId });
+		return true;
+	}
+
+	/**
+	 * Synchronous read/check/append (no await or user callback): atomic between consumers on
+	 * the same JS event loop, including separate RunStore instances. Cross-process/worker
+	 * access requires the existing SINGLE WRITER per run directory contract; no file lock.
+	 * The expected binding comes from the runner, never from the delivered decision.
+	 */
+	consumeDecision(dir: string, decision: ApprovalDecision, expected: { requestId: string; artifactSha256: string }): { ok: true } | { ok: false; reason: string } {
+		const entry = approvalIndex(dir).get(expected.requestId);
+		const req = entry?.request;
+		const now = Date.now();
+		let reason: string | undefined;
+		if (!entry) reason = "request not pending";
+		else if (entry.state === "consumed") reason = "request already consumed";
+		else if (entry.state !== "pending") reason = "request not pending";
+		else if (decision.requestId !== req!.requestId) reason = "requestId mismatch";
+		else if (decision.runId !== req!.runId || decision.runId !== this.runIdOf(dir)) reason = "runId mismatch";
+		else if (decision.nodeId !== req!.nodeId) reason = "nodeId mismatch";
+		else if (decision.artifactSha256 !== req!.artifactSha256) reason = "artifactSha256 mismatch";
+		else if (expected.artifactSha256 !== req!.artifactSha256) reason = "stale artifact";
+		else if (typeof decision.actor !== "string" || !decision.actor.trim()) reason = "empty actor";
+		else if (decision.decision !== "approve" && decision.decision !== "reject") reason = "invalid decision";
+		else if (typeof decision.nonce !== "string" || !decision.nonce.trim()) reason = "empty nonce";
+		else if (!Number.isFinite(Date.parse(decision.decidedAt)) || !Number.isFinite(Date.parse(req!.expiresAt))) reason = "invalid timestamp";
+		else if (Date.parse(decision.decidedAt) > Date.parse(req!.expiresAt) || now > Date.parse(req!.expiresAt)) reason = "approval expired";
+		if (reason) {
+			this.appendApproval(dir, "approval.refused", { requestId: expected.requestId, decision, reason });
+			this.expireApproval(dir, expected.requestId);
+			return { ok: false, reason };
+		}
+		this.appendApproval(dir, "approval.decided", { requestId: expected.requestId, decision });
+		this.appendApproval(dir, "approval.consumed", { requestId: expected.requestId, nonce: decision.nonce, actor: decision.actor });
+		return { ok: true };
+	}
+
 	private runIdOf(dir: string): string {
 		return this.runIds.get(dir) ?? this.readRun(dir).runId;
 	}
@@ -375,4 +440,41 @@ export function readHypothesisLinks(dir: string): ChainRow[] {
 function readChainOrEmpty(file: string): ChainRow[] {
 	if (!fs.existsSync(file)) return [];
 	return readChain(file);
+}
+
+/** Rebuilt from the verified log, not a second mutable source of truth. */
+function approvalIndex(dir: string): Map<string, { request: ApprovalRequest; state: "pending" | "consumed" | "expired" }> {
+	const file = path.join(dir, APPROVALS_FILE);
+	const verified = verifyChain(file);
+	if (!verified.ok) throw new Error(`approval chain invalid: ${verified.reason}`);
+	const index = new Map<string, { request: ApprovalRequest; state: "pending" | "consumed" | "expired" }>();
+	for (const row of readChain(file)) {
+		const data = row.data as { request?: ApprovalRequest; requestId?: string };
+		if (row.type === "approval.requested" && data.request) index.set(data.request.requestId, { request: data.request, state: "pending" });
+		const entry = data.requestId ? index.get(data.requestId) : undefined;
+		if (entry && row.type === "approval.consumed") entry.state = "consumed";
+		if (entry && row.type === "approval.expired") entry.state = "expired";
+	}
+	return index;
+}
+
+/** Pending means no consumed/expired event; reading (including recovery) never expires requests. */
+export function listPendingApprovals(dir: string): ApprovalRequest[] {
+	return [...approvalIndex(dir).values()].filter(e => e.state === "pending").map(e => e.request);
+}
+
+/**
+ * Startup only, BEFORE accepting work. The caller owns this store exclusively: "owner
+ * gone" means found running at startup, not a PID probe. Never invoke against a live
+ * runner's root. No resume/replay and no approval writes, including overdue requests.
+ */
+export function recoverInterruptedRuns(store: RunStore): RunMeta[] {
+	const recovered: RunMeta[] = [];
+	for (const run of store.listRuns(undefined, Number.MAX_SAFE_INTEGER)) {
+		if (run.status !== "running") continue;
+		const dir = store.dir(run.runId, run.projectSlug);
+		store.appendEvent(dir, "run.interrupted", { reason: "found running at startup", previousStatus: "running" });
+		recovered.push(store.updateRun(dir, { status: "interrupted" }));
+	}
+	return recovered;
 }
