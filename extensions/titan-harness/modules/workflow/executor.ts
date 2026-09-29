@@ -53,6 +53,7 @@ import {
 } from "./elevation.ts";
 import { THINKING_ORDER, normalizeThinking } from "../thinking.ts";
 import type { LoadedWorkflow } from "./loader.ts";
+import { validateInput, type SchemaError } from "./json-schema.ts";
 import type { HooksDoc, JsonSchema, NodeDoc, NodeType, SlotRole, WorkflowDoc } from "./schema.ts";
 import { nodeType } from "./schema.ts";
 import { type NodeStatus, evaluateWhen, layers, readiness } from "./scheduler.ts";
@@ -360,7 +361,19 @@ export function originForRole(role: SlotRole | string): LedgerOrigin {
 	}
 }
 
-/** Merge required/default declarations with the caller's inputs; throws on a missing required input. */
+export interface WorkflowInputIssue extends SchemaError {
+	input: string;
+}
+
+/** A caller input failure, raised before the executor writes events or invokes any node. */
+export class WorkflowInputError extends Error {
+	constructor(public readonly errors: WorkflowInputIssue[], message: string) {
+		super(message);
+		this.name = "WorkflowInputError";
+	}
+}
+
+/** Merge defaults and validate declared inputs; undeclared inputs pass through unchanged. */
 export function resolveInputs(doc: WorkflowDoc, given: Record<string, unknown> = {}): Record<string, unknown> {
 	const inputs: Record<string, unknown> = {};
 	const missing: string[] = [];
@@ -370,7 +383,18 @@ export function resolveInputs(doc: WorkflowDoc, given: Record<string, unknown> =
 		else if (spec?.required) missing.push(key);
 	}
 	for (const [key, value] of Object.entries(given)) if (value !== undefined && inputs[key] === undefined) inputs[key] = value;
-	if (missing.length) throw new Error(`missing required input${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}`);
+	const errors: WorkflowInputIssue[] = missing.map((input) => ({ input, path: "$", message: "required input is missing" }));
+	const invalid: WorkflowInputIssue[] = [];
+	for (const [input, spec] of Object.entries(doc.inputs ?? {})) {
+		if (spec && inputs[input] !== undefined) invalid.push(...validateInput(inputs[input], spec).map((error) => ({ input, ...error })));
+	}
+	errors.push(...invalid);
+	if (errors.length) {
+		const messages: string[] = [];
+		if (missing.length) messages.push(`missing required input${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}`);
+		if (invalid.length) messages.push(`invalid workflow inputs: ${invalid.map((error) => `${error.input} ${error.path}: ${error.message}`).join("; ")}`);
+		throw new WorkflowInputError(errors, messages.join("; "));
+	}
 	return inputs;
 }
 

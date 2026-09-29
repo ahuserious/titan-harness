@@ -18,6 +18,7 @@
  *   best_of, interleave, hypothesis, mcp_tool, workflow, role, architect, tools (w),
  *   review, callsign, hooks (unknown event → w), context, ignored-key (w),
  *   platform-update, persona, output_format
+ *   Input keys: required, default, description, type, schema (including nested types/$ref).
  *
  * ctx.commandDirs / scriptDirs / personaDirs are ROOTS: a command `x` resolves to
  * <root>/commands/x.md (or <root>/x.md), a named script to <root>/scripts/x.{ts,js,py}
@@ -31,7 +32,7 @@ import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { resolveThinking } from "../model-stack.ts";
 import { normalizeThinking } from "../thinking.ts";
-import { resolveRef } from "./json-schema.ts";
+import { resolveRef, validateInput, validateSchema } from "./json-schema.ts";
 import {
 	AI_ONLY_NODE_KEYS,
 	API_VERSION,
@@ -79,6 +80,7 @@ import {
 	TRIGGER_KEYS,
 	TRIGGER_RULES,
 	type JsonSchema,
+	type InputSpec,
 	type NodeType,
 	type WhenAst,
 	type WorkflowDoc,
@@ -312,19 +314,30 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 	if (top.thinking !== undefined) checkThinking(top.thinking, topModel, "thinking");
 
 	if (top.inputs !== undefined) {
-		if (!isMapping(top.inputs)) issues.error("inputs", `inputs must be a mapping of name → {required, default, description}; found ${show(top.inputs)}`);
+		if (!isMapping(top.inputs)) issues.error("inputs", `inputs must be a mapping of name → {required, default, description, type, schema}; found ${show(top.inputs)}`);
 		else {
 			for (const [name, spec] of Object.entries(top.inputs)) {
 				if (!INPUT_NAME_RE.test(name)) issues.error("inputs", `input name ${show(name)} must match ^[A-Za-z_][A-Za-z0-9_-]*$`);
 				if (spec === null || spec === undefined) continue; // `spec:` with no body = optional input
 				if (!isMapping(spec)) {
-					issues.error("inputs", `inputs.${name} must be a mapping {required, default, description}; found ${show(spec)}`);
+					issues.error("inputs", `inputs.${name} must be a mapping {required, default, description, type, schema}; found ${show(spec)}`);
 					continue;
 				}
 				for (const key of Object.keys(spec)) if (!INPUT_KEYS.has(key)) issues.warn("unknown-key", `inputs.${name}.${key} is unknown and ignored`);
 				if (spec.required !== undefined && typeof spec.required !== "boolean") issues.error("inputs", `inputs.${name}.required must be boolean`);
 				if (spec.description !== undefined && typeof spec.description !== "string") issues.error("inputs", `inputs.${name}.description must be a string`);
 				if (spec.required === true && spec.default !== undefined) issues.warn("inputs", `inputs.${name} is required and also has a default; the default never applies`);
+				const schemaErrors = validateSchema({ type: spec.type }, `inputs.${name}`);
+				if (spec.schema !== undefined) schemaErrors.push(...validateSchema(spec.schema, `inputs.${name}.schema`));
+				if (!schemaErrors.length && spec.type !== undefined && isMapping(spec.schema) && spec.schema.type !== undefined) {
+					const shorthand = new Set(Array.isArray(spec.type) ? spec.type : [spec.type]);
+					const explicit = new Set(Array.isArray(spec.schema.type) ? spec.schema.type : [spec.schema.type]);
+					if (shorthand.size !== explicit.size || [...shorthand].some((type) => !explicit.has(type))) schemaErrors.push({ path: `inputs.${name}.type`, message: "must equal schema.type when both are declared" });
+				}
+				for (const error of schemaErrors) issues.error("inputs", `${error.path}: ${error.message}`);
+				if (!schemaErrors.length && spec.default !== undefined) {
+					for (const error of validateInput(spec.default, spec as InputSpec)) issues.error("inputs", `inputs.${name}.default ${error.path}: ${error.message}`);
+				}
 			}
 		}
 	}

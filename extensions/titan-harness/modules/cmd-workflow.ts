@@ -40,7 +40,7 @@ import { type ChainRow, readChain } from "./hash-chain.ts";
 import { formatTotals, readLedger, totalsFor } from "./ledger.ts";
 import { EVENTS_FILE, type RunMeta, RunStore, type RunStatus } from "./run-store.ts";
 import { fmtSecs } from "./runtime.ts";
-import { executeWorkflow, type NodeResult, type RunResult, type WorkflowRuntimeDeps } from "./workflow/executor.ts";
+import { executeWorkflow, resolveInputs, type NodeResult, type RunResult, type WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import { readStackSettings, STACK_SETTINGS_PATH, writeStackSettings } from "./stack-config.ts";
 import { exportDynamicWorkflow } from "./workflow/export-dw.ts";
 import { graphHtml } from "./workflow/graph.ts";
@@ -446,6 +446,8 @@ export function registerWorkflowCommands(pi: ExtensionAPI, deps: WorkflowCommand
 		let loaded: LoadedWorkflow;
 		try {
 			loaded = loadWorkflow(parsed.name, cwd, deps.validateContext(cwd, ctx));
+			// Refuse invalid inputs before opening a run or recording run.start (also for dry runs).
+			resolveInputs(loaded.normalized, parsed.inputs);
 		} catch (error) {
 			return deps.notify(ctx, `Not run: ${errorText(error)}`, "error");
 		}

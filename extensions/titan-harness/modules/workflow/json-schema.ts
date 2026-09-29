@@ -1,6 +1,6 @@
 /**
- * json-schema.ts — the minimal JSON Schema validator behind `output_format` (plan A2, D12):
- * enough of draft-7 for structured node output, with no dependency.
+ * json-schema.ts — the minimal JSON Schema validator behind `output_format` and typed inputs:
+ * enough of draft-7 for structured node output and workflow inputs, with no dependency.
  *
  *   validateJson(value, schema)   → [] when the value conforms, else one {path, message} per
  *                                   violation (`$`, `$.items[2].name`). Supported keywords:
@@ -8,13 +8,15 @@
  *                                   any finite number), properties, required, items, enum,
  *                                   additionalProperties (false | schema), minimum/maximum,
  *                                   minLength/maxLength, $ref (titan://schemas/… only)
+ *   validateSchema(schema)       → definition errors in supported keywords, including nested refs
+ *   validateInput(value, spec)   → value errors for an input's type shorthand and schema
  *   resolveRef(ref)               → the built-in schema a `titan://schemas/<name>` ref names
  *   AUDIT_VERDICT_SCHEMA          the auditor's verdict block (prompts/SYSTEM_PROMPT_AUDITOR.md),
  *                                   reachable as `output_format: { $ref: "titan://schemas/audit-verdict" }`
  *
  * Unknown keywords are ignored, as JSON Schema itself ignores them. Pure: no pi, no filesystem.
  */
-import type { JsonSchema } from "./schema.ts";
+import { JSON_SCHEMA_TYPES, type InputSpec, type JsonSchema } from "./schema.ts";
 
 export interface SchemaError {
 	path: string;
@@ -68,8 +70,10 @@ export function jsonTypeOf(value: unknown): "null" | "array" | "object" | "strin
 }
 
 function typeMatches(expected: string, actual: ReturnType<typeof jsonTypeOf>, value: unknown): boolean {
+	if (expected === "number" || expected === "integer") {
+		return typeof value === "number" && Number.isFinite(value) && (expected === "number" || Number.isInteger(value));
+	}
 	if (expected === actual) return true;
-	if (expected === "number") return actual === "integer" || (actual === "number" && Number.isFinite(value as number));
 	return false;
 }
 
@@ -80,6 +84,45 @@ function describe(value: unknown): string {
 }
 
 const MAX_REF_DEPTH = 32;
+
+/** Validate the supported schema vocabulary before checking defaults or caller values. */
+export function validateSchema(schema: unknown, path = "$", ancestors = new Set<object>()): SchemaError[] {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return [{ path, message: "schema must be a mapping" }];
+	if (ancestors.has(schema)) return [{ path, message: "schema must not contain a cycle" }];
+	const next = new Set(ancestors).add(schema);
+	const record = schema as Record<string, unknown>;
+	const errors: SchemaError[] = [];
+	const error = (key: string, message: string) => errors.push({ path: `${path}.${key}`, message });
+	if (record.type !== undefined) {
+		const types = Array.isArray(record.type) ? record.type : [record.type];
+		if (!types.length || types.some((type) => !JSON_SCHEMA_TYPES.some((name) => name === type))) error("type", `expected a JSON Schema type name or non-empty list (${JSON_SCHEMA_TYPES.join(", ")}); found ${JSON.stringify(record.type)}`);
+	}
+	if (record.$ref !== undefined && !resolveRef(record.$ref as string)) error("$ref", `unresolvable $ref ${JSON.stringify(record.$ref)}`);
+	if (record.enum !== undefined && !Array.isArray(record.enum)) error("enum", "must be a list");
+	if (record.required !== undefined && (!Array.isArray(record.required) || record.required.some((key) => typeof key !== "string"))) error("required", "must be a list of property names");
+	for (const key of ["minimum", "maximum", "minLength", "maxLength"]) {
+		const value = record[key];
+		if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || (key.endsWith("Length") && (!Number.isInteger(value) || value < 0)))) error(key, "must be a finite number (a non-negative integer for lengths)");
+	}
+	if (record.properties !== undefined) {
+		if (!record.properties || typeof record.properties !== "object" || Array.isArray(record.properties)) error("properties", "must be a mapping");
+		else for (const [key, sub] of Object.entries(record.properties)) errors.push(...validateSchema(sub, `${path}.properties.${key}`, next));
+	}
+	if (record.items !== undefined) errors.push(...validateSchema(record.items, `${path}.items`, next));
+	if (record.additionalProperties !== undefined && typeof record.additionalProperties !== "boolean") errors.push(...validateSchema(record.additionalProperties, `${path}.additionalProperties`, next));
+	return errors;
+}
+
+/** Both declarations constrain the value; keep shorthand effective even for draft-7 $ref schemas. */
+export function validateInput(value: unknown, spec: InputSpec): SchemaError[] {
+	const errors = spec.type === undefined ? [] : validateJson(value, { type: spec.type });
+	if (spec.schema !== undefined) {
+		for (const error of validateJson(value, spec.schema)) {
+			if (!errors.some((existing) => existing.path === error.path && existing.message === error.message)) errors.push(error);
+		}
+	}
+	return errors;
+}
 
 /** Every way `value` breaks `schema`; [] means it conforms. `path` names the value being checked (`$` = the root). */
 export function validateJson(value: unknown, schema: JsonSchema, path = "$"): SchemaError[] {
