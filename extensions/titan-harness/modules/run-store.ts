@@ -671,11 +671,15 @@ function createLockNoReplace(lockPath: string, content: string): boolean {
 	const tmp = `${lockPath}.tmp.${process.pid}.${randomUUID()}`;
 	const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
 	try {
-		fs.writeSync(fd, content);
+		const buf = Buffer.from(content, "utf8");
+		for (let off = 0; off < buf.length; ) off += fs.writeSync(fd, buf, off, buf.length - off);
 		fs.fsyncSync(fd);
-	} finally {
-		fs.closeSync(fd);
+	} catch (error) {
+		try { fs.closeSync(fd); } catch {}
+		try { fs.unlinkSync(tmp); } catch {}
+		throw error;
 	}
+	fs.closeSync(fd);
 	try {
 		fs.linkSync(tmp, lockPath);
 	} catch (error) {
@@ -710,7 +714,8 @@ function realish(p: string): string {
 
 function nested(a: string, b: string): boolean {
 	const rel = path.relative(a, b);
-	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+	// "..runner" is a child named "..runner", not a parent: only ".." or "../…" leaves `a`.
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 /**

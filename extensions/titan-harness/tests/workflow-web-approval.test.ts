@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readChain, sha256, verifyChain } from "../modules/hash-chain.ts";
-import { APPROVALS_FILE, DEFAULT_RUN_ROOT, MAX_APPROVAL_REFUSALS, RUNNER_LOCK_FILE, RUNNER_LOCK_UNPARSABLE_GRACE_MS, RunStore, type RunnerStore, listPendingApprovals, openRunnerStore, recoverInterruptedRuns } from "../modules/run-store.ts";
+import { APPROVALS_FILE, DEFAULT_RUN_ROOT, MAX_APPROVAL_REFUSALS, RUNNER_LOCK_FILE, RUNNER_LOCK_UNPARSABLE_GRACE_MS, RunStore, type RunnerStore, assertRunnerRootOutside, listPendingApprovals, openRunnerStore, recoverInterruptedRuns } from "../modules/run-store.ts";
 import { DEFAULT_STACK_SETTINGS } from "../modules/stack-config.ts";
 import { createWorkflowRuntime, type WorkflowRuntimeHost } from "../modules/workflow-runtime.ts";
 import { type ActorPolicy, DEFAULT_APPROVAL_TTL_MS, QueueApprover, type ApprovalDecision, type ApprovalRequest, type Approver } from "../modules/workflow/approver.ts";
@@ -736,6 +736,13 @@ function readLockToken(store: RunnerStore): string {
 }
 
 describe("G. defence-in-depth (not run-dir isolation): the runner root must not overlap the workflow cwd", () => {
+	test("G2 a runner root whose name starts with '..' inside the cwd is still inside (and DEFAULT_RUN_ROOT/..x is still refused)", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "n303cwd-"));
+		const store = openRunnerStore(join(cwd, "..runner"));
+		try { expect(() => assertRunnerRootOutside(store, cwd)).toThrow(); } finally { store.release(); }
+		expect(() => openRunnerStore(join(DEFAULT_RUN_ROOT, "..x"))).toThrow();
+	});
+
 	test("G1 hosted approvals refuse a runner store root inside or containing the workflow cwd", () => {
 		const root = mkdtempSync(join(tmpdir(), "titan-runner-cwd-")); dirs.push(root);
 		const doc: WorkflowDoc = { name: "web", nodes: [{ id: "gate", approval: { message: "Ship?" } }] };

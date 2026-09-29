@@ -247,7 +247,19 @@ exports `TITAN_RUN_DIR` and `ARTIFACTS_DIR` (= `<runDir>/artifacts`) to every
 node (`modules/workflow/executor.ts:575-578`). A node can therefore write
 `$ARTIFACTS_DIR/../approvals.jsonl`. Because the chain is unkeyed, it can also
 append recomputed `requested`/`decided`/`consumed` rows for invented actors,
-and the hosted preset tally would count them.
+and the hosted preset tally would count them. From `TITAN_RUN_DIR` a node can also:
+
+- rewrite `approvals.jsonl` wholesale, including a pending request's bound
+  `artifactSha256` and `actorPolicy.allowedActors`, which `consumeDecision`
+  reads from disk;
+- append valid `expired`/`decided` rows (refusing or ending a live request) or
+  corrupt the chain (the index then throws: denial of service);
+- write `run.json` `status`, an input to the ownership fence;
+- reach `<root>/runner.lock` two levels up and delete it or replace it with a
+  dead-pid body, defeating the fence and enabling a takeover.
+
+The ownership fence and the lock protocol therefore depend on files in the same
+writable class and are only as strong as the run-dir boundary.
 
 Hosted use **requires** the runner store root to be outside every path an agent
 or bash node can write: a separate filesystem/sandbox boundary, with the P3
