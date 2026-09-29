@@ -25,7 +25,18 @@ flowchart LR
 - `skills/`, `mcp/`, `personas/`: the skill pack, MCP catalog and persona library.
 - `scripts/`: ledger verifier, monitor, workflow viewer/TUI, MCP bridge and patch helpers.
 
-## Hosted use
+## Hosted and team use
+
+The package works on a single machine, and it is also designed to be embedded in a team's hosted agent platform. There, a web front end handles sign-in and approvals, each person or job gets an isolated workspace, and a trusted runner outside those workspaces drives titan workflows wherever side effects must be enforced: CRM or database writes, paid lookups, publishing, and release gates.
+
+Work on the package usually splits into a few functional lanes, which can proceed in parallel:
+
+| Lane | Touches |
+|---|---|
+| Runner seams | `modules/workflow/*`: typed inputs, bound web approvals, `mcpTool`, `runWorkflow`, budget enforcement |
+| Workflow authoring | `.titan/workflows/`, `/create-workflow`, the `titan-workflow-authoring` skill |
+| Observability | run store, ledger, `/workflow-monitor`, `scripts/verify-ledger.mjs` |
+| Skills and connectors | `skills/`, `mcp/`, `/titan-doctor` |
 
 The workflow engine (`modules/workflow/*`) has no Pi import, so a hosted runner can drive it **outside the agent containers**: the runner owns the run store and approvals, executes agent and script nodes in an isolated workspace through a narrow endpoint, treats everything returned as untrusted, and re-checks release gates itself. Two rules apply there: every agent node should set `allowed_tools` (otherwise it falls back to full tools), and budgets are declarative until the runner enforces them. Seams for typed inputs, bound web approvals, `mcpTool` and `runWorkflow` are arriving as PRs.
 
