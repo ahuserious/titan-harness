@@ -83,7 +83,7 @@ describe("runner web approvals", () => {
 		expect(tuiCalls).toBe(0);
 	});
 
-	test("second consume fails for the same object AND a replay with a fresh nonce, across store instances", async () => {
+	test("second consume fails for the same object AND a replay with a fresh nonce (owning store; a plain RunStore is refused as runner_not_owner)", async () => {
 		const h = harness(); const req = await requested(h.queue); const d = decision(req);
 		h.queue.deliver(d); await h.result;
 		const fresh = new RunStore(h.storeRoot);
@@ -95,7 +95,7 @@ describe("runner web approvals", () => {
 		expect(rows(h.dir).filter(r => r.type === "approval.refused")).toHaveLength(2);
 	});
 
-	test("concurrent consumers have exactly one winner", async () => {
+	test("concurrent consumers on the owning store have exactly one winner", async () => {
 		const h = harness(); const req = await requested(h.queue);
 		const results = await Promise.all([h.store, h.store].map(store => Promise.resolve().then(() => store.consumeDecision(h.dir, decision(req), binding(req)))));
 		expect(results.filter(r => r.ok)).toHaveLength(1);
@@ -736,11 +736,14 @@ function readLockToken(store: RunnerStore): string {
 }
 
 describe("G. defence-in-depth (not run-dir isolation): the runner root must not overlap the workflow cwd", () => {
-	test("G2 a runner root whose name starts with '..' inside the cwd is still inside (and DEFAULT_RUN_ROOT/..x is still refused)", () => {
+	test("G2 a runner root whose name starts with '..' inside the cwd is still inside (and <defaultRoot>/..x is still refused)", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "n303cwd-"));
+		dirs.push(cwd);
 		const store = openRunnerStore(join(cwd, "..runner"));
 		try { expect(() => assertRunnerRootOutside(store, cwd)).toThrow(); } finally { store.release(); }
-		expect(() => openRunnerStore(join(DEFAULT_RUN_ROOT, "..x"))).toThrow();
+		const fakeDefault = mkdtempSync(join(tmpdir(), "n303default-"));
+		dirs.push(fakeDefault);
+		expect(() => openRunnerStore(join(fakeDefault, "..x"), { defaultRoot: fakeDefault })).toThrow();
 	});
 
 	test("G1 hosted approvals refuse a runner store root inside or containing the workflow cwd", () => {

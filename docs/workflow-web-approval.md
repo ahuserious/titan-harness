@@ -205,11 +205,20 @@ expected values:
 - the actor policy verdict (`actorAuthorized`);
 - all delivered binding fields, plus actor, nonce, decision and time.
 
-It performs the read/check/write synchronously without yielding. This serializes
-concurrent promises and different RunStore instances on the runner's JS event
-loop. Across processes, the runner lock enforces one runner per store root, and
-the ownership fence (above) refuses consumption by a runner that lost it.
-Other processes or worker threads must route writes through that owner.
+It performs the read/check/write synchronously without yielding, which serializes
+concurrent promises on the runner's JS event loop (only the registered runner store
+can consume at all). Across processes the runner lock enforces one runner per store
+root, and the ownership fence (above) refuses consumption by a runner that lost it.
+The fence is **check-then-write, not atomic, across processes**: the lock is a pid
+file, not a kernel lock, so a takeover landing between the fence read and the append
+is not excluded. Reaching that window first needs a live lock to be displaced
+(see takeover). During a misjudged takeover's put-back, the live lock is briefly
+absent; the holder's fence then reports `runner_not_owner` and fails closed (a
+liveness cost, not a safety hole). The runner root must be on a filesystem that
+supports hard links (`link()`); otherwise opening fails closed. A lost-lock runner
+may still append to `events.jsonl` (`node.end`); resume (out of scope) must fence
+that chain before a second writer appends. Other processes or worker threads must
+route writes through the owner.
 
 ## Expiry
 
