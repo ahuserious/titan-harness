@@ -5,10 +5,12 @@
  * expected-actor policy, expiry) in the runner store (openRunnerStore only), snapshots the
  * delivered decision once, asks the host's ActorPolicy about the snapshot's actor, and
  * consumes once. Without an ActorPolicy every hosted decision is refused (fail closed).
+ * After every wait the runner re-checks ownership (lock file token + run still `running`);
+ * a runner that lost either refuses (runner_not_owner / run_not_running) and the node ends.
  */
 import { randomUUID } from "node:crypto";
 import { sha256 } from "../hash-chain.ts";
-import { assertRunnerStore, type RunStore, snapshotDecision } from "../run-store.ts";
+import { assertRunnerRootOutside, assertRunnerStore, runnerFence, type RunStore, snapshotDecision } from "../run-store.ts";
 
 export interface ApprovalRequest {
 	requestId: string;
@@ -112,8 +114,9 @@ function waitForAnswer(approver: Approver, req: ApprovalRequest, signal?: AbortS
 	});
 }
 
-export function createHostedApproval(host: { approver: Approver; store: RunStore; runDir: string; runId: string; approvalTtlMs?: number; actorPolicy?: ActorPolicy }) {
+export function createHostedApproval(host: { approver: Approver; store: RunStore; runDir: string; runId: string; cwd: string; approvalTtlMs?: number; actorPolicy?: ActorPolicy }) {
 	assertRunnerStore(host.store, host.runDir); // fail closed: no lock/recovery, no hosted approvals
+	assertRunnerRootOutside(host.store, host.cwd); // defence-in-depth, not run-dir isolation
 	const ttl = host.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
 	if (!Number.isFinite(ttl) || ttl <= 0 || ttl > 8.64e15 - Date.now()) throw new Error("approvalTtlMs must be a positive, representable duration");
 	const policy = host.actorPolicy;
@@ -149,10 +152,17 @@ export function createHostedApproval(host: { approver: Approver; store: RunStore
 			// One snapshot: the policy, the store's checks, the log and the outcome all see the same fields.
 			const snap = snapshotDecision(answer);
 			const delivered = snap.ok ? snap.decision : answer;
+			// Ownership fence after every wait (a restart/takeover may have happened meanwhile):
+			// consumeDecision re-checks it synchronously and records run_not_running; either way
+			// this node ends fail closed instead of waiting on a run it no longer owns.
+			const fenced = runnerFence(host.store, host.runDir);
 			const consumed = host.store.consumeDecision(host.runDir, delivered, {
-				requestId: req.requestId, artifactSha256: sha256(opts.content()), actorAuthorized: snap.ok && authorized(snap.decision.actor),
+				requestId: req.requestId, artifactSha256: sha256(opts.content()), actorAuthorized: !fenced && snap.ok && authorized(snap.decision.actor),
 			});
 			if (consumed.ok) return { approved: consumed.decision.decision === "approve", response: consumed.decision.response, hosted: true, actor: consumed.decision.actor };
+			if (fenced || consumed.reason === "runner_not_owner" || consumed.reason === "run_not_running") {
+				return { approved: false, response: `approval refused: ${fenced ?? consumed.reason}`, hosted: true };
+			}
 			if (!host.store.listPendingApprovals(host.runDir).some(p => p.requestId === req.requestId)) {
 				return { approved: false, response: `approval refused: ${consumed.reason}`, hosted: true };
 			}

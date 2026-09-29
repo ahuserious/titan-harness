@@ -21,8 +21,8 @@
  * written in canonical key order; files are 0600, directories 0700. Pure Node, no pi.
  *
  * Hosted (web) approvals need a RUNNER store: `openRunnerStore(root)` takes the exclusive
- * `<root>/runner.lock` (O_EXCL; pid + process start time; a dead holder's lock is taken
- * over), refuses DEFAULT_RUN_ROOT (the TUI's shared root), runs recoverInterruptedRuns once
+ * `<root>/runner.lock` (written complete, linked no-replace; pid + process start time; a
+ * dead holder's lock is taken over only after byte-for-byte revalidation), refuses DEFAULT_RUN_ROOT (the TUI's shared root), runs recoverInterruptedRuns once
  * and registers the store; `assertRunnerStore` is what the hosted approval path checks.
  */
 import { randomBytes, randomUUID } from "node:crypto";
@@ -363,8 +363,9 @@ export class RunStore {
 
 	listPendingApprovals(dir: string): ApprovalRequest[] { return listPendingApprovals(dir); }
 
-	/** Only the runner clock can expire a pending request; a future-dated forged reply cannot. */
+	/** Only the runner clock can expire a pending request; a future-dated forged reply cannot. Fenced like consumeDecision. */
 	expireApproval(dir: string, requestId: string): boolean {
+		if (runnerFence(this, dir)) return false;
 		const entry = approvalIndex(dir).get(requestId);
 		if (!entry || entry.state !== "pending" || Date.now() <= Date.parse(entry.request.expiresAt)) return false;
 		this.appendApproval(dir, "approval.expired", { requestId });
@@ -380,8 +381,21 @@ export class RunStore {
 	 * is the runner's host-policy verdict for the snapshot's actor (anything but `true` refuses).
 	 * The delivered decision is snapshotted once; checks, the log and the return use that copy.
 	 * The MAX_APPROVAL_REFUSALS-th refusal of a pending request expires it (fail closed).
+	 *
+	 * Ownership fence, checked first on every call (re-reading the lock file and run.json):
+	 * only a store from openRunnerStore whose lock file still carries its token may consume
+	 * (else `runner_not_owner`: nothing is written, since a non-owner must not write the
+	 * owner's authoritative log), and only while the run is `running` (else `run_not_running`:
+	 * recorded as a refusal, never counted toward the refusal cap, request left pending).
 	 */
 	consumeDecision(dir: string, delivered: unknown, expected: { requestId: string; artifactSha256: string; actorAuthorized?: boolean }): { ok: true; decision: ApprovalDecision } | { ok: false; reason: string } {
+		const fenced = runnerFence(this, dir);
+		if (fenced === "runner_not_owner") return { ok: false, reason: fenced };
+		if (fenced) {
+			const snap = snapshotDecision(delivered);
+			this.appendApproval(dir, "approval.refused", { requestId: expected.requestId, ...(snap.ok ? { decision: snap.decision } : {}), reason: fenced });
+			return { ok: false, reason: fenced };
+		}
 		const index = approvalIndex(dir);
 		const entry = index.get(expected.requestId);
 		const req = entry?.request;
@@ -520,7 +534,7 @@ function approvalIndex(dir: string): Map<string, ApprovalEntry> {
 		}
 		const entry = typeof data.requestId === "string" ? index.get(data.requestId) : undefined;
 		if (row.type === "approval.refused") {
-			if (entry) entry.refusals++;
+			if (entry && (row.data as { reason?: unknown } | undefined)?.reason !== "run_not_running") entry.refusals++;
 			continue;
 		}
 		if (row.type !== "approval.decided" && row.type !== "approval.consumed" && row.type !== "approval.expired") invalid(row, `unknown row type ${String(row.type)}`);
@@ -620,12 +634,73 @@ function lockHolderAlive(body: Partial<RunnerLockBody> | undefined): boolean {
 	return !(body?.procStart && now && body.procStart !== now);
 }
 
-function readLockBody(file: string): Partial<RunnerLockBody> | undefined {
+function parseLockBody(raw: string): Partial<RunnerLockBody> | undefined {
 	try {
-		const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-		return raw && typeof raw === "object" ? raw : undefined;
+		const body = JSON.parse(raw);
+		return body && typeof body === "object" && typeof body.token === "string" && body.token ? body : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+function readLockBody(file: string): Partial<RunnerLockBody> | undefined {
+	try {
+		return parseLockBody(fs.readFileSync(file, "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+/** An unparsable (e.g. empty, torn) lock is treated as LIVE until its mtime is this old. */
+export const RUNNER_LOCK_UNPARSABLE_GRACE_MS = 30_000;
+
+/** Test-only pauses between takeover steps (deterministic race tests). */
+export interface RunnerLockTestHooks {
+	/** After the existing lock was read and judged stale, before it is renamed aside. */
+	beforeRename?(lockPath: string): void;
+	/** After the rename, before the renamed file is re-read and compared. */
+	afterRename?(lockPath: string, aside: string): void;
+}
+
+/**
+ * Create `lockPath` holding `content` without ever exposing an empty or partial lock:
+ * write + fsync a unique temp file, then link() it into place (fails with EEXIST instead of
+ * replacing). Returns false when a lock already exists.
+ */
+function createLockNoReplace(lockPath: string, content: string): boolean {
+	const tmp = `${lockPath}.tmp.${process.pid}.${randomUUID()}`;
+	const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+	try {
+		fs.writeSync(fd, content);
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	try {
+		fs.linkSync(tmp, lockPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+		throw error;
+	} finally {
+		try { fs.unlinkSync(tmp); } catch {}
+	}
+	const dir = fs.openSync(path.dirname(lockPath), "r");
+	try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+	return true;
+}
+
+/**
+ * The ownership fence: undefined when `store` is a live runner store (registered, and its
+ * lock FILE, re-read now, carries its token), `dir` is inside its root and run.json says
+ * `running`. Never trusts in-memory state for the lock.
+ */
+export function runnerFence(store: RunStore, dir: string): "runner_not_owner" | "run_not_running" | undefined {
+	const held = runnerStores.get(store);
+	if (!held || readLockBody(held.lockPath)?.token !== held.token || !nested(store.root, path.resolve(dir))) return "runner_not_owner";
+	try {
+		return store.readRun(dir).status === "running" ? undefined : "run_not_running";
+	} catch {
+		return "run_not_running";
 	}
 }
 
@@ -640,13 +715,16 @@ function nested(a: string, b: string): boolean {
 
 /**
  * Open the runner's own store: refuse DEFAULT_RUN_ROOT (and any root nested in or around
- * it), take `<root>/runner.lock` with O_EXCL, then run recoverInterruptedRuns exactly once.
- * A lock whose holder pid is dead (or reused, by /proc start time) is taken over by
- * renaming it aside and re-checking that the renamed file is the stale one observed; a
- * live holder, including this same process, is refused. The hosted approval path accepts
- * only stores returned here (assertRunnerStore).
+ * it), take `<root>/runner.lock`, then run recoverInterruptedRuns exactly once.
+ * The lock is created complete (temp file + link(), never replace), so it is never seen
+ * empty. Takeover reads and parses the lock; only when its holder pid is dead (or reused,
+ * by /proc start time) is it renamed aside, and the renamed file must be byte-identical to
+ * what was judged stale, else it is linked back and the open refused. An unparsable lock
+ * is live until RUNNER_LOCK_UNPARSABLE_GRACE_MS old. A live holder, including this same
+ * process, is refused. The hosted approval path accepts only stores returned here
+ * (assertRunnerStore); after release/loss of the lock the store also refuses updateRun.
  */
-export function openRunnerStore(root: string, opts: { defaultRoot?: string } = {}): RunnerStore {
+export function openRunnerStore(root: string, opts: { defaultRoot?: string; _testHooks?: RunnerLockTestHooks } = {}): RunnerStore {
 	const resolved = path.resolve(root);
 	const shared = realish(opts.defaultRoot ?? DEFAULT_RUN_ROOT);
 	const refuse = (real: string) => {
@@ -657,38 +735,49 @@ export function openRunnerStore(root: string, opts: { defaultRoot?: string } = {
 	refuse(realish(resolved)); // and again once symlinks resolve
 	const lockPath = path.join(resolved, RUNNER_LOCK_FILE);
 	const body: RunnerLockBody = { pid: process.pid, procStart: procStartOf(process.pid), token: randomUUID(), acquiredAt: new Date().toISOString() };
+	const hooks = opts._testHooks;
 	let acquired = false;
 	for (let attempt = 0; attempt < 3 && !acquired; attempt++) {
-		try {
-			const fd = fs.openSync(lockPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-			try {
-				fs.writeSync(fd, `${JSON.stringify(body)}\n`);
-				fs.fsyncSync(fd);
-			} finally {
-				fs.closeSync(fd);
-			}
+		if (createLockNoReplace(lockPath, `${JSON.stringify(body)}\n`)) {
 			acquired = true;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			const holder = readLockBody(lockPath);
-			if (lockHolderAlive(holder)) throw new Error(`openRunnerStore: ${resolved} is locked by live runner pid ${holder!.pid}`);
-			if (holder === undefined && attempt === 0) continue; // a creator may be mid-write; look again
-			const aside = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
-			try {
-				fs.renameSync(lockPath, aside);
-			} catch (renameError) {
-				if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
-				throw renameError;
-			}
-			const moved = readLockBody(aside);
-			if (holder && moved?.token !== holder.token) {
-				// We displaced a fresh lock that replaced the stale one: put it back and refuse.
-				try { fs.linkSync(aside, lockPath); } catch {}
-				try { fs.unlinkSync(aside); } catch {}
-				throw new Error(`openRunnerStore: ${resolved} was taken by another runner during stale-lock takeover`);
-			}
-			fs.unlinkSync(aside);
+			break;
 		}
+		// Takeover: only a lock whose exact bytes we read and judged stale may be moved aside.
+		let raw: Buffer;
+		let mtimeMs: number;
+		try {
+			raw = fs.readFileSync(lockPath);
+			mtimeMs = fs.statSync(lockPath).mtimeMs;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // released meanwhile; try to create again
+			throw error;
+		}
+		const holder = parseLockBody(raw.toString("utf8"));
+		if (!holder && Date.now() - mtimeMs < RUNNER_LOCK_UNPARSABLE_GRACE_MS) throw new Error(`openRunnerStore: ${resolved} has an unreadable runner.lock (treated as live for ${RUNNER_LOCK_UNPARSABLE_GRACE_MS / 1000}s)`);
+		if (holder && lockHolderAlive(holder)) throw new Error(`openRunnerStore: ${resolved} is locked by live runner pid ${holder.pid}`);
+		hooks?.beforeRename?.(lockPath);
+		const aside = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+		try {
+			fs.renameSync(lockPath, aside);
+		} catch (renameError) {
+			if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw renameError;
+		}
+		hooks?.afterRename?.(lockPath, aside);
+		let moved: Buffer | undefined;
+		try { moved = fs.readFileSync(aside); } catch {}
+		if (!moved || !moved.equals(raw)) {
+			// We moved a lock other than the one judged stale (a live runner replaced it): put it
+			// back without replacing anything and refuse. If another lock already took its place,
+			// leave the moved file aside; its holder's fence (lock token re-read) now refuses it.
+			let restored = false;
+			if (moved) {
+				try { fs.linkSync(aside, lockPath); restored = true; } catch {}
+				if (restored) try { fs.unlinkSync(aside); } catch {}
+			}
+			throw new Error(`openRunnerStore: ${resolved} was taken by another runner during stale-lock takeover${restored ? "" : ` (displaced lock kept at ${aside})`}`);
+		}
+		fs.unlinkSync(aside);
 	}
 	if (!acquired) throw new Error(`openRunnerStore: could not lock ${resolved}`);
 	if (readLockBody(lockPath)?.token !== body.token) throw new Error(`openRunnerStore: lost ${lockPath} while acquiring it`);
@@ -701,7 +790,17 @@ export function openRunnerStore(root: string, opts: { defaultRoot?: string } = {
 		throw error;
 	}
 	runnerStores.set(store, { lockPath, token: body.token });
+	// A runner that lost its lock must not rewrite run.json (e.g. flip the new owner's
+	// `interrupted` back to cancelled/completed). The executor's patchRun reports the throw.
+	const updateRun = store.updateRun.bind(store);
 	Object.defineProperties(store, {
+		updateRun: {
+			value: (dir: string, patch: Partial<RunMeta>): RunMeta => {
+				const held = runnerStores.get(store);
+				if (!held || readLockBody(held.lockPath)?.token !== held.token) throw new Error(`runner store ${resolved} no longer holds ${lockPath}; refusing to update run.json`);
+				return updateRun(dir, patch);
+			},
+		},
 		lockPath: { value: lockPath, enumerable: true },
 		recovered: { value: recovered, enumerable: true },
 		release: {
@@ -712,6 +811,17 @@ export function openRunnerStore(root: string, opts: { defaultRoot?: string } = {
 		},
 	});
 	return store;
+}
+
+/**
+ * Defence-in-depth only (NOT the isolation fix): refuse a runner store root that is inside,
+ * or contains, the workflow working directory, where agent/bash nodes write by default.
+ * Children still learn the run dir (TITAN_RUN_DIR / ARTIFACTS_DIR); see the docs' known limitation.
+ */
+export function assertRunnerRootOutside(store: RunStore, workdir: string): void {
+	const root = realish(store.root);
+	const cwd = realish(workdir);
+	if (nested(root, cwd) || nested(cwd, root)) throw new Error(`hosted approvals: runner store root ${root} overlaps the workflow cwd ${cwd}; put the runner root outside every agent-writable path`);
 }
 
 /** Throws unless `store` came from openRunnerStore in this process and still holds its lock; `runDir`, when given, must be inside its root. */

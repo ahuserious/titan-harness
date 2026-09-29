@@ -29,12 +29,24 @@ Hosted approvals only work on a store from `openRunnerStore(root)` (run-store.ts
 - It refuses `DEFAULT_RUN_ROOT` (the TUI's shared root) and any root nested
   inside or around it, before and after resolving symlinks. The runner needs
   its own root.
-- It creates `<root>/runner.lock` with `O_EXCL`, holding `{pid, procStart, token}`.
+- It creates `<root>/runner.lock` holding `{pid, procStart, token}`. The full
+  content is written and fsynced to a unique temp file first, then `link()`ed
+  into place, which fails instead of replacing an existing lock. The lock file
+  is therefore never seen empty or partial.
   `procStart` is the `/proc/<pid>/stat` start time, used to detect pid reuse.
   A second opener is refused while the holder is alive, including an opener in
-  the same process. A lock whose pid is dead, or reused with another start time,
-  is taken over: it is renamed aside, the renamed file is checked to be the
-  stale lock that was observed, and a fresh `O_EXCL` create follows.
+  the same process.
+- Takeover never removes a lock whose content was not validated as stale. The
+  opener reads and parses the lock. Only if its pid is dead, or reused with
+  another start time, is it renamed to a unique name. The renamed file is then
+  re-read and must be byte-identical to the bytes judged stale. If not (a live
+  runner replaced the lock in between), it is linked back without replacing
+  anything and the open is refused. If another lock has already taken its
+  place, the displaced file is left aside and its holder fails closed at its
+  next ownership check. Only after a successful check does the opener create
+  its own lock, using the same no-replace primitive.
+- An empty or unparsable lock is treated as live (refused, left untouched)
+  until its mtime is older than `RUNNER_LOCK_UNPARSABLE_GRACE_MS` (30 s).
 - It then runs `recoverInterruptedRuns` exactly once (see Recovery) and returns
   the store. The recovered runs are on `store.recovered`. `store.release()`
   drops the lock, but only while the lock still holds this store's token.
@@ -48,6 +60,32 @@ in these cases:
 
 The runner checks this again before every request. The TUI/headless path
 (no `approver`) is unchanged and needs no runner store.
+
+As defence in depth (not run-dir isolation, see Known limitation below),
+hosted approvals also refuse a runner root that lies inside, or contains, the
+workflow `cwd`.
+
+### Ownership fence
+
+A runner that has lost ownership must not consume decisions. `consumeDecision`
+checks the fence first on every call, and `createHostedApproval` checks it
+after every wait, immediately before consuming. Both re-read the lock file and
+`run.json` and do not trust in-memory state:
+
+- The store must come from `openRunnerStore`, its lock file must still carry
+  its token, and the run dir must be inside its root. Otherwise the result is
+  `runner_not_owner`. Nothing is written, because a non-owner must not write
+  to the owner's authoritative log.
+- The run's status must still be `running` (not `interrupted`, `aborted`, or
+  terminal). Otherwise the result is `run_not_running`. This is recorded as an
+  `approval.refused` row. It does not count toward the refusal cap, and the
+  request stays pending.
+
+In both cases the node ends cancelled (fail closed) and the request stays
+pending in the new owner's view. The runner-store `updateRun` also refuses to
+run after the lock is lost, so the old runner cannot overwrite the new owner's
+`interrupted` status with its final status. `expireApproval` is fenced the same
+way.
 
 ## Content binding
 
@@ -169,7 +207,8 @@ expected values:
 
 It performs the read/check/write synchronously without yielding. This serializes
 concurrent promises and different RunStore instances on the runner's JS event
-loop. Across processes, the runner lock enforces one runner per store root.
+loop. Across processes, the runner lock enforces one runner per store root, and
+the ownership fence (above) refuses consumption by a runner that lost it.
 Other processes or worker threads must route writes through that owner.
 
 ## Expiry
@@ -199,6 +238,24 @@ gone" means **found running at startup** by the lock holder. Recovery:
 `listPendingApprovals(runDir)` remains available for human inspection. Do not
 call `recoverInterruptedRuns` directly against a store another runner might own.
 Resume is out of scope.
+
+## Known limitation (escalated)
+
+**The seam does not yet enforce that agents cannot write the run directory.**
+In local titan, bash and agent nodes can write the run dir. The executor
+exports `TITAN_RUN_DIR` and `ARTIFACTS_DIR` (= `<runDir>/artifacts`) to every
+node (`modules/workflow/executor.ts:575-578`). A node can therefore write
+`$ARTIFACTS_DIR/../approvals.jsonl`. Because the chain is unkeyed, it can also
+append recomputed `requested`/`decided`/`consumed` rows for invented actors,
+and the hosted preset tally would count them.
+
+Hosted use **requires** the runner store root to be outside every path an agent
+or bash node can write: a separate filesystem/sandbox boundary, with the P3
+node-exec wiring not exporting or mounting the runner's run dir. The overlap
+check against the workflow `cwd` (above) is defence in depth only. It does not
+stop a node that learns the run dir from the environment. This item is
+escalated. Until it is fixed, hosted approvals must not be treated as
+tamper-proof against the workflow's own nodes.
 
 ## Other callers
 

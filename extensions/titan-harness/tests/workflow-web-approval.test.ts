@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readChain, sha256, verifyChain } from "../modules/hash-chain.ts";
-import { APPROVALS_FILE, DEFAULT_RUN_ROOT, MAX_APPROVAL_REFUSALS, RUNNER_LOCK_FILE, RunStore, type RunnerStore, listPendingApprovals, openRunnerStore, recoverInterruptedRuns } from "../modules/run-store.ts";
+import { APPROVALS_FILE, DEFAULT_RUN_ROOT, MAX_APPROVAL_REFUSALS, RUNNER_LOCK_FILE, RUNNER_LOCK_UNPARSABLE_GRACE_MS, RunStore, type RunnerStore, listPendingApprovals, openRunnerStore, recoverInterruptedRuns } from "../modules/run-store.ts";
 import { DEFAULT_STACK_SETTINGS } from "../modules/stack-config.ts";
 import { createWorkflowRuntime, type WorkflowRuntimeHost } from "../modules/workflow-runtime.ts";
 import { type ActorPolicy, DEFAULT_APPROVAL_TTL_MS, QueueApprover, type ApprovalDecision, type ApprovalRequest, type Approver } from "../modules/workflow/approver.ts";
@@ -34,7 +34,9 @@ function harness(spec: ApprovalSpec = { message: "Ship?", content: "draft", capt
 	dirs.push(root);
 	mkdirSync(join(root, ".titan/presets/content"), { recursive: true });
 	writeFileSync(join(root, ".titan/presets/content/p.yaml"), PRESET.replace("key: example-saas-blog-post-founder", "key: p"));
-	const store = runnerStore(root);
+	const storeRoot = mkdtempSync(join(tmpdir(), "titan-web-approval-runner-")); // outside the workflow cwd
+	dirs.push(storeRoot);
+	const store = runnerStore(storeRoot);
 	const { runId, dir } = store.open({ projectSlug: "p", cwd: root, workflow: { name: "web" } });
 	const doc: WorkflowDoc = { name: "web", nodes: nodes ?? [{ id: "gate", approval: spec }] };
 	const loaded = { name: "web", doc, normalized: doc, dir: root, path: join(root, "web.yaml"), sha256: sha256("web"), source: "project", commands: {}, scripts: {}, validation: { ok: true, errors: [], warnings: [] } } as LoadedWorkflow;
@@ -47,7 +49,7 @@ function harness(spec: ApprovalSpec = { message: "Ship?", content: "draft", capt
 	let finished = false;
 	const result = executeWorkflow(loaded, deps, { inputs }).finally(() => { finished = true; });
 	active.push(async () => { controller.abort(); await result; });
-	return { root, store, runId, dir, queue, result, spec, doc, finished: () => finished };
+	return { root, storeRoot, store, runId, dir, queue, result, spec, doc, finished: () => finished };
 }
 async function requested(queue: QueueApprover, n = 1): Promise<ApprovalRequest> {
 	for (let i = 0; i < 200 && queue.requests.length < n; i++) await Bun.sleep(1);
@@ -60,6 +62,8 @@ function decision(req: ApprovalRequest, patch: Partial<ApprovalDecision> = {}): 
 }
 const rows = (dir: string) => readChain(join(dir, APPROVALS_FILE));
 const binding = (req: ApprovalRequest) => ({ requestId: req.requestId, artifactSha256: req.artifactSha256, actorAuthorized: true });
+/** Lifecycle checks sit behind the ownership fence: put a finished run back to `running` (plain store write). */
+const markRunning = (h: { storeRoot: string; dir: string }) => new RunStore(h.storeRoot).updateRun(h.dir, { status: "running" });
 
 describe("runner web approvals", () => {
 	test("approve through executeWorkflow; durable requested → decided → consumed with actor; approver wins over UI", async () => {
@@ -82,16 +86,18 @@ describe("runner web approvals", () => {
 	test("second consume fails for the same object AND a replay with a fresh nonce, across store instances", async () => {
 		const h = harness(); const req = await requested(h.queue); const d = decision(req);
 		h.queue.deliver(d); await h.result;
-		const fresh = new RunStore(h.root);
-		expect(fresh.consumeDecision(h.dir, d, binding(req))).toEqual({ ok: false, reason: "request already consumed" });
-		expect(fresh.consumeDecision(h.dir, { ...d, nonce: "forged-fresh-nonce" }, binding(req))).toEqual({ ok: false, reason: "request already consumed" });
+		const fresh = new RunStore(h.storeRoot);
+		expect(fresh.consumeDecision(h.dir, d, binding(req))).toEqual({ ok: false, reason: "runner_not_owner" });
+		markRunning(h);
+		expect(h.store.consumeDecision(h.dir, d, binding(req))).toEqual({ ok: false, reason: "request already consumed" });
+		expect(h.store.consumeDecision(h.dir, { ...d, nonce: "forged-fresh-nonce" }, binding(req))).toEqual({ ok: false, reason: "request already consumed" });
 		expect(rows(h.dir).filter(r => r.type === "approval.consumed")).toHaveLength(1);
 		expect(rows(h.dir).filter(r => r.type === "approval.refused")).toHaveLength(2);
 	});
 
 	test("concurrent consumers have exactly one winner", async () => {
 		const h = harness(); const req = await requested(h.queue);
-		const results = await Promise.all([h.store, new RunStore(h.root)].map(store => Promise.resolve().then(() => store.consumeDecision(h.dir, decision(req), binding(req)))));
+		const results = await Promise.all([h.store, h.store].map(store => Promise.resolve().then(() => store.consumeDecision(h.dir, decision(req), binding(req)))));
 		expect(results.filter(r => r.ok)).toHaveLength(1);
 		expect(results.filter(r => !r.ok)).toHaveLength(1);
 		h.queue.deliver(decision(req));
@@ -172,7 +178,7 @@ describe("runner web approvals", () => {
 		const h = harness(); const req = await requested(h.queue);
 		expect(h.store.readRun(h.dir).status).toBe("running");
 		const before = readFileSync(join(h.dir, APPROVALS_FILE), "utf8");
-		const fresh = new RunStore(h.root);
+		const fresh = new RunStore(h.storeRoot);
 		expect(recoverInterruptedRuns(fresh).map(r => r.runId)).toEqual([h.runId]);
 		expect(fresh.readRun(h.dir).status).toBe("interrupted");
 		expect(fresh.listPendingApprovals(h.dir)).toEqual([req]);
@@ -241,7 +247,8 @@ describe("runner web approvals", () => {
 		h.queue.deliver(decision(req));
 		expect((await h.result).nodes.gate.status).toBe("failed");
 		// The authoritative consumption survived even though the observer mirror failed.
-		expect(new RunStore(h.root).consumeDecision(h.dir, decision(req), binding(req))).toEqual({ ok: false, reason: "request already consumed" });
+		markRunning(h);
+		expect(h.store.consumeDecision(h.dir, decision(req), binding(req))).toEqual({ ok: false, reason: "request already consumed" });
 	});
 
 	test("recovery leaves other run statuses and overdue pending requests untouched", async () => {
@@ -249,7 +256,7 @@ describe("runner web approvals", () => {
 		const req = { ...base, requestId: "overdue", expiresAt: new Date(Date.now() - 1000).toISOString() };
 		h.store.requestApproval(h.dir, req);
 		const other = h.store.open({ projectSlug: "p", cwd: h.root, status: "completed" });
-		expect(recoverInterruptedRuns(new RunStore(h.root))).toHaveLength(1);
+		expect(recoverInterruptedRuns(new RunStore(h.storeRoot))).toHaveLength(1);
 		expect(h.store.readRun(other.dir).status).toBe("completed");
 		expect(listPendingApprovals(h.dir)).toEqual([base, req]);
 	});
@@ -275,11 +282,13 @@ import { QueueApprover } from ${JSON.stringify(join(MODULES, "workflow/approver.
 import { executeWorkflow } from ${JSON.stringify(join(MODULES, "workflow/executor.ts"))};
 const root = ${JSON.stringify(root)};
 const store = openRunnerStore(root);
-const { runId, dir } = store.open({ projectSlug: "p", cwd: root, workflow: { name: "web" } });
+const cwd = root + "-cwd"; // the workflow cwd must not overlap the runner root
+(await import("node:fs")).mkdirSync(cwd, { recursive: true });
+const { runId, dir } = store.open({ projectSlug: "p", cwd, workflow: { name: "web" } });
 const doc = { name: "web", nodes: [{ id: "gate", approval: { message: "Ship?", content: "draft" } }] };
 const loaded = { name: "web", doc, normalized: doc, dir: root, path: root + "/web.yaml", sha256: "x", source: "project", commands: {}, scripts: {}, validation: { ok: true, errors: [], warnings: [] } };
 const queue = new QueueApprover();
-const deps = createWorkflowRuntime({ cwd: root, runId, runDir: dir, loaded, store, settings: DEFAULT_STACK_SETTINGS,
+const deps = createWorkflowRuntime({ cwd, runId, runDir: dir, loaded, store, settings: DEFAULT_STACK_SETTINGS,
 	runChild: async () => { throw new Error("unexpected child"); },
 	resolveRole: () => ({ model: "fake/model", thinking: "low", callsign: "worker", appendSystemPrompts: [], tools: "read" }),
 	approver: queue, actorPolicy: { policyId: "p", authorize: () => true } });
@@ -567,8 +576,8 @@ describe("hardening: decision snapshot, refusal cap, lifecycle validity", () => 
 		const lines = readFileSync(file, "utf8").trimEnd().split("\n");
 		writeFileSync(file, `${lines.slice(0, -1).join("\n")}\n`);
 		expect(verifyChain(file).ok).toBe(true);
-		const fresh = new RunStore(h.root);
-		expect(fresh.consumeDecision(h.dir, decision(req, { nonce: "n2" }), binding(req))).toEqual({ ok: false, reason: "request already decided" });
+		markRunning(h);
+		expect(h.store.consumeDecision(h.dir, decision(req, { nonce: "n2" }), binding(req))).toEqual({ ok: false, reason: "request already decided" });
 		expect(rows(h.dir).some(r => r.type === "approval.consumed")).toBe(false);
 	});
 
@@ -580,6 +589,7 @@ describe("hardening: decision snapshot, refusal cap, lifecycle validity", () => 
 		appendChained(file, { runId: h.runId, type: "approval.requested", data: { request: { ...req, artifactSha256: sha256("swapped") } } });
 		expect(verifyChain(file).ok).toBe(true);
 		expect(() => listPendingApprovals(h.dir)).toThrow("duplicate request");
+		markRunning(h);
 		expect(() => h.store.consumeDecision(h.dir, decision(req, { nonce: "n2" }), binding(req))).toThrow("approval chain invalid");
 	});
 
@@ -599,5 +609,149 @@ describe("hardening: decision snapshot, refusal cap, lifecycle validity", () => 
 			appendChained(file, { runId: h.runId, type, data });
 			expect(() => listPendingApprovals(h.dir)).toThrow(why);
 		}
+	});
+});
+
+// ═══ Repair round 2: ownership fence on consumption, validated stale-lock takeover ═══
+
+const lockToken = (root: string) => JSON.parse(readFileSync(join(root, RUNNER_LOCK_FILE), "utf8")).token as string;
+const nodeEnd = (dir: string) => readChain(join(dir, "events.jsonl")).filter(r => r.type === "node.end").at(-1)?.data as { status?: string; error?: string } | undefined;
+
+describe("E. ownership fence: no consumption after the runner lost its lock or the run stopped running", () => {
+	test("E1 release + reopen (recovery → interrupted), then a valid decision to the OLD transport: runner_not_owner, node cancelled, run stays interrupted, request still pending for the new owner", async () => {
+		const h = harness(); const req = await requested(h.queue);
+		h.store.release();
+		const owner = runnerStore(h.storeRoot);
+		expect(owner.recovered.map(r => r.runId)).toEqual([h.runId]);
+		const before = readFileSync(join(h.dir, APPROVALS_FILE), "utf8");
+		h.queue.deliver(decision(req));
+		const result = await h.result;
+		expect(result.status).toBe("cancelled");
+		expect(result.nodes.gate.status).toBe("cancelled");
+		expect(nodeEnd(h.dir)).toMatchObject({ status: "cancelled", error: expect.stringContaining("runner_not_owner") });
+		expect(owner.readRun(h.dir).status).toBe("interrupted"); // the old runner cannot rewrite run.json either
+		expect(owner.listPendingApprovals(h.dir)).toEqual([req]);
+		expect(readFileSync(join(h.dir, APPROVALS_FILE), "utf8")).toBe(before); // a non-owner writes nothing to the authoritative log
+		expect(h.store.consumeDecision(h.dir, decision(req, { nonce: "n2" }), binding(req))).toEqual({ ok: false, reason: "runner_not_owner" });
+		expect(h.store.expireApproval(h.dir, req.requestId)).toBe(false);
+	});
+
+	test("E2 lock file replaced by another owner's token while waiting: runner_not_owner, node cancelled, request pending", async () => {
+		const h = harness(); const req = await requested(h.queue);
+		writeFileSync(join(h.storeRoot, RUNNER_LOCK_FILE), JSON.stringify({ pid: process.pid, token: "someone-else", acquiredAt: "x" }));
+		h.queue.deliver(decision(req));
+		expect((await h.result).nodes.gate.status).toBe("cancelled");
+		expect(nodeEnd(h.dir)?.error).toContain("runner_not_owner");
+		expect(rows(h.dir).map(r => r.type)).toEqual(["approval.requested"]);
+		expect(listPendingApprovals(h.dir)).toEqual([req]);
+		expect(lockToken(h.storeRoot)).toBe("someone-else");
+	});
+
+	test("E3 lock still held but the run is no longer running: run_not_running is recorded, never counted, request stays pending", async () => {
+		const h = harness(); const req = await requested(h.queue);
+		new RunStore(h.storeRoot).updateRun(h.dir, { status: "interrupted" });
+		h.queue.deliver(decision(req));
+		expect((await h.result).nodes.gate.status).toBe("cancelled");
+		expect(nodeEnd(h.dir)?.error).toContain("run_not_running");
+		expect(rows(h.dir).map(r => r.type)).toEqual(["approval.requested", "approval.refused"]);
+		expect(rows(h.dir).at(-1)?.data).toMatchObject({ requestId: req.requestId, reason: "run_not_running" });
+		expect(listPendingApprovals(h.dir)).toEqual([req]);
+	});
+
+	test("E4 store level: a plain RunStore (never a runner store) cannot consume even with a valid binding", async () => {
+		const h = harness(); const req = await requested(h.queue);
+		expect(new RunStore(h.storeRoot).consumeDecision(h.dir, decision(req), binding(req))).toEqual({ ok: false, reason: "runner_not_owner" });
+		expect(rows(h.dir).map(r => r.type)).toEqual(["approval.requested"]);
+	});
+});
+
+describe("F. stale-lock takeover never removes a lock it did not validate", () => {
+	const deadLock = (root: string) => writeFileSync(join(root, RUNNER_LOCK_FILE), JSON.stringify({ pid: 2 ** 22 + 12345, token: "dead", acquiredAt: "x" }));
+	const strays = (root: string) => readdirSync(root).filter(f => f.startsWith(`${RUNNER_LOCK_FILE}.`));
+
+	test("F1 race: B judges a dead lock stale, A takes over before B's rename; B moves A's live lock, sees different bytes, puts it back and refuses; A still owns and consumes", async () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-lock-race-")); dirs.push(root);
+		deadLock(root);
+		let a: RunnerStore | undefined;
+		expect(() => openRunnerStore(root, { _testHooks: { beforeRename: () => { a = runnerStore(root); } } })).toThrow("taken by another runner during stale-lock takeover");
+		expect(a).toBeDefined();
+		expect(lockToken(root)).toBe(readLockToken(a!));
+		expect(strays(root)).toEqual([]);
+		const run = a!.open({ projectSlug: "p", cwd: root, status: "running" });
+		const req: ApprovalRequest = { requestId: "r1", runId: run.runId, nodeId: "gate", attempt: 1, artifactSha256: sha256("x"), message: "m", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), captureResponse: false, actorPolicy: { policyId: "p" } };
+		a!.requestApproval(run.dir, req);
+		expect(a!.consumeDecision(run.dir, decision(req), binding(req)).ok).toBe(true);
+	});
+
+	test("F2 race where the displaced live lock cannot be restored (a third lock appeared): B refuses, and A fails closed via its fence", async () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-lock-race3-")); dirs.push(root);
+		deadLock(root);
+		let a: RunnerStore | undefined;
+		expect(() => openRunnerStore(root, { _testHooks: {
+			beforeRename: () => { a = runnerStore(root); },
+			afterRename: (lockPath) => writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "third", acquiredAt: "x" })),
+		} })).toThrow("displaced lock kept");
+		expect(lockToken(root)).toBe("third");
+		const run = new RunStore(root).open({ projectSlug: "p", cwd: root, status: "running" });
+		expect(a!.consumeDecision(run.dir, {}, { requestId: "x", artifactSha256: "y", actorAuthorized: true })).toEqual({ ok: false, reason: "runner_not_owner" });
+	});
+
+	test("F3 the byte check passes when the renamed file IS the stale lock: takeover succeeds, no stray files", () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-lock-ok-")); dirs.push(root);
+		deadLock(root);
+		const seen: string[] = [];
+		const store = openRunnerStore(root, { _testHooks: { afterRename: (_l, aside) => seen.push(JSON.parse(readFileSync(aside, "utf8")).token) } });
+		stores.push(store);
+		expect(seen).toEqual(["dead"]);
+		expect(lockToken(root)).toBe(readLockToken(store));
+		expect(strays(root)).toEqual([]);
+	});
+
+	test("F4 an empty/unparsable lock is live (refused, untouched) until older than the grace period, then taken over", () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-lock-empty-")); dirs.push(root);
+		const lock = join(root, RUNNER_LOCK_FILE);
+		for (const content of ["", "{\"pid\":", "{}"]) {
+			writeFileSync(lock, content);
+			expect(() => openRunnerStore(root, { _testHooks: { beforeRename: () => { throw new Error("must not reach rename"); } } })).toThrow("unreadable runner.lock");
+			expect(readFileSync(lock, "utf8")).toBe(content);
+		}
+		const old = (Date.now() - RUNNER_LOCK_UNPARSABLE_GRACE_MS - 5_000) / 1000;
+		utimesSync(lock, old, old);
+		const store = runnerStore(root);
+		expect(lockToken(root)).toBe(readLockToken(store));
+	});
+
+	test("F5 the lock file is created complete (never empty) and no temp files are left behind", () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-lock-atomic-")); dirs.push(root);
+		const store = runnerStore(root);
+		const body = JSON.parse(readFileSync(store.lockPath, "utf8"));
+		expect(body).toMatchObject({ pid: process.pid, token: expect.any(String) });
+		expect(strays(root)).toEqual([]);
+	});
+});
+
+/** The token a runner store holds, via its own lock file right after open (tests only). */
+function readLockToken(store: RunnerStore): string {
+	return JSON.parse(readFileSync(store.lockPath, "utf8")).token;
+}
+
+describe("G. defence-in-depth (not run-dir isolation): the runner root must not overlap the workflow cwd", () => {
+	test("G1 hosted approvals refuse a runner store root inside or containing the workflow cwd", () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-runner-cwd-")); dirs.push(root);
+		const doc: WorkflowDoc = { name: "web", nodes: [{ id: "gate", approval: { message: "Ship?" } }] };
+		const loaded = { name: "web", doc, normalized: doc, dir: root, path: join(root, "web.yaml"), sha256: "x", source: "project", commands: {}, scripts: {}, validation: { ok: true, errors: [], warnings: [] } } as unknown as LoadedWorkflow;
+		const host = (store: RunStore, cwd: string): WorkflowRuntimeHost => {
+			const r = store.open({ projectSlug: "p", cwd });
+			return { cwd, runId: r.runId, runDir: r.dir, loaded, store, settings: DEFAULT_STACK_SETTINGS,
+				runChild: async () => { throw new Error("unexpected"); }, resolveRole: () => ({ model: "m", thinking: "low", callsign: "w", appendSystemPrompts: [], tools: "read" }),
+				approver: new QueueApprover(), actorPolicy: allowAll };
+		};
+		const inside = runnerStore(join(root, "work", ".runner"));
+		expect(() => createWorkflowRuntime(host(inside, join(root, "work")))).toThrow("overlaps the workflow cwd");
+		mkdirSync(join(root, "runner2", "work"), { recursive: true });
+		const around = runnerStore(join(root, "runner2"));
+		expect(() => createWorkflowRuntime(host(around, join(root, "runner2", "work")))).toThrow("overlaps the workflow cwd");
+		mkdirSync(join(root, "elsewhere"), { recursive: true });
+		expect(() => createWorkflowRuntime(host(runnerStore(join(root, "runner3")), join(root, "elsewhere")))).not.toThrow();
 	});
 });
