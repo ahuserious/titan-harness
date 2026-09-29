@@ -46,7 +46,7 @@ The workflow engine (`modules/workflow/*`) has no Pi import, so a hosted runner 
 bun test extensions/titan-harness/tests   # or: npm test (runs the same bun command)
 bun scripts/titan-workflow-view.ts        # npm run workflow:view
 bun scripts/titan-workflow-tui.ts         # npm run workflow:tui
-node scripts/verify-ledger.mjs <runDir>   # verify a run's hash chains without the harness
+node scripts/verify-ledger.mjs "$RUN_DIR"  # verify a run's hash chains without the harness (RUN_DIR = an existing run directory)
 just                                      # list the Pi launch recipes (titan-stack, fusion, ...)
 ```
 
