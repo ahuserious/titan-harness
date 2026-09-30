@@ -48,6 +48,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type LedgerOrigin, appendLedger, rowFromAgentRun } from "../ledger.ts";
 import type { Thinking } from "../model-stack.ts";
+import type { ApprovalOptions, ApprovalOutcome } from "./approver.ts";
 import type { RunStatus, RunStore } from "../run-store.ts";
 import { canonicalJson, sha256 } from "../hash-chain.ts";
 import type { StackSettings } from "../stack-config.ts";
@@ -198,7 +199,7 @@ export interface WorkflowRuntimeDeps {
 	agent(req: AgentRequest): Promise<AgentResult>;
 	bash(command: string, opts: ProcessOptions): Promise<ProcessResult>;
 	script(spec: ScriptSpec, opts: ProcessOptions & { argv?: string[] }): Promise<ProcessResult>;
-	approval(message: string, opts?: { captureResponse?: boolean }): Promise<{ approved: boolean; response?: string }>;
+	approval(message: string, opts?: ApprovalOptions): Promise<ApprovalOutcome>;
 	notify(text: string, level?: "info" | "warning" | "error"): void;
 	signal?: AbortSignal;
 	settings: StackSettings;

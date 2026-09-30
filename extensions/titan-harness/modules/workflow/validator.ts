@@ -752,11 +752,13 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 			case "approval": {
 				const approval = node.approval;
 				if (!isMapping(approval)) {
-					issues.error("approval", `approval must be a mapping {message, capture_response?, on_reject?, preset_key?}; found ${show(approval)}`, id);
+					issues.error("approval", `approval must be a mapping {message, capture_response?, on_reject?, preset_key?, content?, reviewers?}; found ${show(approval)}`, id);
 					break;
 				}
 				for (const key of Object.keys(approval)) if (!APPROVAL_KEYS.has(key)) issues.warn("unknown-key", `approval.${key} is unknown and ignored`, id);
 				if (!isText(approval.message)) issues.error("approval", `approval.message is required and must be non-empty`, id);
+				if (approval.content !== undefined && typeof approval.content !== "string") issues.error("approval", `approval.content must be a string`, id);
+				if (approval.reviewers !== undefined && (!Array.isArray(approval.reviewers) || !approval.reviewers.length || !approval.reviewers.every(isText))) issues.error("approval", `approval.reviewers must be a non-empty list of actor ids`, id);
 				if (approval.capture_response !== undefined && typeof approval.capture_response !== "boolean") issues.error("approval", `approval.capture_response must be boolean`, id);
 				if (approval.preset_key !== undefined && !isText(approval.preset_key)) issues.error("approval", `approval.preset_key must be a preset name`, id);
 				if (approval.on_reject !== undefined) {
@@ -769,6 +771,7 @@ export function validateWorkflow(doc: unknown, ctx: ValidateContext): Validation
 					}
 				}
 				collect("approval.message", approval.message);
+				if (typeof approval.content === "string") collect("approval.content", approval.content);
 				break;
 			}
 			case "cancel":

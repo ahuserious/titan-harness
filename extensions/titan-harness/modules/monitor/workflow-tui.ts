@@ -10,7 +10,7 @@ const mark = (s: string): string => isActive(s) ? '[>]' : s === 'failed' ? '[!]'
 
 /** Groups classify this selected workflow, never its children. */
 function workflowFinished(p: WorkflowProjection): boolean {
- return ['completed','failed','aborted','reauthored','stalemate','cancelled','stopped'].includes(p.reportedStatus ?? p.status);
+ return ['completed','failed','aborted','reauthored','stalemate','interrupted','cancelled','stopped'].includes(p.reportedStatus ?? p.status);
 }
 function visiblePhases(p: WorkflowProjection, group = 'all') {
  const finished = workflowFinished(p);
