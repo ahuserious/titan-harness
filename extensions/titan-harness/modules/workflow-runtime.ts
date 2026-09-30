@@ -36,12 +36,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { hooksEnv, SUBMIT_RESULT_INSTRUCTION, SUBMIT_RESULT_TOOL, schemaEnv } from "./child-hooks.ts";
-import { guardCharged, type runChild as RunChild } from "./child-runner.ts";
+import { effectiveChildTools, guardCharged, type runChild as RunChild } from "./child-runner.ts";
 import type { ModelSlot, Thinking } from "./model-stack.ts";
 import type { RunStore } from "./run-store.ts";
 import { type AgentRun, newRun, type Role, runError, runOk } from "./runtime.ts";
 import type { UsageProvenance } from "./workflow/budget.ts";
-import type { StackSettings } from "./stack-config.ts";
+import { readStackSettings, type StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
@@ -62,6 +62,15 @@ export interface AgentRunnerHost {
 	onRun?(run: AgentRun, req: AgentRequest): void;
 	/** Where `submit_result` files land (structured output v2); default <sessionsDir>/../results. */
 	resultsDir?: string;
+}
+
+/**
+ * The tool list a workflow request's child is spawned with: the /stack child policy over
+ * req.tools (an explicit allowed_tools is final), plus `submit_result` for output_format
+ * nodes. `settings` defaults to a fresh readStackSettings() (~/.pi/agent/titan-harness.json).
+ */
+export function agentChildTools(req: Pick<AgentRequest, "tools" | "toolsFinal" | "outputSchema">, settings?: StackSettings): string | "none" {
+	return effectiveChildTools(req.tools, req.outputSchema ? [SUBMIT_RESULT_TOOL] : [], { final: req.toolsFinal, settings: settings ?? readStackSettings() });
 }
 
 /** An AgentResult that may carry the typed object a child's `submit_result` recorded (structured output v2). */
@@ -209,6 +218,8 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks), ...schemaEnvironment },
 				...(extraTools.length ? { extraTools } : {}),
 				...(req.spendCap ? { spendCap: req.spendCap } : {}),
+				...(req.toolsFinal ? { toolsFinal: true } : {}),
+				...(req.effectiveTools !== undefined ? { resolvedTools: req.effectiveTools } : {}),
 			});
 		} catch (error) {
 			threw = true;
@@ -428,6 +439,7 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 		signal: host.signal,
 		settings: host.settings,
 		resolveRole: host.resolveRole,
+		childTools: (req) => agentChildTools(req),
 	};
 	if (host.mcpTool) deps.mcpTool = host.mcpTool;
 	if (host.runWorkflow) deps.runWorkflow = host.runWorkflow;

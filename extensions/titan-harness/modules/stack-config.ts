@@ -354,9 +354,16 @@ export function nextInCycle<T>(cycle: T[], current: T): T {
  * or full) is the base; the /stack switches add pi-subagents' `subagent` tool and
  * pi-exa's search tools, or force --no-tools when subagent tools are OFF. The names only
  * become live when the child loads those extensions, which it now does.
+ *
+ * `final: true` marks a list the author declared explicitly (a workflow node's
+ * `allowed_tools`): it is never widened. Only the tools-off policy (subagentTools=false)
+ * may narrow it. The childSubagents/childExa additions apply to non-final lists only.
+ *
+ * Settings source: `settings` when given (a snapshot the caller already read), else
+ * readStackSettings() — the one file ~/.pi/agent/titan-harness.json, re-read per call.
  */
-export function childToolsFor(requested: string | "none"): string | "none" {
-	const s = readStackSettings();
+export function childToolsFor(requested: string | "none", opts: { final?: boolean; settings?: StackSettings } = {}): string | "none" {
+	const s = opts.settings ?? readStackSettings();
 	if (!s.subagentTools) return "none";
 	if (requested === "none") return "none";
 	const names = new Set(
@@ -365,6 +372,7 @@ export function childToolsFor(requested: string | "none"): string | "none" {
 			.map((t) => t.trim())
 			.filter(Boolean),
 	);
+	if (opts.final) return names.size ? [...names].join(",") : "none";
 	const canWrite = names.has("write") || names.has("edit") || names.has("bash");
 	const delegation = s.subagentFanOut > 0 && (s.childSubagents === "all" || (s.childSubagents === "builders" && canWrite));
 	if (delegation) names.add(SUBAGENT_TOOL);

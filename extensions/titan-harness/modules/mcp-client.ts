@@ -288,13 +288,16 @@ export class McpClient {
 		public readonly cfg: McpServerConfig,
 		opts: McpClientOptions = {},
 	) {
+		// Spread first, default after: callers (createMcpToolBridge) pass explicit `undefined`
+		// for unset fields, and a trailing spread would overwrite the defaults with it
+		// (setTimeout(fn, Math.max(1, undefined)) fires at once).
 		this.opts = {
+			...opts,
 			timeoutMs: opts.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
 			startTimeoutMs: opts.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
 			protocolVersion: opts.protocolVersion ?? DEFAULT_PROTOCOL_VERSION,
 			clientInfo: opts.clientInfo ?? { name: "titan-harness", version: "0.7.0" },
 			inheritEnv: opts.inheritEnv ?? true,
-			...opts,
 		};
 	}
 
