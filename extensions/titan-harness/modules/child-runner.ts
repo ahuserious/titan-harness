@@ -7,6 +7,7 @@
  * timeout, or session shutdown reaches every tool/bash descendant.
  */
 
+import type { SpawnWrap } from "./workflow/child-sandbox.ts";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -162,6 +163,7 @@ export function runChild(opts: {
 	toolsFinal?: boolean; // `tools` is an explicit author list (workflow allowed_tools): never widened by childSubagents/childExa; tools-off still narrows it
 	resolvedTools?: string | "none"; // the already-resolved effective list (effectiveChildTools over tools + extraTools); used verbatim so the recorded list IS the spawned list
 	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
+	wrapSpawn?: SpawnWrap; // hosted runs (workflow/child-sandbox.ts): rewrite the spawn (bwrap sandbox, scrubbed env)
 	spendCap?: () => SpendCap | undefined; // workflow budgets: read at spawn and handed to the child's per-turn guard (titan-budget-guard.ts bounds every model turn BEFORE it is sent); re-read after every usage update as the parent-side backstop kill (run.budgetHalted = true)
 }): Promise<AgentRun> {
 	const run = opts.run;
@@ -446,13 +448,15 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 		};
 
 		const invocation = piInvocation(args);
-		const proc = spawn(invocation.command, invocation.args, {
+		// Children still make their real model API calls — this only skips startup chores.
+		const childEnv: Record<string, string | undefined> = { ...process.env, ...(opts.env ?? {}), ...guardEnv, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" };
+		const spawned = opts.wrapSpawn ? opts.wrapSpawn(invocation.command, invocation.args, childEnv) : { command: invocation.command, args: invocation.args, env: childEnv };
+		const proc = spawn(spawned.command, spawned.args, {
 			cwd: opts.cwd,
 			shell: false,
 			detached: process.platform !== "win32", // own process group so cancellation reaches tool/bash descendants
 			stdio: ["ignore", "pipe", "pipe"],
-			// Children still make their real model API calls — this only skips startup chores.
-			env: { ...process.env, ...(opts.env ?? {}), ...guardEnv, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" },
+			env: spawned.env,
 		});
 
 		// Line-buffer stdout: events arrive one JSON object per line, possibly split across chunks.

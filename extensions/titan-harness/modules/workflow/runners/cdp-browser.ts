@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { findChromium } from "../../cdp-browser.ts";
 import type { EvidenceArtifact, EvidenceChecks, EvidenceKind } from "../evidence.ts";
 import type { Runner, RunnerResult } from "./index.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "../child-sandbox.ts";
 
 // Local copies of index.ts's helpers: a value import would make this module depend on the
 // registry at evaluation time (the registry imports us), and a test that loads this file
@@ -75,7 +76,7 @@ export function flowsFromSpec(spec: Record<string, unknown>, artifactsDir: strin
 	if (raw === undefined && typeof spec.flows_file === "string") {
 		const file = path.isAbsolute(spec.flows_file) ? spec.flows_file : path.join(artifactsDir, spec.flows_file);
 		try {
-			raw = JSON.parse(fs.readFileSync(file, "utf8"));
+			raw = JSON.parse(guardedReadFileSync(file));
 		} catch (error) {
 			return { flows: [], error: `flows_file ${file}: ${error instanceof Error ? error.message : String(error)}` };
 		}
@@ -106,7 +107,7 @@ export const cdpBrowserRunner: Runner = async (spec, ctx) => {
 	const wantVideo = spec.video !== false;
 	const cli = scriptPath("cdp-browser.mjs");
 	const stitch = scriptPath("stitch-video.mjs");
-	fs.mkdirSync(ctx.evidenceDir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(ctx.evidenceDir);
 	const artifacts: EvidenceArtifact[] = [];
 	const missing: string[] = [];
 	const perFlow: Record<string, "pass" | "fail" | "unavailable"> = {};
@@ -116,9 +117,9 @@ export const cdpBrowserRunner: Runner = async (spec, ctx) => {
 	for (const [index, flow] of flows.entries()) {
 		if (ctx.signal.aborted) return failed("cdp-browser: aborted", { artifacts, retryable: false });
 		const dir = path.join(ctx.evidenceDir, flowSlug(flow.name, index));
-		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		guardedMkdirSync(dir);
 		const flowFile = path.join(dir, "flow.json");
-		fs.writeFileSync(flowFile, `${JSON.stringify(flow, null, 2)}\n`, { mode: 0o600 });
+		guardedWriteFileSync(flowFile, `${JSON.stringify(flow, null, 2)}\n`);
 		const result = await ctx.exec("node", [cli, "run", "--flow", flowFile, "--out", dir, "--chromium", chromium, "--timeout", String(Math.min(ctx.timeoutMs, 60_000))], { timeoutMs: ctx.timeoutMs, env: { TITAN_CHROMIUM: chromium } });
 		if (result.code === 3) return unavailable(`cdp-browser: ${tail(result.stderr) || "no Chromium"}`, { artifacts, retryable: false });
 		if (result.code === 2) return failed(`cdp-browser: ${tail(result.stderr) || "bad flow"}`, { artifacts, retryable: false });

@@ -30,6 +30,7 @@ import { isRunnerName, type RunnerContext, type RunnerResult, RUNNERS, runnerFet
 import type { JsonSchema, SlotRole, VerifySpec } from "../schema.ts";
 import { evidenceRequirement, tierFor } from "../tiers.ts";
 import { callAgent } from "./ai.ts";
+import { guardedMkdirSync } from "../child-sandbox.ts";
 
 /**
  * Verify runners that spend real money outside the agent seam (Cursor background agents, Kane,
@@ -79,7 +80,7 @@ export function whichBinary(binary: string, env: Record<string, string>): string
 export function evidenceDirFor(artifactsDir: string, nodeId: string): string {
 	const safe = nodeId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "").replace(/-+$/, "") || "node";
 	const dir = path.join(artifactsDir, "evidence", safe);
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(dir);
 	return dir;
 }
 

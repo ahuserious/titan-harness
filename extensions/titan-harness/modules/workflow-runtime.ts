@@ -46,6 +46,8 @@ import type { UsageProvenance } from "./workflow/budget.ts";
 import { readStackSettings, type StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import { type ActorPolicy, createHostedApproval, type Approver } from "./workflow/approver.ts";
+import { type ChildSandbox, type ChildSandboxOptions, createChildSandbox, guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync, registerScratchRoot, type SpawnWrap } from "./workflow/child-sandbox.ts";
+import { assertRunnerRootOutside, assertRunnerStore } from "./run-store.ts";
 import { createSidecarMcpTool, type SidecarMcpOptions } from "./workflow/runner-seams.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
@@ -66,6 +68,8 @@ export interface AgentRunnerHost {
 	onRun?(run: AgentRun, req: AgentRequest): void;
 	/** Where `submit_result` files land (structured output v2); default <sessionsDir>/../results. */
 	resultsDir?: string;
+	/** Hosted runs: every agent child is spawned through this (workflow/child-sandbox.ts). */
+	wrapSpawn?: SpawnWrap;
 }
 
 /**
@@ -177,7 +181,7 @@ export function resultOf(run: AgentRun): AgentResult {
 }
 
 export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) => Promise<StructuredAgentResult> {
-	fs.mkdirSync(host.sessionsDir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(host.sessionsDir);
 	const resultsDir = host.resultsDir ?? path.join(host.sessionsDir, "..", "results");
 	const resultCounters = new Map<string, number>();
 	return async (req) => {
@@ -222,6 +226,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks), ...schemaEnvironment },
 				...(extraTools.length ? { extraTools } : {}),
 				...(req.spendCap ? { spendCap: req.spendCap } : {}),
+				...(host.wrapSpawn ? { wrapSpawn: host.wrapSpawn } : {}),
 				...(req.toolsFinal ? { toolsFinal: true } : {}),
 				...(req.effectiveTools !== undefined ? { resolvedTools: req.effectiveTools } : {}),
 			});
@@ -234,7 +239,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 		let value: unknown;
 		if (resultPath && run.status !== "aborted") {
 			try {
-				value = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+				value = JSON.parse(guardedReadFileSync(resultPath));
 				run.text = JSON.stringify(value);
 				// A child that ended right after submit_result has no closing prose: the file is its answer.
 				if (run.status === "failed" && run.exitCode === 0 && run.stopReason !== "error" && run.stopReason !== "aborted") run.status = "done";
@@ -269,7 +274,7 @@ const killTree = (proc: ReturnType<typeof spawn>): void => {
 };
 
 /** Run `command args` with separate streams, a timeout (exit 124) and an abort signal (exit 130). Never throws. */
-export function runProcess(command: string, args: string[], opts: ProcessOptions): Promise<ProcessResult> {
+export function runProcess(command: string, args: string[], opts: ProcessOptions, wrap?: SpawnWrap): Promise<ProcessResult> {
 	return new Promise((resolve) => {
 		if (opts.signal?.aborted) return resolve({ code: 130, stdout: "", stderr: "aborted before start" });
 		let stdout = "";
@@ -278,12 +283,14 @@ export function runProcess(command: string, args: string[], opts: ProcessOptions
 		let aborted = false;
 		let proc: ReturnType<typeof spawn>;
 		try {
-			proc = spawn(command, args, {
+			const env: Record<string, string | undefined> = { ...process.env, ...(opts.env ?? {}) };
+			const spawned = wrap ? wrap(command, args, env) : { command, args, env };
+			proc = spawn(spawned.command, spawned.args, {
 				cwd: opts.cwd,
 				shell: false,
 				detached: process.platform !== "win32",
 				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env, ...(opts.env ?? {}) },
+				env: spawned.env,
 			});
 		} catch (error) {
 			return resolve({ code: 127, stdout: "", stderr: `failed to spawn ${command}: ${String(error)}` });
@@ -339,10 +346,12 @@ export function findBinary(name: string, extraDirs: string[] = []): string | und
 const HOME_BINS = () => [path.join(os.homedir(), ".bun", "bin"), path.join(os.homedir(), ".local", "bin"), path.join(os.homedir(), ".cargo", "bin")];
 
 export interface ScriptRunnerOptions {
-	/** Where inline scripts are written (<runDir>/tmp). */
+	/** Where inline scripts are written (<runDir>/tmp; a hosted run's node scratch dir). */
 	tmpDir: string;
 	bun?: string;
 	uv?: string;
+	/** Hosted runs: the child sandbox wrap. */
+	wrap?: SpawnWrap;
 }
 
 /** `script:` nodes: inline text becomes a file under tmpDir; bun runs .ts/.js, uv runs .py (with --with deps). */
@@ -355,14 +364,14 @@ export function createScriptRunner(options: ScriptRunnerOptions): WorkflowRuntim
 		let file = spec.path;
 		if (!file) {
 			if (spec.inline === undefined) return { code: 2, stdout: "", stderr: "script node has neither inline text nor a path" };
-			fs.mkdirSync(options.tmpDir, { recursive: true, mode: 0o700 });
+			guardedMkdirSync(options.tmpDir);
 			counter += 1;
 			file = path.join(options.tmpDir, `script-${counter}${runtime === "bun" ? ".ts" : ".py"}`);
-			fs.writeFileSync(file, spec.inline, { mode: 0o600 });
+			guardedWriteFileSync(file, spec.inline);
 		}
 		const argv = opts.argv ?? [];
 		const args = runtime === "bun" ? ["run", file, ...argv] : ["run", ...(spec.deps ?? []).flatMap((dep) => ["--with", dep]), file, ...argv];
-		return runProcess(binary, args, opts);
+		return runProcess(binary, args, opts, options.wrap);
 	};
 }
 
@@ -402,6 +411,14 @@ export interface WorkflowRuntimeHost {
 	familyMax?(model: string): string | undefined;
 	signal?: AbortSignal;
 	scripts?: { bun?: string; uv?: string };
+	/**
+	 * Hosted runs only (an `approver` is set). The node scratch dir: children's ARTIFACTS_DIR,
+	 * agent sessions, submit_result files and inline scripts live here, never under the
+	 * runner store root. Default: a fresh mkdtemp under os.tmpdir(). Must not overlap the root.
+	 */
+	nodeScratchDir?: string;
+	/** Hosted runs only: extra writable/hidden paths and the bwrap binary for the child sandbox. */
+	sandbox?: ChildSandboxOptions;
 }
 
 const REJECT_WORDS = /^(n|no|reject|rejected|cancel|stop)\b/i;
@@ -432,10 +449,22 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 	if (host.mcpTool && host.sidecarMcp) throw new Error("workflow runtime: pass mcpTool or sidecarMcp, not both");
 	if (host.approver && host.mcpTool) throw new Error("workflow runtime: a hosted run reaches MCP only through the unit's sidecar socket (sidecarMcp); a direct mcpTool is refused");
 	const sidecarMcpTool = host.sidecarMcp ? createSidecarMcpTool(host.sidecarMcp) : undefined;
-	const artifactsDir = path.join(host.runDir, "artifacts");
-	fs.mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
-	const agent = createAgentRunner({ runChild: host.runChild, sessionsDir: path.join(host.runDir, "sessions"), cwd: host.cwd, slotFor: host.slotFor, onRun: host.onRun });
-	const script = createScriptRunner({ tmpDir: path.join(host.runDir, "tmp"), bun: host.scripts?.bun, uv: host.scripts?.uv });
+	// Hosted: the approval store stays runner-owned. Children get a scratch dir outside the
+	// runner root and run in a sandbox that masks the root (child-sandbox.ts); fail closed
+	// when the sandbox cannot be built. TUI/headless runs keep the run dir layout.
+	let childBase = host.runDir;
+	let sandbox: ChildSandbox | undefined;
+	if (host.approver) {
+		assertRunnerStore(host.store, host.runDir);
+		assertRunnerRootOutside(host.store, host.cwd);
+		const scratch = host.nodeScratchDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "titan-node-scratch-"));
+		sandbox = createChildSandbox({ runnerRoot: host.store.root, cwd: host.cwd, scratchDir: scratch, ...host.sandbox });
+		childBase = registerScratchRoot(scratch);
+	}
+	const artifactsDir = path.join(childBase, "artifacts");
+	guardedMkdirSync(artifactsDir);
+	const agent = createAgentRunner({ runChild: host.runChild, sessionsDir: path.join(childBase, "sessions"), cwd: host.cwd, slotFor: host.slotFor, onRun: host.onRun, ...(sandbox ? { wrapSpawn: sandbox.wrap } : {}) });
+	const script = createScriptRunner({ tmpDir: path.join(childBase, "tmp"), bun: host.scripts?.bun, uv: host.scripts?.uv, ...(sandbox ? { wrap: sandbox.wrap } : {}) });
 	const deps: WorkflowRuntimeDeps = {
 		cwd: host.cwd,
 		runId: host.runId,
@@ -444,7 +473,7 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 		workflowId: host.loaded.name,
 		store: host.store,
 		agent,
-		bash: (command, opts) => runProcess("bash", ["-c", command], opts),
+		bash: (command, opts) => runProcess("bash", ["-c", command], opts, sandbox?.wrap),
 		script,
 		approval: host.approver ? createHostedApproval({ ...host, approver: host.approver }) : createApproval(host.ui),
 		notify: (text, level) => {

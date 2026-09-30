@@ -49,7 +49,7 @@ function harness(spec: ApprovalSpec = { message: "Ship?", content: "draft", capt
 	let finished = false;
 	const result = executeWorkflow(loaded, deps, { inputs }).finally(() => { finished = true; });
 	active.push(async () => { controller.abort(); await result; });
-	return { root, storeRoot, store, runId, dir, queue, result, spec, doc, finished: () => finished };
+	return { root, storeRoot, store, runId, dir, queue, result, spec, doc, deps, finished: () => finished };
 }
 async function requested(queue: QueueApprover, n = 1): Promise<ApprovalRequest> {
 	for (let i = 0; i < 200 && queue.requests.length < n; i++) await Bun.sleep(1);
@@ -488,7 +488,7 @@ describe("D. preset tally from the runner store, never from receipt files or typ
 		expect(req.presetKey).toBe("p");
 		h.queue.deliver(decision(req, { actor: "only-one-human@x", response: "reviewer: editor" }));
 		const result = await h.result;
-		expect(readdirSync(join(h.dir, "artifacts/receipts/p")).length).toBe(3); // the planted files are there
+		expect(readdirSync(join(h.deps.artifactsDir, "receipts/p")).length).toBe(3); // the planted files are there (node scratch, not the runner store)
 		expect(result.nodes.gate.output).toMatchObject({ approved: true, receipts: 1, reviewers: ["only-one-human@x"], contentSha256: sha });
 		expect(result.nodes.ship.status).not.toBe("success");
 	});

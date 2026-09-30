@@ -44,6 +44,7 @@ import { validateJson } from "../json-schema.ts";
 import type { JsonSchema, MimeographSpec, NodeDoc, SlotRole } from "../schema.ts";
 import { MAX_SCHEMA_RETRIES, formatSchemaErrors, parseStructured, schemaPromptSuffix } from "../structured-output.ts";
 import { JUDGE_SCHEMA, type JudgeVerdict, judgePrompt, judgeSeat } from "./best-of.ts";
+import { guardedMkdirSync, guardedWriteFileSync } from "../child-sandbox.ts";
 
 export const DEFAULT_ROLE: SlotRole = "worker";
 export const READONLY_TOOL_SET: ReadonlySet<string> = new Set(READONLY_TOOLS.split(","));
@@ -226,12 +227,12 @@ export function mimeographSpec(node: NodeDoc): MimeographSpec | undefined {
 
 function archiveMimeograph(ctx: NodeContext, candidates: MimeographCandidate[]): string {
 	const dir = path.join(ctx.deps.artifactsDir, "nodes", ctx.node.id, "mimeograph");
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(dir);
 	for (const candidate of candidates) {
 		const body = candidate.ok ? candidate.text : `[failed] ${candidate.error ?? ""}\n`;
-		fs.writeFileSync(path.join(dir, `${candidate.index}.md`), body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+		guardedWriteFileSync(path.join(dir, `${candidate.index}.md`), body.endsWith("\n") ? body : `${body}\n`);
 		const meta = { index: candidate.index, callsign: candidate.callsign, persona: candidate.persona, model: candidate.model, thinking: candidate.thinking, ok: candidate.ok, sha256: candidate.sha256, sessionRef: candidate.sessionRef };
-		fs.writeFileSync(path.join(dir, `${candidate.index}.meta.json`), `${JSON.stringify(meta, null, 2)}\n`, { mode: 0o600 });
+		guardedWriteFileSync(path.join(dir, `${candidate.index}.meta.json`), `${JSON.stringify(meta, null, 2)}\n`);
 	}
 	return dir;
 }
