@@ -36,10 +36,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { hooksEnv, SUBMIT_RESULT_INSTRUCTION, SUBMIT_RESULT_TOOL, schemaEnv } from "./child-hooks.ts";
-import { effectiveChildTools, type runChild as RunChild } from "./child-runner.ts";
+import { effectiveChildTools, guardCharged, type runChild as RunChild } from "./child-runner.ts";
 import type { ModelSlot, Thinking } from "./model-stack.ts";
 import type { RunStore } from "./run-store.ts";
 import { type AgentRun, newRun, type Role, runError, runOk } from "./runtime.ts";
+import type { UsageProvenance } from "./workflow/budget.ts";
 import { readStackSettings, type StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
@@ -121,6 +122,41 @@ const PRIORITY_ROLES: SlotRole[] = ["auditor", "verifier", "watchdog"];
 
 const asThinking = (value: string | undefined): Thinking => (THINKING_ORDER.includes(value as Thinking) ? (value as Thinking) : "medium");
 
+/**
+ * How far a settled run's usage can be trusted for workflow budgets (budget.ts UsageProvenance):
+ *   not-dispatched  no child process was started (aborted while queued, a held-spend refusal)
+ *   none            no usage event arrived (thrown, aborted, crashed, timed out or exited before any)
+ *   partial         it reported usage but did not finish cleanly (thrown after usage, aborted, timed out,
+ *                   pre-empted, budget-halted, killed/crashed): the turn in progress may be unbilled, so
+ *                   settlement charges max(reported, reservation) — reported usage is never dropped
+ *   complete        it exited on its own with usage reported
+ */
+export function usageProvenanceOf(run: AgentRun, threw = false): UsageProvenance {
+	if (run.notDispatched) return "not-dispatched";
+	// The child's per-turn guard refused its FIRST model turn: no request was ever sent, so nothing was spent.
+	if (run.budgetRefusal && run.budgetGuard?.turns === 0 && !run.usageSeen) return "not-dispatched";
+	if (!run.usageSeen) return "none";
+	// A budgeted child whose guard state could not be read at settle: its conservative charges are unknown.
+	if (run.budgetStatePath && !run.budgetGuard?.spent) return "partial";
+	const interrupted = threw || run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || !!run.budgetRefusal || run.exitCode !== 0;
+	return interrupted ? "partial" : "complete";
+}
+
+/**
+ * The usage a budgeted run settles at: what the parent observed, raised to what the child's per-turn guard charged in
+ * each dimension it bounded. The guard charges a turn's planned worst case for every dimension that turn did not
+ * report (and for a turn whose end it never saw), so a child that reported some turns and not others is never
+ * settled at the reported subset alone — that would release budget the child actually spent.
+ */
+export function settledUsage(run: AgentRun): AgentResult["usage"] {
+	const usage = { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds };
+	const charged = guardCharged(run.budgetGuard as any);
+	if (!charged) return usage;
+	if (charged.usdMicros !== undefined && charged.usdMicros > Math.ceil(Math.round(usage.costUsd * 1e9) / 1e3)) usage.costUsd = charged.usdMicros / 1e6;
+	if (charged.tokens !== undefined && charged.tokens > usage.tokensIn + usage.tokensOut) usage.tokensIn += charged.tokens - (usage.tokensIn + usage.tokensOut);
+	return usage;
+}
+
 /** The AgentResult a settled AgentRun means. */
 export function resultOf(run: AgentRun): AgentResult {
 	const ok = run.status === "done" && runOk(run);
@@ -128,10 +164,11 @@ export function resultOf(run: AgentRun): AgentResult {
 		ok,
 		text: run.text,
 		sessionRef: run.sessionRef,
-		usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds },
-		error: ok ? undefined : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
+		usage: settledUsage(run),
+		error: ok ? undefined : run.budgetRefusal ? `budget refused a model turn: ${run.budgetRefusal.reason}` : run.budgetHalted ? "stopped: budget in-flight cap exceeded" : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
 		toolCalls: run.toolCalls,
 		model: run.model,
+		...(run.budgetRefusal ? { budgetRefusal: run.budgetRefusal } : {}),
 	};
 }
 
@@ -141,7 +178,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 	const resultCounters = new Map<string, number>();
 	return async (req) => {
 		if (!req.model) {
-			return { ok: false, text: "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 }, error: `${req.nodeId}: no model resolved for role ${req.role}`, toolCalls: 0 };
+			return { ok: false, text: "", usage: { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 }, usageProvenance: "not-dispatched", error: `${req.nodeId}: no model resolved for role ${req.role}`, toolCalls: 0 };
 		}
 		const slot = host.slotFor?.(req);
 		const run = newRun(transcriptRole(req.role), req.model, slot);
@@ -163,6 +200,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 			extraTools.push(SUBMIT_RESULT_TOOL);
 			if (!prompt.trimEnd().endsWith(SUBMIT_RESULT_INSTRUCTION)) prompt = `${prompt}\n\n${SUBMIT_RESULT_INSTRUCTION}`;
 		}
+		let threw = false;
 		try {
 			await host.runChild({
 				run,
@@ -179,10 +217,12 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 				priority: PRIORITY_ROLES.includes(req.role),
 				env: { ...(req.env ?? {}), ...hooksEnv(req.hooks), ...schemaEnvironment },
 				...(extraTools.length ? { extraTools } : {}),
+				...(req.spendCap ? { spendCap: req.spendCap } : {}),
 				...(req.toolsFinal ? { toolsFinal: true } : {}),
 				...(req.effectiveTools !== undefined ? { resolvedTools: req.effectiveTools } : {}),
 			});
 		} catch (error) {
+			threw = true;
 			run.status = "failed";
 			run.errorMessage = error instanceof Error ? error.message : String(error);
 		}
@@ -204,6 +244,7 @@ export function createAgentRunner(host: AgentRunnerHost): (req: AgentRequest) =>
 			/* bookkeeping never fails a node */
 		}
 		const result: StructuredAgentResult = resultOf(run);
+		result.usageProvenance = usageProvenanceOf(run, threw);
 		if (resultPath) result.resultPath = resultPath;
 		if (value !== undefined) result.value = value;
 		return result;
@@ -342,7 +383,7 @@ export interface WorkflowRuntimeHost {
 	ui?: RuntimeUi;
 	slotFor?(req: AgentRequest): ModelSlot | undefined;
 	onRun?(run: AgentRun, req: AgentRequest): void;
-	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
+	runWorkflow?: WorkflowRuntimeDeps["runWorkflow"];
 	mcpTool?: WorkflowRuntimeDeps["mcpTool"];
 	/** The max-reasoning model of a model's family (the mechanical ladder's step 2); undefined → stay on the model. */
 	familyMax?(model: string): string | undefined;

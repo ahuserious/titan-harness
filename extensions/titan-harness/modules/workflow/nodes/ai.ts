@@ -39,6 +39,7 @@ import { sha256 } from "../../hash-chain.ts";
 import { type Persona, loadPersona, mimeographPersonaNames, mimeographPlan, personaAppend, personaRoots } from "../../personas.ts";
 import { FULL_TOOLS, READONLY_TOOLS } from "../../runtime.ts";
 import { type AgentRequest, type AgentResult, type NodeContext, type NodeHandler, type NodeOutcome, runLimited } from "../executor.ts";
+import { isBudgetExceeded } from "../budget.ts";
 import { validateJson } from "../json-schema.ts";
 import type { JsonSchema, MimeographSpec, NodeDoc, SlotRole } from "../schema.ts";
 import { MAX_SCHEMA_RETRIES, formatSchemaErrors, parseStructured, schemaPromptSuffix } from "../structured-output.ts";
@@ -333,7 +334,7 @@ export async function runAiPrompt(ctx: NodeContext, source: string): Promise<Nod
 		call = await callAgent(ctx, prompt, { outputSchema: schema });
 	} catch (error) {
 		// A missing or malformed persona is a document problem, not a transient one.
-		if (error instanceof Error && /persona/.test(error.message)) return { status: "failed", output: undefined, error: error.message, retryable: false };
+		if (error instanceof Error && !isBudgetExceeded(error) && /persona/.test(error.message)) return { status: "failed", output: undefined, error: error.message, retryable: false };
 		throw error;
 	}
 	if (!call.ok) {
