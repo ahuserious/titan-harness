@@ -84,6 +84,10 @@ export interface AgentRequest {
 	systemPrompt?: string;
 	appendSystemPrompts?: string[];
 	tools: string | "none";
+	/** `tools` came from the node's explicit `allowed_tools`: final, never widened by the /stack child policy (tools-off still narrows it). */
+	toolsFinal?: boolean;
+	/** The effective list the child is spawned with (deps.childTools); set by the executor, recorded in agent.start. */
+	effectiveTools?: string | "none";
 	context: "fresh" | "shared" | { resume: string };
 	hooks?: HooksDoc;
 	outputSchema?: JsonSchema;
@@ -149,6 +153,8 @@ export interface WorkflowRuntimeDeps {
 	settings: StackSettings;
 	resolveRole(role: SlotRole, node: NodeDoc): ResolvedRole;
 	mcpTool?(server: string, tool: string, args: Record<string, unknown>): Promise<unknown>;
+	/** The effective tool list a request's child will be spawned with (the /stack child policy over req.tools); recorded in agent.start. */
+	childTools?(req: AgentRequest): string | "none";
 	runWorkflow?(name: string, inputs: Record<string, unknown>): Promise<RunResult>;
 	/** The max-reasoning model of `model`'s family for the mechanical ladder's third step (plan §5.3 b); undefined = same model. */
 	familyMax?(model: string): string | undefined;
@@ -536,10 +542,13 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		const callsign = req.callsign ?? agentId;
 		lastCallsign.set(node.id, callsign);
 		store.upsertAgent(runDir, { agentId, callsign, role: req.role, model: req.model ?? "", thinking: { requested, effective }, state: "dispatched-working" });
-		log("agent.start", { nodeId: node.id, agentId, role: req.role, model: req.model, thinking: effective, tools: req.tools, context: req.context, label: req.label }, agentId);
+		// Resolve the child's tool list once, here: the recorded `tools` is exactly what the child is spawned with.
+		const effectiveTools = deps.childTools ? deps.childTools(req) : undefined;
+		const sent: AgentRequest = effectiveTools === undefined ? req : { ...req, effectiveTools };
+		log("agent.start", { nodeId: node.id, agentId, role: req.role, model: req.model, thinking: effective, tools: effectiveTools ?? req.tools, requestedTools: req.tools, context: req.context, label: req.label }, agentId);
 		let result: AgentResult;
 		try {
-			result = await raceAbort(deps.agent({ ...req, signal }), signal);
+			result = await raceAbort(deps.agent({ ...sent, signal }), signal);
 		} catch (error) {
 			const aborted = isAbortError(error) || signal.aborted;
 			store.upsertAgent(runDir, { agentId, state: aborted ? "cancelled" : "failed" });
