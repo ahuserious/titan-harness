@@ -61,7 +61,7 @@ in these cases:
 The runner checks this again before every request. The TUI/headless path
 (no `approver`) is unchanged and needs no runner store.
 
-As defence in depth (not run-dir isolation, see Known limitation below),
+As defence in depth (not run-dir isolation; see "Known limitation / P3 prerequisite" below),
 hosted approvals also refuse a runner root that lies inside, or contains, the
 workflow `cwd`.
 
@@ -82,7 +82,8 @@ after every wait, immediately before consuming. Both re-read the lock file and
   request stays pending.
 
 In both cases the node ends cancelled (fail closed) and the request stays
-pending in the new owner's view. The runner-store `updateRun` also refuses to
+pending (for `runner_not_owner`, in the new owner's view; for
+`run_not_running`, in the same root, where no new owner may exist). The runner-store `updateRun` also refuses to
 run after the lock is lost, so the old runner cannot overwrite the new owner's
 `interrupted` status with its final status. `expireApproval` is fenced the same
 way.
@@ -248,15 +249,23 @@ gone" means **found running at startup** by the lock holder. Recovery:
 call `recoverInterruptedRuns` directly against a store another runner might own.
 Resume is out of scope.
 
-## Known limitation (escalated)
+## Known limitation / P3 prerequisite
 
-**The seam does not yet enforce that agents cannot write the run directory.**
-In local titan, bash and agent nodes can write the run dir. The executor
-exports `TITAN_RUN_DIR` and `ARTIFACTS_DIR` (= `<runDir>/artifacts`) to every
-node (`modules/workflow/executor.ts:575-578`). A node can therefore write
-`$ARTIFACTS_DIR/../approvals.jsonl`. Because the chain is unkeyed, it can also
-append recomputed `requested`/`decided`/`consumed` rows for invented actors,
-and the hosted preset tally would count them. From `TITAN_RUN_DIR` a node can also:
+**Status: accepted limitation, fix required in P3 before any hosted use.**
+Ruling (Dan, 2026-09-29 22:50, RULINGS-0929): "N3-03: titan #3 may merge with
+the forgeable approval store documented as a P3 prerequisite (fix lands in P3
+before any hosted use)."
+
+**The seam does not yet enforce that agents cannot write the runner root.**
+In local titan, bash and agent nodes run as the same user as the runner and can
+write the run dir. The executor exports `TITAN_RUN_DIR` and `ARTIFACTS_DIR`
+(= `<runDir>/artifacts`) to every node (`modules/workflow/executor.ts`,
+`makeContext` env). The run dir is `<root>/<projectSlug>/<runId>`
+(`RunStore.dir`), so the whole runner root is two levels above it. A node
+can therefore write `$ARTIFACTS_DIR/../approvals.jsonl`. Because the chain is
+unkeyed, it can append recomputed `requested`/`decided`/`consumed` rows for
+invented actors, and the hosted preset tally would count them. From
+`TITAN_RUN_DIR` a node can also:
 
 - rewrite `approvals.jsonl` wholesale, including a pending request's bound
   `artifactSha256` and `actorPolicy.allowedActors`, which `consumeDecision`
@@ -264,19 +273,31 @@ and the hosted preset tally would count them. From `TITAN_RUN_DIR` a node can al
 - append valid `expired`/`decided` rows (refusing or ending a live request) or
   corrupt the chain (the index then throws: denial of service);
 - write `run.json` `status`, an input to the ownership fence;
-- reach `<root>/runner.lock` two levels up and delete it or replace it with a
-  dead-pid body, defeating the fence and enabling a takeover.
+- do all of the above to **sibling runs** under the same runner root
+  (`<root>/*/*/approvals.jsonl`, `run.json`), not only its own run, so a partial
+  fix such as dropping `TITAN_RUN_DIR` while still exporting `ARTIFACTS_DIR` is
+  not sufficient;
+- reach `<root>/runner.lock` (`$TITAN_RUN_DIR/../../runner.lock`) and delete
+  it, replace it with a dead-pid body, write an unparsable body with a
+  back-dated mtime (past the 30 s grace), or plant `runner.lock.tmp.*` /
+  `runner.lock.stale.*` names, defeating the fence and enabling a takeover;
+- replace `approvals.jsonl`, `run.json`, `artifacts/` or root entries with
+  symlinks, redirecting the runner's own writes (confused deputy). With one uid
+  this adds nothing today; it matters once P3 separates privileges.
 
 The ownership fence and the lock protocol therefore depend on files in the same
-writable class and are only as strong as the run-dir boundary.
+writable class and are only as strong as the runner-root boundary.
 
-Hosted use **requires** the runner store root to be outside every path an agent
-or bash node can write: a separate filesystem/sandbox boundary, with the P3
-node-exec wiring not exporting or mounting the runner's run dir. The overlap
-check against the workflow `cwd` (above) is defence in depth only. It does not
-stop a node that learns the run dir from the environment. This item is
-escalated. Until it is fixed, hosted approvals must not be treated as
-tamper-proof against the workflow's own nodes.
+**P3 prerequisite (approval-store isolation).** Before hosted approvals are
+used, the runner store root must be outside every path an agent or bash node
+can write: a separate filesystem/sandbox boundary (distinct uid or mount), with
+the P3 node-exec wiring neither exporting nor mounting the runner's run dir or
+root. `TITAN_RUN_DIR` and `ARTIFACTS_DIR` exported to children must then point
+at a node-writable scratch area, not into the runner root. The overlap check
+against the workflow `cwd` (above) is defence in depth only; it does not stop a
+node that learns the run dir from the environment. Until the P3 fix lands,
+hosted approvals must not be treated as tamper-proof against the workflow's own
+nodes. Tracked in the Triarc pack as lane N3 `P3-PREREQS.md`.
 
 ## Other callers
 
