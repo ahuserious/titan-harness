@@ -202,8 +202,12 @@ export const PROD_V1_NODE_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(["pro
 export const PROD_V1_VERIFY_RUNNERS: ReadonlySet<string> = new Set(["bash", "verifier"]);
 export const PROD_V1_MAX_PARALLEL = 2;
 export const MAX_WORKFLOW_DEPTH = 4;
-/** Read verbs: a tool is read-only only if a word of its name is one of these (and nothing below vetoes it). */
-export const READ_ONLY_VERBS: ReadonlySet<string> = new Set(["get", "list", "search", "read", "query", "count", "describe", "fetch", "find", "lookup", "view", "show", "inspect", "retrieve", "browse", "stat", "exists"]);
+/**
+ * Read verbs: a tool is read-only only if the FIRST word of its name is one of these (and nothing
+ * below vetoes it). A read word later in the name counts for nothing (`clear_list`,
+ * `increment_count`). `count` is deliberately absent: `count_*` stays gated.
+ */
+export const READ_ONLY_VERBS: ReadonlySet<string> = new Set(["get", "list", "search", "read", "query", "describe", "fetch"]);
 /** Effect verbs: any of them as a word of the name vetoes the allowlist (`get_or_create_contact`, `search_and_update`). */
 const EFFECT_VERBS: ReadonlySet<string> = new Set([
 	"create", "update", "delete", "upsert", "insert", "write", "send", "post", "put", "patch", "merge", "remove", "add", "set", "convert", "promote", "publish", "trash", "untrash", "mark", "unmark",
@@ -220,28 +224,34 @@ const EFFECT_ROOTS: readonly string[] = [
 /** Words that join two actions in one name: the second action is unknown, so the allowlist does not apply. */
 const JOIN_WORDS: ReadonlySet<string> = new Set(["and", "or", "then", "also"]);
 
-/** The lower-case words of a tool name (camelCase and acronyms split; any non-alphanumeric separates). */
+/** A tool name the allowlist will classify: ASCII letters/digits separated only by `_`, `-` or `.`, starting with a letter. */
+const CLASSIFIABLE_TOOL = /^[A-Za-z][A-Za-z0-9_.-]*$/;
+
+/** The lower-case words of a tool name: split on `_`, `-`, `.` and camelCase (acronyms included). */
 function toolWords(tool: string): string[] {
 	return tool
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
 		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
 		.toLowerCase()
-		.split(/[^a-z0-9]+/)
+		.split(/[_.-]+/)
 		.filter(Boolean);
 }
 
 /**
- * The prod-v1 read-only allowlist. True only for a name that reads as a pure read: some word is
- * a read verb (search_records, get_record, list_lists, web_search_exa), no word is an effect verb
- * or a join word, and no word contains an effect root. Everything else — refund_payment,
- * transfer_funds, bulkupdate, a name with no verb at all — is NOT read-only: under prod-v1 it
- * needs a succeeded approval and runs single-attempt. A false negative only costs an approval.
+ * The prod-v1 read-only allowlist. True only for a name whose LEADING verb is a read verb
+ * (get_record, listItems, search_docs) and in which no later word is an effect verb or a join word
+ * and no later word contains an effect root (list_delete, getAndDelete, get_or_create_contact).
+ * Position counts: a read word anywhere but first does not make a name read-only, so clear_list,
+ * increment_count, reset_read_marker and web_search_exa are all NOT read-only. A name with any
+ * character outside [A-Za-z0-9_.-] is not classified and is NOT read-only either. Everything that
+ * is not read-only needs a succeeded approval under prod-v1 and runs single-attempt; a false
+ * negative only costs an approval.
  */
 export function isReadOnlyTool(tool: unknown): boolean {
-	if (typeof tool !== "string") return false;
+	if (typeof tool !== "string" || !CLASSIFIABLE_TOOL.test(tool)) return false;
 	const words = toolWords(tool);
-	if (!words.some((word) => READ_ONLY_VERBS.has(word))) return false;
-	return !words.some((word) => JOIN_WORDS.has(word) || EFFECT_VERBS.has(word) || (!READ_ONLY_VERBS.has(word) && EFFECT_ROOTS.some((root) => word.includes(root))));
+	if (!words.length || !READ_ONLY_VERBS.has(words[0])) return false;
+	return !words.slice(1).some((word) => JOIN_WORDS.has(word) || EFFECT_VERBS.has(word) || (!READ_ONLY_VERBS.has(word) && EFFECT_ROOTS.some((root) => word.includes(root))));
 }
 
 export interface ProfileIssue {

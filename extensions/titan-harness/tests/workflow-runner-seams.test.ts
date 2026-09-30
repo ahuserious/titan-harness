@@ -376,7 +376,7 @@ describe("prod-v1 validator profile", () => {
 
 	test("a write-named mcp_tool must depend (transitively) on an approval", () => {
 		expect(["update_record", "createRecords", "upsert", "send_email", "delete-thing", "zoho_add_tags"].some(isReadOnlyTool)).toBe(false);
-		expect(["search_records", "get_record", "list_lists", "web_search_exa"].every(isReadOnlyTool)).toBe(true);
+		expect(["search_records", "get_record", "list_lists"].every(isReadOnlyTool)).toBe(true);
 		const unguarded = wf("u", [{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" } }] as unknown as NodeDoc[]);
 		expect(validateProdV1(unguarded)).toEqual([{ nodeId: "w", message: expect.stringContaining("must depend on an approval") }]);
 		const guarded = wf("g", [
@@ -392,8 +392,7 @@ describe("prod-v1 validator profile", () => {
 			"pay_invoice", "approve_request", "close_deal", "upload_file", "rename_file", "drop_table", "share_doc", "invite_user", "records", "zoho", "do_thing", "get_or_create_contact",
 			"searchAndUpdate", "list_then_delete", "getandsend", "fetch_and_archive", "lookup_refund", "query.transfer"];
 		expect(needApproval.filter(isReadOnlyTool)).toEqual([]);
-		const readOnly = ["search_records", "get_record", "list_lists", "web_search_exa", "read_file", "query_leads", "count_records", "describe_module", "getRecords", "searchRecords", "fetch_page",
-			"find_contacts", "listUsers", "get_deal_stage", "lookup_company"];
+		const readOnly = ["search_records", "get_record", "list_lists", "read_file", "query_leads", "describe_module", "getRecords", "searchRecords", "fetch_page", "listUsers", "get_deal_stage"];
 		expect(readOnly.filter((t) => !isReadOnlyTool(t))).toEqual([]);
 		expect([undefined, null, 3, ""].some((t) => isReadOnlyTool(t))).toBe(false);
 		const denial = (id = "w") => [{ nodeId: id, message: expect.stringContaining("not on the read-only allowlist") }];
@@ -405,6 +404,33 @@ describe("prod-v1 validator profile", () => {
 		expect(validateProdV1(wf("n", [{ id: "w", mcp_tool: { server: "zoho" } }] as unknown as NodeDoc[]))).toEqual(denial());
 		// a read-only tool needs no approval
 		expect(validateProdV1(wf("r", [{ id: "r", mcp_tool: { server: "zoho", tool: "search_records" } }] as unknown as NodeDoc[]))).toEqual([]);
+	});
+
+	test("only the LEADING verb makes a tool read-only: a read word later in the name counts for nothing (g1@5f4a003 finding 1)", () => {
+		// the brief's cases: writes whose names merely contain a read word, and reads
+		const writes = ["clear_list", "increment_count", "list_delete", "getAndDelete", "reset_read_marker"];
+		const reads = ["get_record", "listItems", "search_docs"];
+		expect(writes.filter(isReadOnlyTool)).toEqual([]);
+		expect(reads.filter((t) => !isReadOnlyTool(t))).toEqual([]);
+		// the gate's probe list at 5f4a003: every one returned true, every one now needs approval
+		const probed = ["empty_list", "decrement_count", "record_view", "unshare_view", "block_search_result", "ban_user_search", "lock_account_lookup", "truncate_query_log",
+			"issue_query_credit", "mint_list_token"];
+		expect(probed.filter(isReadOnlyTool)).toEqual([]);
+		// count stays gated; words that are not on the short allowlist are writes, and so is any prefix before the verb
+		expect(["count_records", "countItems", "find_contacts", "lookup_company", "view_page", "show_item", "web_search_exa", "zoho_get_records", "x_list"].filter(isReadOnlyTool)).toEqual([]);
+		// every separator and camelCase split the same way; the first token decides
+		expect(["get-record", "get.record", "GetRecord", "getRecord", "LIST_ITEMS", "describe", "fetch"].filter((t) => !isReadOnlyTool(t))).toEqual([]);
+		// a name with any other character is not classified: non-ASCII letters, spaces, slashes, leading separators
+		expect(["getÜpdate", "get record", "get/record", "_get_record", "-list", "get\u0000delete", "get\nrecord"].filter(isReadOnlyTool)).toEqual([]);
+		// the validator: unguarded, with retries, each of the writes is refused on both counts; each read is allowed as is
+		for (const tool of [...writes, ...probed]) {
+			const issues = validateProdV1(wf("u", [{ id: "w", mcp_tool: { server: "zoho", tool }, retry: { max_attempts: 3 } }] as unknown as NodeDoc[]));
+			expect(issues).toEqual([
+				{ nodeId: "w", message: expect.stringContaining("must succeed before it runs") },
+				{ nodeId: "w", message: expect.stringContaining("runs single-attempt") },
+			]);
+		}
+		for (const tool of reads) expect(validateProdV1(wf("r", [{ id: "r", mcp_tool: { server: "zoho", tool }, retry: { max_attempts: 3 } }] as unknown as NodeDoc[]))).toEqual([]);
 	});
 
 	test("a non-read-only mcp_tool is single-attempt under prod-v1: an explicit retry is refused (g2 finding 1)", () => {

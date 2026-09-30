@@ -33,11 +33,12 @@
 - Allowed node types: `prompt`, `command`, `bash`, `script`, `verify` (runner `bash` or `verifier` only), `approval`, `mcp_tool`, `cancel` and `workflow`.
 - `workflow` nodes may not use `fan_out` or `isolation`, and every node's isolation is `none`.
 - `titan.budget.max_concurrent_children` is at most 2, and execution is capped at 2 parallel nodes.
-- Every `mcp_tool` needs a succeeded `approval` unless its tool name is on the read-only allowlist. A name is read-only only if all three hold:
-  - one of its words is a read verb (`get`, `list`, `search`, `read`, `query`, `count`, `describe`, `fetch`, `find`, `lookup`, `view`, `show`, `inspect`, `retrieve`, `browse`, `stat`, `exists`);
-  - none of its words is an effect verb (for example `create`, `update`, `send`, `execute`, `refund`, `transfer`) or a joining word (`and`, `or`, `then`, `also`);
-  - no word contains an effect root, which catches run-together names such as `bulkupdate`.
-- Any other name needs approval, including a name with no verb at all. Examples are `refund_payment`, `transfer_funds`, `bulkupdate`, `get_or_create_contact` and `executeCOQLQuery`. A tool wrongly classed as not read-only only costs an approval.
+- Every `mcp_tool` needs a succeeded `approval` unless its tool name is on the read-only allowlist. A name is read-only only if all of these hold:
+  - it uses only ASCII letters, digits, `_`, `-` and `.`, and starts with a letter;
+  - its first word is a read verb: `get`, `list`, `search`, `read`, `query`, `describe` or `fetch`. Words are split on `_`, `-`, `.` and camelCase. Position counts: a read word anywhere else in the name does not make it read-only, and `count` is not on the list;
+  - none of its later words is an effect verb (for example `create`, `update`, `delete`, `send`, `execute`, `refund`) or a joining word (`and`, `or`, `then`, `also`);
+  - none of its later words contains an effect root, which catches run-together names such as `getandsend`.
+- Any other name needs approval, including a name with no verb at all or with a prefix before the verb. Examples are `refund_payment`, `transfer_funds`, `bulkupdate`, `clear_list`, `increment_count`, `list_delete`, `getAndDelete`, `reset_read_marker`, `count_records`, `web_search_exa` and `executeCOQLQuery`. Examples that stay read-only are `get_record`, `listItems` and `search_docs`. A tool wrongly classed as not read-only only costs an approval and its retries.
 - The approval check follows trigger rules through intermediate nodes:
   - under `all_success`, one gated dependency is enough;
   - under `one_success` and `none_failed_min_one_success`, every dependency must be gated;
