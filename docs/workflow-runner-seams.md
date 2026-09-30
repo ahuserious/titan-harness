@@ -1,0 +1,43 @@
+# Runner seams 3-4: `mcpTool` and `runWorkflow` (LANE-3 N3-06)
+
+`extensions/titan-harness/modules/workflow/runner-seams.ts` holds what a hosted runner (`wf-runner`, outside every unit) uses instead of the TUI wiring in `titan-harness.ts`.
+
+## Seam 3: `mcpTool` through the unit's sidecar socket
+
+- `createSidecarMcpTool({ socketPath, routes })` sends one JSON-RPC `tools/call` as a POST to `/mcp/<server>` on the unit's unix socket, following the sidecar `CONTRACT.md` routes.
+- It takes no URL, host, port or header input. `server` must be in the startup `routes` list, and each route must be a plain slug (`^[a-z0-9][a-z0-9-]{0,62}$`). A workflow therefore cannot name a direct upstream.
+- The call fails on:
+  - a redirect;
+  - a response over the size cap (1 MiB by default) or a timeout (30 s by default);
+  - a JSON-RPC `error`, an `isError` result, or a response id that does not match the request.
+- A sidecar 4xx refusal (for example `MCP_TOOL_DENIED`) throws with `retryable: false`, and `mcp_tool` nodes then fail without retries. 5xx responses, timeouts and a missing socket are retryable.
+- `createWorkflowRuntime({ sidecarMcp })` wires the seam. A hosted runtime (one with `approver` set) refuses a direct `mcpTool` bridge. Passing both `mcpTool` and `sidecarMcp` is refused.
+
+## Seam 4: `runWorkflow`, recursive in the runner
+
+- `createRunnerRunWorkflow(host, { runId, chain })` loads the child with the runner's own loader and requires it to pass `prod-v1`.
+- It opens the child run in the same runner store, with `parentRunId` set to the calling run, and runs the child with:
+  - the caller's `parentBudget` (the N3-09 budget chain, which is enforced);
+  - the caller's abort signal;
+  - `maxParallel` 2.
+- The child gets the same recursive seam for its own `workflow:` nodes.
+- A cycle, a depth over `MAX_WORKFLOW_DEPTH` (4), a missing child or a non-`prod-v1` child is refused before any child run opens. The refusal sets `RunResult.notStarted`, so the calling node fails once, without retries.
+
+## The `prod-v1` profile (DESIGN §6.2)
+
+`validateProdV1(doc)` and `executeProdV1(loaded, deps)` enforce these rules:
+
+- Allowed node types: `prompt`, `command`, `bash`, `script`, `verify` (runner `bash` or `verifier` only), `approval`, `mcp_tool`, `cancel` and `workflow`.
+- `workflow` nodes may not use `fan_out` or `isolation`, and every node's isolation is `none`.
+- `titan.budget.max_concurrent_children` is at most 2, and execution is capped at 2 parallel nodes.
+- A write-named `mcp_tool` must depend, directly or transitively, on an `approval`. The name check is a word match against write verbs, used as a static lint. The sidecar tool allowlist remains the enforcement.
+
+## Interrupted run
+
+`tests/workflow-runner-seams.test.ts` runs a real runner process that goes through all three seams:
+
+1. An `mcp_tool` node calls the sidecar.
+2. A nested `runWorkflow` starts a child run.
+3. The child's web `approval` parks.
+
+The test then kills the process with `kill -9` and reopens the store with `openRunnerStore`. The parent and child runs are `interrupted`, the pending approval is byte-identical, and nothing is replayed: the sidecar saw exactly one call.

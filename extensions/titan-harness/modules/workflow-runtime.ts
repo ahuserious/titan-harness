@@ -28,7 +28,9 @@
  *                                rejected), notify, settings, resolveRole, runWorkflow.
  *
  * Nothing here imports pi: the host passes `runChild`, the UI seam and the role resolver
- * in, so tests drive it with fakes. mcpTool stays absent until the InfraNodus stage (P7).
+ * in, so tests drive it with fakes. mcpTool: the TUI passes its catalog bridge; a hosted run
+ * (an `approver` is set) reaches MCP only through the unit's sidecar socket (`sidecarMcp`,
+ * workflow/runner-seams.ts) and a direct `mcpTool` is refused at construction.
  */
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
@@ -44,6 +46,7 @@ import type { UsageProvenance } from "./workflow/budget.ts";
 import { readStackSettings, type StackSettings } from "./stack-config.ts";
 import { THINKING_ORDER, normalizeThinking } from "./thinking.ts";
 import { type ActorPolicy, createHostedApproval, type Approver } from "./workflow/approver.ts";
+import { createSidecarMcpTool, type SidecarMcpOptions } from "./workflow/runner-seams.ts";
 import type { AgentRequest, AgentResult, ProcessOptions, ProcessResult, ResolvedRole, RunResult, ScriptSpec, WorkflowRuntimeDeps } from "./workflow/executor.ts";
 import type { LoadedWorkflow } from "./workflow/loader.ts";
 import { resolveRef } from "./workflow/json-schema.ts";
@@ -391,7 +394,10 @@ export interface WorkflowRuntimeHost {
 	slotFor?(req: AgentRequest): ModelSlot | undefined;
 	onRun?(run: AgentRun, req: AgentRequest): void;
 	runWorkflow?: WorkflowRuntimeDeps["runWorkflow"];
+	/** A direct MCP bridge (the TUI's catalog). Refused when `approver` is set: hosted runs use `sidecarMcp`. */
 	mcpTool?: WorkflowRuntimeDeps["mcpTool"];
+	/** mcpTool through the unit's sidecar socket only (runner-seams.ts createSidecarMcpTool). */
+	sidecarMcp?: SidecarMcpOptions;
 	/** The max-reasoning model of a model's family (the mechanical ladder's step 2); undefined → stay on the model. */
 	familyMax?(model: string): string | undefined;
 	signal?: AbortSignal;
@@ -423,6 +429,9 @@ export function createApproval(ui: RuntimeUi | undefined): WorkflowRuntimeDeps["
 }
 
 export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntimeDeps {
+	if (host.mcpTool && host.sidecarMcp) throw new Error("workflow runtime: pass mcpTool or sidecarMcp, not both");
+	if (host.approver && host.mcpTool) throw new Error("workflow runtime: a hosted run reaches MCP only through the unit's sidecar socket (sidecarMcp); a direct mcpTool is refused");
+	const sidecarMcpTool = host.sidecarMcp ? createSidecarMcpTool(host.sidecarMcp) : undefined;
 	const artifactsDir = path.join(host.runDir, "artifacts");
 	fs.mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
 	const agent = createAgentRunner({ runChild: host.runChild, sessionsDir: path.join(host.runDir, "sessions"), cwd: host.cwd, slotFor: host.slotFor, onRun: host.onRun });
@@ -448,7 +457,8 @@ export function createWorkflowRuntime(host: WorkflowRuntimeHost): WorkflowRuntim
 		resolveRole: host.resolveRole,
 		childTools: (req) => agentChildTools(req),
 	};
-	if (host.mcpTool) deps.mcpTool = host.mcpTool;
+	if (sidecarMcpTool) deps.mcpTool = sidecarMcpTool;
+	else if (host.mcpTool) deps.mcpTool = host.mcpTool;
 	if (host.runWorkflow) deps.runWorkflow = host.runWorkflow;
 	if (host.familyMax) deps.familyMax = host.familyMax;
 	return deps;
