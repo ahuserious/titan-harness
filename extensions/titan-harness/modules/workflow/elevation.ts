@@ -34,6 +34,7 @@ import { AUDIT_VERDICTS, type AuditVerdict } from "./json-schema.ts";
 import type { NodeDoc, SlotRole, WorkflowDoc } from "./schema.ts";
 
 import type { EvidenceKind, EvidenceStatus } from "./evidence.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "./child-sandbox.ts";
 
 export type { EvidenceKind, EvidenceStatus };
 
@@ -201,17 +202,17 @@ export function recordReviewFrame(store: RunStore, runDir: string, frame: Review
 			/* a reviewed node that never spawned an agent (bash/script) has no record; the frame file still lands */
 		}
 		const dir = path.join(artifactsDir, REVIEWS_DIR);
-		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		guardedMkdirSync(dir);
 		const file = path.join(dir, `${frame.reviewedNodeId.replace(/[^A-Za-z0-9._-]+/g, "-")}.json`);
 		let history: unknown[] = [];
 		try {
-			const existing = JSON.parse(fs.readFileSync(file, "utf8"));
+			const existing = JSON.parse(guardedReadFileSync(file));
 			history = Array.isArray(existing?.history) ? existing.history : [];
 		} catch {
 			history = [];
 		}
 		history.push({ ...frame, state });
-		fs.writeFileSync(file, `${JSON.stringify({ reviewedNodeId: frame.reviewedNodeId, state, latest: { ...frame, state }, history }, null, 2)}\n`, { mode: 0o600 });
+		guardedWriteFileSync(file, `${JSON.stringify({ reviewedNodeId: frame.reviewedNodeId, state, latest: { ...frame, state }, history }, null, 2)}\n`);
 	}
 	return state;
 }
@@ -282,9 +283,9 @@ export function writeEscalationReport(artifactsDir: string, input: EscalationInp
 	}
 	lines.push("", "## Output", "", "```", (input.outputExcerpt ?? "").trimEnd(), "```", "", "## Next", "", `- /create-workflow --elevate --from ${path.join(artifactsDir, ESCALATION_REPORT_FILE)} (0.7.0)`, "- until then the re-author hand-off is a `cancel` node carrying this report path; the builder never resumes on reviewer prose", "");
 	const body = lines.join("\n");
-	fs.mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(artifactsDir);
 	const file = path.join(artifactsDir, ESCALATION_REPORT_FILE);
-	fs.writeFileSync(file, body, { mode: 0o600 });
+	guardedWriteFileSync(file, body);
 	return { path: file, sha256: sha256(body) };
 }
 

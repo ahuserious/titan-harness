@@ -109,6 +109,7 @@ import { runMcpToolNode } from "./nodes/mcp-tool.ts";
 import { runScriptNode } from "./nodes/script.ts";
 import { runVerifyNode } from "./nodes/verify.ts";
 import { runWorkflowNode } from "./nodes/workflow.ts";
+import { guardedWriteFileSync } from "./child-sandbox.ts";
 
 // ═══ Public contract ═════════════════════════════════════════════════════════
 
@@ -293,6 +294,12 @@ export interface NodeOutcome {
 	meta?: Record<string, unknown>;
 }
 
+/** Copy a node's output into a child-visible artifacts dir (never following a child-planted symlink). */
+function mirrorArtifact(artifactsDir: string, nodeId: string, body: string): void {
+	const name = nodeId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "").replace(/-+$/, "") || "x";
+	guardedWriteFileSync(path.join(artifactsDir, "nodes", `${name}.md`), body);
+}
+
 /** Everything a node handler may use. */
 export interface NodeContext {
 	readonly deps: WorkflowRuntimeDeps;
@@ -307,7 +314,7 @@ export interface NodeContext {
 	/** Results of every finished node (live). */
 	readonly results: Record<string, NodeResult>;
 	readonly signal: AbortSignal;
-	/** Environment for children and processes: ARTIFACTS_DIR, TITAN_RUN_ID, TITAN_WORKFLOW_ID, TITAN_NODE_ID, TITAN_RUN_DIR. */
+	/** Environment for children and processes: ARTIFACTS_DIR, TITAN_RUN_ID, TITAN_WORKFLOW_ID, TITAN_NODE_ID. Never the run dir (the runner store). */
 	readonly env: Record<string, string>;
 	substitution(extra?: Partial<SubstitutionContext>): SubstitutionContext;
 	/** substitute() over this node's context; unknown refs are reported once as a warning. */
@@ -864,7 +871,6 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 			ARTIFACTS_DIR: deps.artifactsDir,
 			TITAN_ARTIFACTS_DIR: deps.artifactsDir,
 			TITAN_RUN_ID: runId,
-			TITAN_RUN_DIR: runDir,
 			TITAN_WORKFLOW_ID: deps.workflowId,
 			TITAN_NODE_ID: node.id,
 		};
@@ -1080,6 +1086,9 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 		if (final.status === "success" || body.length) {
 			try {
 				result.artifactPath = store.writeArtifact(runDir, node.id, body, { type, status: final.status, attempts: attempt, role: node.role, sessionRef: final.sessionRef, ...final.meta }).path;
+				// Hosted runs hand children a scratch ARTIFACTS_DIR outside the runner store: mirror the
+				// node output there so `$ARTIFACTS_DIR/nodes/<id>.md` keeps working (a copy; the store's is authoritative).
+				if (path.resolve(deps.artifactsDir) !== path.resolve(runDir, "artifacts")) mirrorArtifact(deps.artifactsDir, node.id, body);
 			} catch (error) {
 				deps.notify(`${node.id}: artifact write failed: ${asString(error)}`, "warning");
 			}

@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { packageRoot } from "./loader.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "./child-sandbox.ts";
 
 export const DEFAULT_HUMAN_MIN = 3;
 export const RECEIPTS_DIR = "receipts";
@@ -165,10 +166,10 @@ export function parseReviewResponse(response: string | undefined): { reviewer: s
 
 /** Append one receipt file (0600) and return its path. */
 export function writeReceipt(dir: string, receipt: ApprovalReceipt): string {
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(dir);
 	const existing = fs.readdirSync(dir).filter((f) => f.startsWith(`${receipt.contentSha256}-`) && f.endsWith(".json")).length;
 	const file = path.join(dir, `${receipt.contentSha256}-${existing + 1}.json`);
-	fs.writeFileSync(file, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+	guardedWriteFileSync(file, `${JSON.stringify(receipt, null, 2)}\n`);
 	return file;
 }
 
@@ -186,7 +187,7 @@ export function readReceipts(dir: string, contentSha256: string): ApprovalReceip
 	const receipts: ApprovalReceipt[] = [];
 	for (const f of files) {
 		try {
-			const parsed = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+			const parsed = JSON.parse(guardedReadFileSync(path.join(dir, f)));
 			if (parsed && typeof parsed === "object" && (parsed.decision === "approve" || parsed.decision === "reject")) receipts.push(parsed as ApprovalReceipt);
 		} catch {
 			/* a torn receipt never counts */

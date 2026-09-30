@@ -18,8 +18,8 @@
  * the on_fail path can hand the escalation report to the architect (plan D11). A failed
  * synthesis fails the node the same way.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
+import { guardedMkdirSync, guardedWriteFileSync } from "../child-sandbox.ts";
 import type { AgentRequest, AgentResult, NodeContext, NodeHandler, NodeOutcome } from "../executor.ts";
 import { runLimited } from "../executor.ts";
 import type { InterleaveSpec } from "../schema.ts";
@@ -83,12 +83,13 @@ async function runSegment(ctx: NodeContext, spec: InterleaveSpec, index: number,
 	return { index, label, callsign, ok: result.ok && text.trim().length > 0, text, error: result.ok ? undefined : (result.error ?? "agent failed"), sessionRef: result.sessionRef, usage: result.usage };
 }
 
+/** Segment archive under the (hosted: child-writable) artifacts dir; guarded so a planted symlink or FIFO cannot redirect or block the runner's write. */
 function archive(ctx: NodeContext, segments: Segment[]): string {
 	const dir = path.join(ctx.deps.artifactsDir, "nodes", ctx.node.id, "segments");
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(dir);
 	for (const segment of segments) {
 		const body = segment.ok ? segment.text : `[failed] ${segment.error ?? ""}\n`;
-		fs.writeFileSync(path.join(dir, `${segment.index}.md`), body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+		guardedWriteFileSync(path.join(dir, `${segment.index}.md`), body.endsWith("\n") ? body : `${body}\n`);
 	}
 	return dir;
 }
@@ -122,7 +123,13 @@ export const runInterleaveNode: NodeHandler = async (ctx): Promise<NodeOutcome> 
 	);
 	if (aborted) throw aborted;
 	segments.sort((a, b) => a.index - b.index);
-	const archiveDir = archive(ctx, segments);
+	let archiveDir: string;
+	try {
+		archiveDir = archive(ctx, segments);
+	} catch (error) {
+		// A planted symlink/FIFO in the child-writable archive path: fail closed; re-running the agents cannot fix it.
+		return { status: "failed", output: undefined, error: `interleave: segment archive refused: ${error instanceof Error ? error.message : String(error)}`, usage, retryable: false };
+	}
 	const failed = segments.filter((s) => !s.ok);
 	ctx.log("interleave.segments", { segments: count, ok: count - failed.length, failed: failed.map((s) => s.index), archive: archiveDir });
 	const baseMeta = { segments: count, by: spec.by ?? null, labels, archive: archiveDir };

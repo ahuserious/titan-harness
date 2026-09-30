@@ -61,7 +61,7 @@ in these cases:
 The runner checks this again before every request. The TUI/headless path
 (no `approver`) is unchanged and needs no runner store.
 
-As defence in depth (not run-dir isolation; see "Known limitation / P3 prerequisite" below),
+As defence in depth (not run-dir isolation; the isolation itself is the child sandbox, see "Approval-store isolation" below),
 hosted approvals also refuse a runner root that lies inside, or contains, the
 workflow `cwd`.
 
@@ -199,8 +199,8 @@ Crash windows:
 The chain is **unkeyed** SHA-256 with no external tail anchor. It detects
 accidental and non-recomputed edits, not a writer who recomputes hashes. Its
 integrity relies on the run directory, and therefore the runner store root,
-being outside every agent unit. The P3 node-exec wiring must not expose the
-runner's run dir (`TITAN_RUN_DIR`, `ARTIFACTS_DIR`) to units.
+being unreachable from every child process. That is enforced by the child
+sandbox (see "Approval-store isolation" below).
 
 `RunStore.consumeDecision(runDir, decision, expected)` checks the delivered
 decision against the persisted pending request and against the runner's
@@ -254,55 +254,61 @@ gone" means **found running at startup** by the lock holder. Recovery:
 call `recoverInterruptedRuns` directly against a store another runner might own.
 Resume is out of scope.
 
-## Known limitation / P3 prerequisite
+## Approval-store isolation (P3 prerequisite, fixed)
 
-**Status: accepted limitation, fix required in P3 before any hosted use.**
 Ruling (Dan, 2026-09-29 22:50, RULINGS-0929): "N3-03: titan #3 may merge with
 the forgeable approval store documented as a P3 prerequisite (fix lands in P3
-before any hosted use)."
+before any hosted use)." This section describes that fix
+(`modules/workflow/child-sandbox.ts`).
 
-**The seam does not yet enforce that agents cannot write the runner root.**
-In local titan, bash and agent nodes run as the same user as the runner and can
-write the run dir. The executor exports `TITAN_RUN_DIR` and `ARTIFACTS_DIR`
-(= `<runDir>/artifacts`) to every node (`modules/workflow/executor.ts`,
-`makeContext` env). The run dir is `<root>/<projectSlug>/<runId>`
-(`RunStore.dir`), so the whole runner root is two levels above it. A node
-can therefore write `$ARTIFACTS_DIR/../approvals.jsonl`. Because the chain is
-unkeyed, it can append recomputed `requested`/`decided`/`consumed` rows for
-invented actors, and the hosted preset tally would count them. From
-`TITAN_RUN_DIR` a node can also:
+When `createWorkflowRuntime` gets an `approver` (a hosted run):
 
-- rewrite `approvals.jsonl` wholesale, including a pending request's bound
-  `artifactSha256` and `actorPolicy.allowedActors`, which `consumeDecision`
-  reads from disk;
-- append valid `expired`/`decided` rows (refusing or ending a live request) or
-  corrupt the chain (the index then throws: denial of service);
-- write `run.json` `status`, an input to the ownership fence;
-- do all of the above to **sibling runs** under the same runner root
-  (`<root>/*/*/approvals.jsonl`, `run.json`), not only its own run, so a partial
-  fix such as dropping `TITAN_RUN_DIR` while still exporting `ARTIFACTS_DIR` is
-  not sufficient;
-- reach `<root>/runner.lock` (`$TITAN_RUN_DIR/../../runner.lock`) and delete
-  it, replace it with a dead-pid body, write an unparsable body with a
-  back-dated mtime (past the 30 s grace), or plant `runner.lock.tmp.*` /
-  `runner.lock.stale.*` names, defeating the fence and enabling a takeover;
-- replace `approvals.jsonl`, `run.json`, `artifacts/` or root entries with
-  symlinks, redirecting the runner's own writes (confused deputy). With one uid
-  this adds nothing today; it matters once P3 separates privileges.
+- **Runner-owned store.** Pending approvals, consumed-approval records,
+  `run.json`, `runner.lock`, events and the authoritative node artifacts stay
+  under the runner store root. Only the runner process writes there.
+- **Child scratch, not the run dir.** Children get a separate node scratch dir
+  (`nodeScratchDir`, default a fresh `mkdtemp` under the OS tmp dir; it must not
+  overlap the runner root). `ARTIFACTS_DIR`/`TITAN_ARTIFACTS_DIR`, agent
+  sessions, `submit_result` files, inline scripts, evidence, receipts and
+  best-of/mimeograph archives live there. Each node's output is mirrored to
+  `$ARTIFACTS_DIR/nodes/<id>.md` so downstream nodes keep working; the store
+  copy is authoritative.
+- **No run dir in the environment.** `TITAN_RUN_DIR` is no longer exported to
+  any child (executor node env and `/create-workflow`), and the sandbox drops
+  any variable whose value names the runner root.
+- **Sandbox.** Every hosted child process (bash and script nodes, verify
+  runners through `deps.bash`, agent children through `runChild`'s
+  `wrapSpawn`) runs under bubblewrap: the host filesystem read-only, a private
+  `/tmp`, only the workflow cwd, the scratch dir and host-listed
+  `sandbox.writable` paths writable, a new pid namespace with its own `/proc`,
+  and the runner root (plus `sandbox.hide` paths) covered by an empty
+  read-only tmpfs. A writable path may not contain or lie inside a hidden path,
+  so a child cannot rename a parent of the root away. A child therefore cannot
+  list, read, create, edit, truncate, delete, rename or symlink-swap
+  `approvals.jsonl`, `run.json`, `runner.lock`, lock temp names or sibling
+  runs, and cannot reach them through `/proc/<pid>/root`.
+- **Fail closed.** Building the sandbox runs a preflight inside it (the root
+  must look empty and be unwritable). No bwrap, a failing preflight, or a
+  scratch/writable path overlapping the root throws, so the hosted runtime is
+  not built.
+- **No confused deputy.** The scratch dir is child-writable, so the runner
+  writes and reads there only through `guardedWriteFileSync` /
+  `guardedMkdirSync` / `guardedReadFileSync`: every component is opened with
+  `O_NOFOLLOW` and multiply-linked files are refused, so a planted symlink or
+  hard link cannot turn a runner write into a write to the store.
 
-The ownership fence and the lock protocol therefore depend on files in the same
-writable class and are only as strong as the runner-root boundary.
+Tests: `tests/workflow-approval-isolation.test.ts` gives a child the store's
+absolute paths and shows that every create/edit/replay/lock/sibling/proc
+attack is blocked, the store bytes are unchanged, and the runner still
+consumes the real decision.
 
-**P3 prerequisite (approval-store isolation).** Before hosted approvals are
-used, the runner store root must be outside every path an agent or bash node
-can write: a separate filesystem/sandbox boundary (distinct uid or mount), with
-the P3 node-exec wiring neither exporting nor mounting the runner's run dir or
-root. `TITAN_RUN_DIR` and `ARTIFACTS_DIR` exported to children must then point
-at a node-writable scratch area, not into the runner root. The overlap check
-against the workflow `cwd` (above) is defence in depth only; it does not stop a
-node that learns the run dir from the environment. Until the P3 fix lands,
-hosted approvals must not be treated as tamper-proof against the workflow's own
-nodes. Tracked in the Triarc pack as lane N3 `P3-PREREQS.md`.
+Still required by the deployment (not code in this repo): the router and the
+Studio must never hand units the runner root; hosts that keep several runner
+roots under one parent should pass that parent in `sandbox.hide`; hosts that
+need extra writable paths for agent children (for example `~/.pi/agent`) list
+them in `sandbox.writable`. The TUI/headless path (no `approver`) is unchanged:
+it keeps `<runDir>/artifacts` and runs children unsandboxed, and it has no
+hosted approvals.
 
 ## Other callers
 

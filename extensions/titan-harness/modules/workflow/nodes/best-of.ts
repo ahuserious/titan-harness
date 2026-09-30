@@ -23,6 +23,7 @@ import { runLimited } from "../executor.ts";
 import type { BestOfSpec, JsonSchema, SlotRole } from "../schema.ts";
 import { MAX_SCHEMA_RETRIES, formatSchemaErrors, parseStructured, schemaPromptSuffix } from "../structured-output.ts";
 import { buildAgentRequest } from "./ai.ts";
+import { guardedMkdirSync, guardedWriteFileSync } from "../child-sandbox.ts";
 
 export const BEST_OF_MIN = 2;
 export const BEST_OF_MAX = 8;
@@ -129,10 +130,10 @@ async function runJudge(ctx: NodeContext, spec: BestOfSpec, candidates: Candidat
 
 function archive(ctx: NodeContext, candidates: Candidate[]): string {
 	const dir = path.join(ctx.deps.artifactsDir, "nodes", ctx.node.id, "candidates");
-	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(dir);
 	for (const candidate of candidates) {
 		const body = candidate.ok ? candidate.text : `[failed] ${candidate.error ?? ""}\n`;
-		fs.writeFileSync(path.join(dir, `${candidate.index}.md`), body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+		guardedWriteFileSync(path.join(dir, `${candidate.index}.md`), body.endsWith("\n") ? body : `${body}\n`);
 	}
 	return dir;
 }

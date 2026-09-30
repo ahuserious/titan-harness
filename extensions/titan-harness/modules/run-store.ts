@@ -830,7 +830,7 @@ export function openRunnerStore(root: string, opts: { defaultRoot?: string; _tes
 /**
  * Defence-in-depth only (NOT the isolation fix): refuse a runner store root that is inside,
  * or contains, the workflow working directory, where agent/bash nodes write by default.
- * Children still learn the run dir (TITAN_RUN_DIR / ARTIFACTS_DIR); see the docs' known limitation.
+ * Hosted children never learn the run dir and cannot reach it: see workflow/child-sandbox.ts.
  */
 export function assertRunnerRootOutside(store: RunStore, workdir: string): void {
 	const root = realish(store.root);

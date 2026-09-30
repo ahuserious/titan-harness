@@ -30,6 +30,7 @@ import { momenticRunner } from "./momentic.ts";
 import { orcaBrowserRunner } from "./orca-browser.ts";
 import { testmuRunner } from "./testmu.ts";
 import { verifierRunner } from "./verifier.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "../child-sandbox.ts";
 
 export type { RunnerName } from "../tiers.ts";
 
@@ -200,7 +201,7 @@ export function kindForFile(file: string, fallback: EvidenceKind = "log"): Evide
 
 export function readJsonFile(file: string): unknown {
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8"));
+		return JSON.parse(guardedReadFileSync(file));
 	} catch {
 		return undefined;
 	}
@@ -271,9 +272,9 @@ export async function harvestDir(ctx: RunnerContext, dir: string, before: FileSn
 
 /** Copy `text` into the evidence dir under `name` and hash it. */
 export async function saveText(ctx: RunnerContext, name: string, text: string, kind: EvidenceKind, source: EvidenceSource, extra: Partial<EvidenceArtifact> = {}): Promise<EvidenceArtifact> {
-	fs.mkdirSync(ctx.evidenceDir, { recursive: true, mode: 0o700 });
+	guardedMkdirSync(ctx.evidenceDir);
 	const file = path.join(ctx.evidenceDir, name);
-	fs.writeFileSync(file, text, { mode: 0o600 });
+	guardedWriteFileSync(file, text);
 	return ctx.hash(file, kind, source, extra);
 }
 

@@ -781,7 +781,7 @@ export async function authorWorkflow(deps: CreateWorkflowDeps, ctx: any, args: C
 		context: resume ? { resume } : "fresh",
 		outputSchema: CREATE_WORKFLOW_RESULT_SCHEMA,
 		timeoutMs: deps.childTimeoutMs(),
-		env: { TITAN_RUN_ID: runId, TITAN_RUN_DIR: runDir, TITAN_WORKFLOW_ID: "create-workflow" },
+		env: { TITAN_RUN_ID: runId, TITAN_WORKFLOW_ID: "create-workflow" }, // never the run dir (runner store)
 		label: "create-workflow/architect",
 	});
 
