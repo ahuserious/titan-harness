@@ -125,7 +125,7 @@ export const cdpBrowserRunner: Runner = async (spec, ctx) => {
 		if (result.code === 2) return failed(`cdp-browser: ${tail(result.stderr) || "bad flow"}`, { artifacts, retryable: false });
 		let report: { ok?: boolean; steps?: Array<{ ok: boolean; n: number; action: string; error?: string }>; error?: string } | undefined;
 		try {
-			report = JSON.parse(fs.readFileSync(path.join(dir, "flow-result.json"), "utf8"));
+			report = JSON.parse(guardedReadFileSync(path.join(dir, "flow-result.json")));
 		} catch {}
 		const flowSteps = report?.steps ?? [];
 		stepsTotal += flowSteps.length;
@@ -142,7 +142,7 @@ export const cdpBrowserRunner: Runner = async (spec, ctx) => {
 		for (const name of names) {
 			const file = path.join(dir, name);
 			try {
-				if (!fs.statSync(file).isFile()) continue;
+				if (!fs.lstatSync(file).isFile()) continue;
 			} catch {
 				continue;
 			}

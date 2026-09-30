@@ -28,7 +28,9 @@
  * bytes of approvals.jsonl). `registerScratchRoot` marks a scratch root, and
  * `guardedWriteFileSync` / `guardedMkdirSync` walk every component below a registered root
  * with O_NOFOLLOW (openat-style through /proc/self/fd) and refuse multiply-linked files.
- * Outside a registered root they are plain fs calls. Pure Node, no pi.
+ * Every open below a registered root adds O_NONBLOCK, so a child-planted FIFO can never block
+ * the runner's (synchronous) open: the descriptor is validated as a regular file before any
+ * byte moves. Outside a registered root they are plain fs calls. Pure Node, no pi.
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -149,11 +151,13 @@ function underScratch(file: string): { root: string; parts: string[] } | undefin
 }
 
 const O = fs.constants;
+/** Added to every open below a scratch root: a child-planted FIFO opens at once (read) or fails with ENXIO (write) instead of blocking the runner. */
+const NB = O.O_NONBLOCK;
 const procFd = (fd: number, name: string) => `/proc/self/fd/${fd}/${name}`;
 
 /** Open the directory `parts` below `root` one component at a time with O_NOFOLLOW (creating missing ones). Returns its fd. */
 function openDirNoFollow(root: string, parts: string[], create: boolean, mode: number): number {
-	let fd = fs.openSync(root, O.O_RDONLY | O.O_DIRECTORY);
+	let fd = fs.openSync(root, O.O_RDONLY | O.O_DIRECTORY | NB);
 	try {
 		for (const part of parts) {
 			if (!part || part === "." || part === "..") throw new Error(`guarded scratch path: invalid component ${JSON.stringify(part)}`);
@@ -162,7 +166,7 @@ function openDirNoFollow(root: string, parts: string[], create: boolean, mode: n
 			}
 			let next: number;
 			try {
-				next = fs.openSync(procFd(fd, part), O.O_RDONLY | O.O_DIRECTORY | O.O_NOFOLLOW);
+				next = fs.openSync(procFd(fd, part), O.O_RDONLY | O.O_DIRECTORY | O.O_NOFOLLOW | NB);
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException).code;
 				if (code === "ELOOP" || code === "ENOTDIR") throw new Error(`guarded scratch path: ${part} under ${root} is a symlink or not a directory; refusing to follow it`);
@@ -201,9 +205,11 @@ export function guardedWriteFileSync(file: string, data: string | Buffer, mode =
 	let fd: number | undefined;
 	try {
 		try {
-			fd = fs.openSync(procFd(dirFd, name), O.O_WRONLY | O.O_CREAT | O.O_NOFOLLOW, mode);
+			fd = fs.openSync(procFd(dirFd, name), O.O_WRONLY | O.O_CREAT | O.O_NOFOLLOW | NB, mode);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`guarded scratch path: ${file} is a symlink; refusing to follow it`);
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ELOOP") throw new Error(`guarded scratch path: ${file} is a symlink; refusing to follow it`);
+			if (code === "ENXIO") throw new Error(`guarded scratch path: ${file} is a FIFO or socket, not a regular file; refusing to write through it`);
 			throw error;
 		}
 		const st = fs.fstatSync(fd);
@@ -227,13 +233,14 @@ export function guardedReadFileSync(file: string): string {
 	let fd: number | undefined;
 	try {
 		try {
-			fd = fs.openSync(procFd(dirFd, name), O.O_RDONLY | O.O_NOFOLLOW);
+			fd = fs.openSync(procFd(dirFd, name), O.O_RDONLY | O.O_NOFOLLOW | NB);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`guarded scratch path: ${file} is a symlink; refusing to follow it`);
 			throw error;
 		}
 		const st = fs.fstatSync(fd);
 		if (!st.isFile() || st.nlink > 1) throw new Error(`guarded scratch path: ${file} is not a regular singly-linked file; refusing to read it`);
+		// A regular file ignores O_NONBLOCK, so this is a plain full read.
 		return fs.readFileSync(fd, "utf8");
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);

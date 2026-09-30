@@ -34,7 +34,7 @@ import { AUDIT_VERDICTS, type AuditVerdict } from "./json-schema.ts";
 import type { NodeDoc, SlotRole, WorkflowDoc } from "./schema.ts";
 
 import type { EvidenceKind, EvidenceStatus } from "./evidence.ts";
-import { guardedMkdirSync, guardedWriteFileSync } from "./child-sandbox.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "./child-sandbox.ts";
 
 export type { EvidenceKind, EvidenceStatus };
 
@@ -206,7 +206,7 @@ export function recordReviewFrame(store: RunStore, runDir: string, frame: Review
 		const file = path.join(dir, `${frame.reviewedNodeId.replace(/[^A-Za-z0-9._-]+/g, "-")}.json`);
 		let history: unknown[] = [];
 		try {
-			const existing = JSON.parse(fs.readFileSync(file, "utf8"));
+			const existing = JSON.parse(guardedReadFileSync(file));
 			history = Array.isArray(existing?.history) ? existing.history : [];
 		} catch {
 			history = [];

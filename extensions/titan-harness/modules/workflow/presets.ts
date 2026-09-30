@@ -17,7 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { packageRoot } from "./loader.ts";
-import { guardedMkdirSync, guardedWriteFileSync } from "./child-sandbox.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "./child-sandbox.ts";
 
 export const DEFAULT_HUMAN_MIN = 3;
 export const RECEIPTS_DIR = "receipts";
@@ -187,7 +187,7 @@ export function readReceipts(dir: string, contentSha256: string): ApprovalReceip
 	const receipts: ApprovalReceipt[] = [];
 	for (const f of files) {
 		try {
-			const parsed = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+			const parsed = JSON.parse(guardedReadFileSync(path.join(dir, f)));
 			if (parsed && typeof parsed === "object" && (parsed.decision === "approve" || parsed.decision === "reject")) receipts.push(parsed as ApprovalReceipt);
 		} catch {
 			/* a torn receipt never counts */

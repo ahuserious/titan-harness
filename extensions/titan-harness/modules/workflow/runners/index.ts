@@ -30,7 +30,7 @@ import { momenticRunner } from "./momentic.ts";
 import { orcaBrowserRunner } from "./orca-browser.ts";
 import { testmuRunner } from "./testmu.ts";
 import { verifierRunner } from "./verifier.ts";
-import { guardedMkdirSync, guardedWriteFileSync } from "../child-sandbox.ts";
+import { guardedMkdirSync, guardedReadFileSync, guardedWriteFileSync } from "../child-sandbox.ts";
 
 export type { RunnerName } from "../tiers.ts";
 
@@ -201,7 +201,7 @@ export function kindForFile(file: string, fallback: EvidenceKind = "log"): Evide
 
 export function readJsonFile(file: string): unknown {
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8"));
+		return JSON.parse(guardedReadFileSync(file));
 	} catch {
 		return undefined;
 	}
