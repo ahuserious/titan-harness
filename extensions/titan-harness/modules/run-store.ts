@@ -45,6 +45,8 @@ export const INDEX_FILE = "index.jsonl";
 
 export const RUN_STATUSES = ["pending", "running", "paused", "reauthored", "completed", "failed", "aborted", "stalemate", "interrupted"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
+/** Statuses a runner store never moves a run out of (see openRunnerStore's updateRun guard). */
+export const STOPPED_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(["interrupted", "completed", "failed", "aborted", "stalemate", "reauthored"]);
 
 /** run.json — the run's identity, shape and lifecycle (§6.3). */
 export interface RunMeta {
@@ -803,6 +805,13 @@ export function openRunnerStore(root: string, opts: { defaultRoot?: string; _tes
 			value: (dir: string, patch: Partial<RunMeta>): RunMeta => {
 				const held = runnerStores.get(store);
 				if (!held || readLockBody(held.lockPath)?.token !== held.token) throw new Error(`runner store ${resolved} no longer holds ${lockPath}; refusing to update run.json`);
+				// A stopped run keeps its status: e.g. an `interrupted` run (recovery, or an operator
+				// stop while this runner still holds the lock) must not be finalized as aborted/completed.
+				// Same-status patches (endedAt on an already-frozen run) and pending → running still apply.
+				if (patch.status !== undefined) {
+					const current = store.readRun(dir).status;
+					if (STOPPED_RUN_STATUSES.has(current) && patch.status !== current) throw new Error(`runner store ${resolved}: run ${dir} is ${current}; refusing to change its status to ${patch.status}`);
+				}
 				return updateRun(dir, patch);
 			},
 		},

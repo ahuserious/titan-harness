@@ -85,7 +85,12 @@ In both cases the node ends cancelled (fail closed) and the request stays
 pending (for `runner_not_owner`, in the new owner's view; for
 `run_not_running`, in the same root, where no new owner may exist). The runner-store `updateRun` also refuses to
 run after the lock is lost, so the old runner cannot overwrite the new owner's
-`interrupted` status with its final status. `expireApproval` is fenced the same
+`interrupted` status with its final status. While the lock is still held, the
+runner-store `updateRun` also never changes the status of a stopped run
+(`interrupted`, `completed`, `failed`, `aborted`, `stalemate`, `reauthored`):
+executor finalization of a run that became `interrupted` mid-approval is
+refused, and `interrupted` survives. Same-status patches (for example `endedAt`)
+and `pending` to `running` still apply. `expireApproval` is fenced the same
 way.
 
 ## Content binding

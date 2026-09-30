@@ -656,6 +656,22 @@ describe("E. ownership fence: no consumption after the runner lost its lock or t
 		expect(rows(h.dir).map(r => r.type)).toEqual(["approval.requested", "approval.refused"]);
 		expect(rows(h.dir).at(-1)?.data).toMatchObject({ requestId: req.requestId, reason: "run_not_running" });
 		expect(listPendingApprovals(h.dir)).toEqual([req]);
+		// Finalization must not overwrite the stop: run.json stays `interrupted`, never `aborted`.
+		expect(new RunStore(h.storeRoot).readRun(h.dir).status).toBe("interrupted");
+	});
+
+	test("E5 runner store updateRun: pending → running applies; a stopped run's status is never changed; same-status patches still apply", () => {
+		const root = mkdtempSync(join(tmpdir(), "titan-stopped-")); dirs.push(root);
+		const store = runnerStore(root);
+		const { dir } = store.open({ projectSlug: "p", cwd: root });
+		expect(store.updateRun(dir, { status: "running" }).status).toBe("running");
+		for (const stopped of ["interrupted", "completed", "failed", "aborted", "stalemate", "reauthored"] as const) {
+			new RunStore(root).updateRun(dir, { status: stopped });
+			expect(() => store.updateRun(dir, { status: stopped === "aborted" ? "completed" : "aborted" })).toThrow(`is ${stopped}; refusing to change its status`);
+			expect(() => store.updateRun(dir, { status: "running" })).toThrow("refusing to change its status");
+			expect(store.updateRun(dir, { status: stopped, endedAt: "t" }).status).toBe(stopped);
+			expect(new RunStore(root).readRun(dir).status).toBe(stopped);
+		}
 	});
 
 	test("E4 store level: a plain RunStore (never a runner store) cannot consume even with a valid binding", async () => {
