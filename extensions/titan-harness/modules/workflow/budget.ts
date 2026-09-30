@@ -227,9 +227,27 @@ export class BudgetScope {
  * never admit a call). A dimension no scope limits reserves the same amount (tracked, never refused).
  */
 export function reservationFor(scope: BudgetScope): BudgetAmount {
-	const usd = scope.declaredPerCall("usd") ?? usdToMicrosCeil(DEFAULT_PER_CALL_USD);
-	const tokens = scope.declaredPerCall("tokens") ?? DEFAULT_PER_CALL_TOKENS;
+	const usd = effectivePerCall(scope, "usd");
+	const tokens = effectivePerCall(scope, "tokens");
 	return { usdMicros: Math.max(1, usd), tokens: Math.max(1, tokens) };
+}
+
+const defaultPerCall = (dimension: BudgetDimension): number => (dimension === "usd" ? usdToMicrosCeil(DEFAULT_PER_CALL_USD) : DEFAULT_PER_CALL_TOKENS);
+
+/**
+ * The per-call worst case in `dimension`: the largest per_call_* declared on the chain, else the
+ * default — and, across every workflow boundary whose parent chain limits `dimension`, never below
+ * the PARENT's effective per-call (its declared per_call_*, else the default). So a child workflow
+ * declaring a tiny per_call under a parent that set a limit but no per_call still reserves the
+ * parent's default worst case per call (gate N3-09 r2 Fable N3).
+ */
+export function effectivePerCall(scope: BudgetScope, dimension: BudgetDimension): number {
+	let value = scope.declaredPerCall(dimension) ?? defaultPerCall(dimension);
+	for (const s of scope.chain()) {
+		if (s.kind !== "workflow" || !s.parent || !s.parent.limits(dimension)) continue;
+		value = Math.max(value, s.parent.declaredPerCall(dimension) ?? defaultPerCall(dimension));
+	}
+	return value;
 }
 
 export interface BudgetReservation {
@@ -424,8 +442,8 @@ export function waitForSettlement(scope: BudgetScope, signal?: AbortSignal): Pro
 
 /** The error a hard refusal raises before dispatch; the executor fails the node with retryable:false. */
 export class BudgetExceededError extends Error {
-	constructor(readonly refusal: BudgetRefusal) {
-		super(`budget exceeded: ${refusal.scope} remaining ${formatAmount(refusal.dimension, refusal.remaining)}, needed ${formatAmount(refusal.dimension, refusal.needed)}`);
+	constructor(readonly refusal: BudgetRefusal, detail?: string) {
+		super(`budget exceeded: ${refusal.scope} remaining ${formatAmount(refusal.dimension, refusal.remaining)}, needed ${formatAmount(refusal.dimension, refusal.needed)}${detail ? ` (${detail})` : ""}`);
 		this.name = "BudgetExceededError";
 	}
 }

@@ -353,6 +353,8 @@ function fakePi(dir: string, usd: number): string {
   const script = join(dir, "fake-pi.ts");
   writeFileSync(script, `
     const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+    // stands in for the per-turn guard's load-time "armed" record, so this child exercises the parent-side BACKSTOP only
+    if (process.env.TITAN_BUDGET_STATE_PATH) require("node:fs").writeFileSync(process.env.TITAN_BUDGET_STATE_PATH, JSON.stringify({ state: "armed" }));
     out({ type: "session", id: "s1" });
     let i = 0;
     const tick = () => { i++; out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "m" + i }], usage: { input: 10, output: 10, cost: { total: ${usd} } } } }); if (i < 50) setTimeout(tick, 30); };
@@ -497,43 +499,45 @@ describe("repair: in-flight hard cap (item 4, P6)", () => {
     expect(overSpendCap({ costUsd: 0, tokensIn: 60, tokensOut: 30 }, { tokens: 100 }, { tokens: 10 })).toBe(true);
   });
 
-  test("P6: a real runChild never exceeds the $1 cap: it is stopped before the message that would pass it", async () => {
+  test("P6: a real runChild (real guard) never exceeds the $1 cap: $0.40 turns, the third is clamped to what is left, the fourth is refused", async () => {
     const dir = scratch();
-    const script = fakePi(dir, 0.4);
-    const saved = process.argv[1];
-    process.argv[1] = script;
-    try {
-      const r = newRun("BUILDER", "stub/model");
-      await runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) });
-      expect(r.budgetHalted).toBe(true);
-      expect(r.status).toBe("aborted");
-      expect(r.stopReason).toBe("budget");
-      // $0.40, $0.80 — a third $0.40 message would reach $1.20, so the child is killed at $0.80 (not after 50 messages)
-      expect(Math.round(r.costUsd * 100)).toBe(80);
-      expect(r.costUsd).toBeLessThanOrEqual(1);
-      expect(usageProvenanceOf(r)).toBe("partial");
-    } finally {
-      process.argv[1] = saved;
-    }
+    const { script, ledger } = guardedPi(dir, PRICED, Array.from({ length: 50 }, () => 4000));
+    const r = newRun("BUILDER", "stub/model");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    const sent = sentOf(ledger);
+    expect(sent).toHaveLength(3);
+    expect(sent[2].maxTokens).toBeLessThan(4000);
+    expect(sum(sent)).toBeLessThanOrEqual(1);
+    expect(r.costUsd).toBeLessThanOrEqual(1);
+    expect(r.budgetRefusal).toMatchObject({ dimension: "usd" });
+    expect(usageProvenanceOf(r)).toBe("partial");
   });
 
-  test("P6: through the executor, the REAL agent runner + runChild under usd 1 / per_call 1 never spends past $1", async () => {
+  test("P6 backstop: a child whose guard is armed but whose spend still passes the cap is killed by the parent at the first message over it", async () => {
     const dir = scratch();
-    const script = fakePi(dir, 0.4);
-    const saved = process.argv[1];
-    process.argv[1] = script;
-    try {
+    const script = fakePi(dir, 0.4); // writes the armed record but bypasses the per-turn bound
+    const r = newRun("BUILDER", "stub/model");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    expect(r.budgetHalted).toBe(true);
+    expect(r.stopReason).toBe("budget");
+    expect(Math.round(r.costUsd * 100)).toBe(120); // killed at once, not after 50 messages; the overshoot is charged in full at settle
+  });
+
+  test("P6: through the executor, the REAL agent runner + runChild + guard under usd 1 / per_call 1 never spends past $1", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, Array.from({ length: 50 }, () => 4000));
+    await withFakePi(script, async () => {
       const h = harness();
       h.deps.agent = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild }) as any;
       const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc, { id: "b", prompt: "y", depends_on: ["a"], trigger_rule: "all_done" } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 1 } } });
-      // a: reserves $1, observed $0.80 when halted → settles max($0.80, $1) = $1 (partial); its retries and b are refused
+      expect(sum(sentOf(ledger))).toBeLessThanOrEqual(1);
+      // a: reserves $1; its guard refuses the turn that no longer fits → settles max(observed, $1) = $1 (partial); no retries; b is refused
       expect(settleOf(h)).toHaveLength(1);
       expect(settleOf(h)[0]).toMatchObject({ reservedUsdMicros: 1_000_000, chargedUsdMicros: 1_000_000, provenance: "partial" });
+      expect(r.nodes.a).toMatchObject({ status: "failed", attempts: 1 });
       expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0, overrunUsdMicros: 0 });
       expect(r.nodes.b.error).toBe("budget exceeded: workflow:t remaining $0, needed $1");
-    } finally {
-      process.argv[1] = saved;
-    }
+    });
   });
 
   test("an overrun is still charged in full and flagged", async () => {
@@ -944,5 +948,343 @@ describe("repair 2: worst-case admission across the chain (blocker 1)", () => {
     expect(warned.ok).toBe(true);
     expect(warned.warnings.some((w) => w.rule === "budget" && w.message.includes("budget.per_call_usd"))).toBe(true);
     expect(doc({ tokens: 1000 }).warnings.some((w) => w.message.includes("per_call_tokens"))).toBe(true);
+  });
+});
+
+// ═══ Repair round 3 (gate N3-09 r2 Astra 1, Fable N2/N3): a numeric bound before every paid model turn ═══
+
+import { existsSync } from "node:fs";
+import { BUDGET_GUARD_EXTENSION } from "../modules/child-runner.ts";
+import { BUDGET_REFUSED_EXIT, MIN_OUTPUT_TOKENS, PROVIDER_OVERHEAD_TOKENS, TurnBudgetGuard, planTurn, turnBudgetEnv, turnBudgetFromEnv, worstRates } from "../modules/turn-budget.ts";
+import { registerBudgetGuard } from "../../titan-budget-guard.ts";
+import { effectivePerCall } from "../modules/workflow/budget.ts";
+
+/** $100/M output (100 µ$/token), $1/M input: a 12,000-token answer costs $1.20. */
+const PRICED = { api: "anthropic-messages", provider: "stub", id: "priced", maxTokens: 32_000, cost: { input: 1, output: 100, cacheRead: 0.1, cacheWrite: 1.25 } };
+
+/**
+ * A stand-in `pi --mode json -p` child that loads the REAL guard from `--extension` (what runChild passes to a
+ * budgeted child) and drives an ADVERSARIAL provider: every turn it bills the full serialised payload as input
+ * and min(wanted, the payload's max_tokens) as output. Each request actually "sent" is appended to `ledger`.
+ */
+function guardedPi(dir: string, model: Record<string, unknown>, wants: number[], promptChars = 200): { script: string; ledger: string } {
+  const script = join(dir, "guarded-pi.ts");
+  const ledger = join(dir, "sent.jsonl");
+  writeFileSync(script, `
+    import { appendFileSync } from "node:fs";
+    const args = process.argv.slice(2);
+    const handlers: Record<string, Function[]> = {};
+    const pi = { on: (e: string, h: Function) => (handlers[e] ??= []).push(h) };
+    const at = args.indexOf("--extension");
+    if (at >= 0) (await import(args[at + 1])).default(pi);
+    const model = ${JSON.stringify(model)};
+    const wants = ${JSON.stringify(wants)};
+    const out = (o: unknown) => process.stdout.write(JSON.stringify(o) + "\\n");
+    out({ type: "session", id: "s1" });
+    let history = "x".repeat(${promptChars});
+    for (const want of wants) {
+      let payload: any = { model: model.id, max_tokens: model.maxTokens, stream: true, messages: [{ role: "user", content: history }] };
+      for (const h of handlers.before_provider_request ?? []) { const r = await h({ type: "before_provider_request", payload }, { model }); if (r !== undefined) payload = r; }
+      const input = Buffer.byteLength(JSON.stringify(payload));
+      const output = Math.min(want, payload.max_tokens ?? Infinity);
+      const cost = (input * model.cost.input + output * model.cost.output) / 1e6;
+      appendFileSync(${JSON.stringify(ledger)}, JSON.stringify({ maxTokens: payload.max_tokens, input, output, cost }) + "\\n");
+      const message = { role: "assistant", content: [{ type: "text", text: "m" }], usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: cost } }, stopReason: "stop" };
+      for (const h of handlers.message_end ?? []) await h({ type: "message_end", message });
+      out({ type: "message_end", message });
+      history += "y".repeat(Math.min(output, 2000));
+    }
+  `);
+  return { script, ledger };
+}
+const sentOf = (ledger: string): Array<{ maxTokens: number; input: number; output: number; cost: number }> => (existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+const sum = (rows: Array<{ cost: number }>) => rows.reduce((a, r) => a + r.cost, 0);
+
+async function withFakePi<T>(script: string, fn: () => Promise<T>): Promise<T> {
+  const saved = process.argv[1];
+  process.argv[1] = script;
+  try {
+    return await fn();
+  } finally {
+    process.argv[1] = saved;
+  }
+}
+
+describe("repair 3: planTurn bounds each turn before it is sent", () => {
+  test("a first turn whose max output would cost $1.20 under a $1 cap is CLAMPED so input bound × input rate + cap × output rate ≤ $1", () => {
+    const payload = { model: "priced", max_tokens: 12_000, messages: [{ role: "user", content: "hello" }] };
+    const plan = planTurn(PRICED, payload, { usdMicros: 1_000_000 });
+    if (!plan.ok) throw new Error(plan.reason);
+    const inputBound = Buffer.byteLength(JSON.stringify(payload)) + PROVIDER_OVERHEAD_TOKENS;
+    expect(plan.inputBound).toBe(inputBound);
+    // highest input rate = max(input, cacheRead, cacheWrite) = 1.25 µ$/token (no 1h TTL requested)
+    expect(plan.maxOutputTokens).toBe(Math.floor((1_000_000 - Math.ceil(inputBound * 1.25)) / 100));
+    expect((plan.payload as any).max_tokens).toBe(plan.maxOutputTokens);
+    expect(plan.worst.usdMicros).toBeLessThanOrEqual(1_000_000);
+    expect(payload.max_tokens).toBe(12_000); // the caller's payload is not mutated
+    // a cap that already fits is never raised
+    const small = planTurn(PRICED, { ...payload, max_tokens: 100 }, { usdMicros: 1_000_000 });
+    expect(small.ok && (small.payload as any).max_tokens).toBe(100);
+  });
+
+  test("refusals: remainder below input + minimum output; unknown pricing under USD; unknown API; no model; tokens", () => {
+    const payload = { max_tokens: 1000, messages: [{ role: "user", content: "x".repeat(5000) }] };
+    const low = planTurn(PRICED, payload, { usdMicros: 7000 });
+    expect(low).toMatchObject({ ok: false, dimension: "usd", remaining: 7000 });
+    expect(planTurn({ ...PRICED, cost: { input: 0, output: 0 } }, payload, { usdMicros: 1_000_000 })).toMatchObject({ ok: false, dimension: "usd" });
+    expect(planTurn({ ...PRICED, cost: undefined }, payload, { usdMicros: 1_000_000 })).toMatchObject({ ok: false });
+    expect(planTurn({ ...PRICED, api: "some-new-api" }, payload, { usdMicros: 1_000_000 })).toMatchObject({ ok: false });
+    expect(planTurn(undefined, payload, { usdMicros: 1_000_000 })).toMatchObject({ ok: false });
+    // token caps: input bound alone over the remainder → refused; otherwise output clamped to remainder − input bound
+    const bound = Buffer.byteLength(JSON.stringify(payload)) + PROVIDER_OVERHEAD_TOKENS;
+    expect(planTurn(PRICED, payload, { tokens: bound + MIN_OUTPUT_TOKENS - 1 })).toMatchObject({ ok: false, dimension: "tokens" });
+    const fits = planTurn(PRICED, payload, { tokens: bound + 300 });
+    expect(fits.ok && [fits.maxOutputTokens, fits.worst.tokens]).toEqual([300, bound + 300]);
+    // an unpriced model under a TOKEN-only cap is still bounded (tokens need no price)
+    expect(planTurn({ ...PRICED, cost: { input: 0, output: 0 } }, payload, { tokens: 100_000 }).ok).toBe(true);
+  });
+
+  test("thinking and per-API output fields: Anthropic budget_tokens kept below max_tokens; Gemini thinking bounded outside the cap; OpenAI Responses", () => {
+    const anth = planTurn(PRICED, { max_tokens: 32_000, thinking: { type: "enabled", budget_tokens: 20_000 }, messages: [] }, { usdMicros: 500_000 });
+    if (!anth.ok) throw new Error(anth.reason);
+    expect((anth.payload as any).thinking.budget_tokens).toBe(anth.maxOutputTokens - 1);
+    const tiny = planTurn(PRICED, { max_tokens: 32_000, thinking: { type: "enabled", budget_tokens: 20_000 }, messages: [] }, { usdMicros: 60_000 });
+    expect(tiny.ok && (tiny.payload as any).thinking).toBeUndefined(); // below Anthropic's 1024 minimum → thinking off for the turn
+    const gem = planTurn({ ...PRICED, api: "google-generative-ai" }, { model: "g", contents: [], config: { maxOutputTokens: 60_000, thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" } } }, { usdMicros: 1_000_000 });
+    if (!gem.ok) throw new Error(gem.reason);
+    const cfg = (gem.payload as any).config;
+    expect(cfg.thinkingConfig.thinkingLevel).toBeUndefined();
+    expect(cfg.maxOutputTokens + cfg.thinkingConfig.thinkingBudget).toBeLessThanOrEqual(Math.floor((1_000_000 - Math.ceil(gem.inputBound * 1.25)) / 100));
+    expect(gem.worst.usdMicros).toBeLessThanOrEqual(1_000_000);
+    const resp = planTurn({ ...PRICED, api: "openai-codex-responses" }, { model: "o", input: [], max_output_tokens: undefined }, { usdMicros: 100_000 });
+    expect(resp.ok && (resp.payload as any).max_output_tokens).toBe((resp as any).maxOutputTokens); // the model's maxTokens is the ceiling when the payload names none
+    // a 1h cache TTL in the payload doubles the worst input rate (pi-ai bills 1h writes at 2× input)
+    expect(worstRates(PRICED, true)!.input).toBe(2);
+    expect(worstRates(PRICED, false)!.input).toBe(1.25);
+  });
+});
+
+describe("repair 3: the child-side guard", () => {
+  const fakeExt = () => {
+    const handlers = new Map<string, Function>();
+    return { pi: { on: (e: string, h: Function) => handlers.set(e, h) } as any, handlers };
+  };
+
+  test("inactive outside a budgeted child; env parsing is strict; malformed values refuse every turn", () => {
+    expect(registerBudgetGuard(fakeExt().pi, { env: { [BUDGET_STATE_ENV_KEY]: "/tmp/x" }, allowReload: true })).toBeUndefined();
+    expect(registerBudgetGuard(fakeExt().pi, { env: { TITAN_HARNESS_CHILD: "1" }, allowReload: true })).toBeUndefined();
+    expect(turnBudgetFromEnv(turnBudgetEnv({ usdMicros: 1_000_000.9, tokens: 5 }, "/s"))).toEqual({ active: true, usdMicros: 1_000_000, tokens: 5, statePath: "/s", problems: [] });
+    expect(turnBudgetFromEnv({ TITAN_BUDGET_USD_MICROS: "1e6" }).problems).toHaveLength(1);
+    const dir = scratch();
+    const codes: number[] = [];
+    const ext = fakeExt();
+    registerBudgetGuard(ext.pi, { env: { TITAN_HARNESS_CHILD: "1", TITAN_BUDGET_USD_MICROS: "-5", TITAN_BUDGET_STATE_PATH: join(dir, "s.json") }, exit: (c) => codes.push(c), allowReload: true });
+    ext.handlers.get("before_provider_request")!({ payload: { max_tokens: 10 } }, { model: PRICED });
+    expect(codes).toEqual([BUDGET_REFUSED_EXIT]);
+    expect(JSON.parse(readFileSync(join(dir, "s.json"), "utf8"))).toMatchObject({ state: "refused" });
+  });
+
+  test("a growing message never pushes spend over the cap: $0.10 then a $1.10 attempt under $1 — the second turn is clamped to what is left", () => {
+    const guard = new TurnBudgetGuard({ usdMicros: 1_000_000 });
+    let spentMicros = 0;
+    for (const want of [1000, 11_000, 11_000, 11_000]) {
+      const payload = { max_tokens: 32_000, messages: [{ role: "user", content: "q".repeat(300) }] };
+      const plan = guard.beforeRequest(PRICED, payload);
+      if (!plan.ok) break;
+      const input = Buffer.byteLength(JSON.stringify(plan.payload));
+      const output = Math.min(want, (plan.payload as any).max_tokens);
+      const cost = input * 1 + output * 100;
+      spentMicros += cost;
+      guard.afterTurn({ input, output, cacheRead: 0, cacheWrite: 0, cost: { total: cost / 1e6 } }, "stop");
+    }
+    expect(spentMicros).toBeLessThanOrEqual(1_000_000);
+    expect(guard.turns).toBeGreaterThanOrEqual(2);
+    expect(guard.refusal).toMatchObject({ ok: false, dimension: "usd" }); // the remainder ran out: the next turn is refused, never sent
+  });
+
+  test("tokens: a growing conversation never passes a 5,000-token cap", () => {
+    const guard = new TurnBudgetGuard({ tokens: 5000 });
+    let used = 0;
+    for (const want of [500, 20_000, 20_000]) {
+      const plan = guard.beforeRequest(PRICED, { max_tokens: 32_000, messages: [{ role: "user", content: "q".repeat(200) }] });
+      if (!plan.ok) break;
+      const input = Buffer.byteLength(JSON.stringify(plan.payload));
+      const output = Math.min(want, (plan.payload as any).max_tokens);
+      used += input + output;
+      guard.afterTurn({ input, output, cost: { total: 0 } }, "stop");
+    }
+    expect(used).toBeLessThanOrEqual(5000);
+    expect(guard.refusal).toMatchObject({ dimension: "tokens" });
+  });
+
+  test("a turn with no reported usage, an errored turn, or tokens at $0 under a USD cap is charged its worst case", () => {
+    const g = new TurnBudgetGuard({ usdMicros: 1_000_000 });
+    const p = g.beforeRequest(PRICED, { max_tokens: 100, messages: [] });
+    if (!p.ok) throw new Error(p.reason);
+    g.afterTurn(undefined);
+    expect(g.spent.usdMicros).toBe(p.worst.usdMicros);
+    const e = g.beforeRequest(PRICED, { max_tokens: 100, messages: [] });
+    g.afterTurn({ input: 1, output: 1, cost: { total: 0.000001 } }, "error");
+    expect(g.spent.usdMicros).toBe(2 * (e as any).worst.usdMicros);
+    const z = g.beforeRequest(PRICED, { max_tokens: 100, messages: [] });
+    g.afterTurn({ input: 50, output: 50, cost: { total: 0 } }, "stop");
+    expect(g.spent.usdMicros).toBe(3 * (z as any).worst.usdMicros);
+    // a turn whose end never arrived is charged its worst case before the next is planned
+    const before = g.spent.usdMicros;
+    const w = g.beforeRequest(PRICED, { max_tokens: 100, messages: [] });
+    g.beforeRequest(PRICED, { max_tokens: 100, messages: [] });
+    expect(g.spent.usdMicros).toBe(before + (w as any).worst.usdMicros);
+  });
+
+  test("compaction is cancelled in a budgeted child (summaries do not pass through before_provider_request)", () => {
+    const ext = fakeExt();
+    registerBudgetGuard(ext.pi, { env: { TITAN_HARNESS_CHILD: "1", TITAN_BUDGET_USD_MICROS: "5" }, exit: () => {}, allowReload: true });
+    expect(ext.handlers.get("session_before_compact")!({})).toEqual({ cancel: true });
+  });
+});
+const BUDGET_STATE_ENV_KEY = "TITAN_BUDGET_STATE_PATH";
+
+describe("repair 3: real runChild + the real guard, adversarial provider", () => {
+  test("the guard ships next to the harness and runChild passes it to a budgeted child only", () => {
+    expect(existsSync(BUDGET_GUARD_EXTENSION)).toBe(true);
+  });
+
+  test("first message over the cap ($1.20 wanted, $1 cap): clamped BEFORE the request is sent; spend ≤ $1; the next turn is refused (exit 86, hard refusal)", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [12_000, 12_000]);
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    const sent = sentOf(ledger);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].maxTokens).toBeLessThan(12_000);
+    expect(sum(sent)).toBeLessThanOrEqual(1);
+    expect(r.costUsd).toBeLessThanOrEqual(1);
+    expect([r.exitCode, r.stderr]).toEqual([BUDGET_REFUSED_EXIT, expect.anything()]);
+    expect(r.budgetRefusal).toMatchObject({ dimension: "usd" });
+    expect(r.stopReason).toBe("budget_refused");
+  });
+
+  test("a growing message ($0.10 then a $1.10 attempt) never pushes a real child over $1", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [1000, 11_000, 11_000]);
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    const sent = sentOf(ledger);
+    expect(sent.length).toBeGreaterThanOrEqual(2);
+    expect(sent[0].cost).toBeLessThan(0.11);
+    expect(sent[1].maxTokens).toBeLessThan(11_000);
+    expect(sum(sent)).toBeLessThanOrEqual(1);
+  });
+
+  test("tokens: a real child under a 20,000-token cap never uses more than 20,000 tokens", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [2000, 50_000, 50_000]);
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ tokens: 20_000 }) }));
+    const sent = sentOf(ledger);
+    expect(sent.reduce((a, s) => a + s.input + s.output, 0)).toBeLessThanOrEqual(20_000);
+    expect(r.tokensIn + r.tokensOut).toBeLessThanOrEqual(20_000);
+    expect(r.budgetRefusal).toMatchObject({ dimension: "tokens" });
+  });
+
+  test("an unbudgeted child gets no guard (no --extension, no budget env): the provider's own cap applies", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [12_000]);
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000 }));
+    expect(sentOf(ledger)[0]).toMatchObject({ maxTokens: 32_000, output: 12_000 });
+    expect(r.budgetStatePath).toBeUndefined();
+  });
+
+  test("a budgeted child that reports usage without its guard armed is killed at its first message (unguarded backstop)", async () => {
+    const dir = scratch();
+    const script = join(dir, "unguarded.ts");
+    writeFileSync(script, `
+      const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+      let i = 0;
+      const tick = () => { i++; out({ type: "message_end", message: { role: "assistant", content: [], usage: { input: 1, output: 1, cost: { total: 0.01 } } } }); if (i < 50) setTimeout(tick, 30); };
+      tick();
+    `);
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    expect(r.budgetHalted).toBe(true);
+    expect(r.budgetUnguarded).toBe(true);
+    expect(r.costUsd).toBeLessThan(0.05);
+  });
+});
+
+describe("repair 3: through the executor (real createAgentRunner + runChild + guard)", () => {
+  test("usd 1 / per_call 1, a $1.20 first message: clamped, spend ≤ $1, the node fails with a hard non-retryable budget refusal", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [12_000, 12_000]);
+    await withFakePi(script, async () => {
+      const h = harness();
+      h.deps.agent = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild }) as any;
+      const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 1 } } });
+      expect(sum(sentOf(ledger))).toBeLessThanOrEqual(1);
+      expect(r.nodes.a).toMatchObject({ status: "failed", attempts: 1 });
+      expect(r.nodes.a.error).toContain("(model turn)");
+      expect(r.budgetRefused).toMatchObject({ transient: false, dimension: "usd" });
+      expect(r.budget).toMatchObject({ spentUsdMicros: 1_000_000, reservedUsdMicros: 0, overrunUsdMicros: 0 });
+      expect(data(h, "budget.refused")[0]).toMatchObject({ turn: true });
+    });
+  });
+
+  test("two concurrent children near a shared $1 cap (per_call $0.50 each) never overshoot combined", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [12_000, 12_000, 12_000]);
+    await withFakePi(script, async () => {
+      const h = harness();
+      h.deps.agent = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild }) as any;
+      const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc, { id: "b", prompt: "y", retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 0.5 } } });
+      const sent = sentOf(ledger);
+      expect(sent.length).toBeGreaterThanOrEqual(2); // both children really ran
+      expect(sum(sent)).toBeLessThanOrEqual(1);
+      expect(data(h, "budget.reserve")).toHaveLength(2);
+      expect(r.budget!.spentUsdMicros as number).toBeLessThanOrEqual(1_000_000);
+      expect(r.budget).toMatchObject({ reservedUsdMicros: 0, overrunUsdMicros: 0 });
+    });
+  });
+
+  test("unknown pricing: the first turn is refused before any request is sent; settled at $0 (not-dispatched); hard refusal", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, { ...PRICED, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, [100]);
+    await withFakePi(script, async () => {
+      const h = harness();
+      h.deps.agent = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild }) as any;
+      const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 3, delay_ms: 0 } } as NodeDoc], { titan: { budget: { usd: 1, per_call_usd: 1 } } });
+      expect(sentOf(ledger)).toEqual([]);
+      expect(r.nodes.a).toMatchObject({ status: "failed", attempts: 1 });
+      expect(r.nodes.a.error).toContain("no input/output pricing");
+      expect(settleOf(h)[0]).toMatchObject({ chargedUsdMicros: 0, provenance: "not-dispatched" });
+    });
+  });
+});
+
+describe("repair 3 (Fable r2 N3): across a workflow boundary a child's per_call is floored at the parent's effective per_call", () => {
+  test("parent usd 25 with no per_call (default $5), child per_call $0.001 → the child reserves $5", async () => {
+    const store = new RunStore(scratch());
+    const child = loaded([{ id: "c1", prompt: "one" } as NodeDoc], { name: "sub", titan: { budget: { per_call_usd: 0.001 } } });
+    const childRuns: Harness[] = [];
+    const runWorkflow = async (_n: string, _i: Record<string, unknown>, opts?: RunWorkflowOptions) => {
+      const ch = harness({ store });
+      childRuns.push(ch);
+      return executeWorkflow(child, ch.deps, { parentBudget: opts?.parentBudget });
+    };
+    const h = harness({ store, runWorkflow });
+    await run(h, [{ id: "sub", workflow: { name: "sub" } } as NodeDoc], { titan: { budget: { usd: 25 } } });
+    expect(data(childRuns[0], "budget.reserve")[0]).toMatchObject({ usdMicros: 5_000_000 });
+  });
+
+  test("the floor applies only when the parent chain limits the dimension; a root workflow keeps its own per_call", () => {
+    const root = new BudgetScope("wf", { usdMicros: 25_000_000 }, undefined, { kind: "workflow" });
+    const sub = root.child("wf/node:sub").child("wf/node:sub/sub", {}, { kind: "workflow", perCall: { usdMicros: 1000 } });
+    expect(effectivePerCall(sub.child("n"), "usd")).toBe(5_000_000);
+    expect(effectivePerCall(sub.child("n"), "tokens")).toBe(DEFAULT_PER_CALL_TOKENS); // tokens: parent limits none, child declares none → default
+    const free = new BudgetScope("wf", {}, undefined, { kind: "workflow" });
+    const sub2 = free.child("n").child("sub", { usdMicros: 1_000_000 }, { kind: "workflow", perCall: { usdMicros: 1000 } });
+    expect(effectivePerCall(sub2.child("n"), "usd")).toBe(1000); // the parent limits nothing: no floor
+    const own = new BudgetScope("wf", { usdMicros: 1_000_000 }, undefined, { kind: "workflow", perCall: { usdMicros: 1000 } });
+    expect(effectivePerCall(own.child("n"), "usd")).toBe(1000);
   });
 });

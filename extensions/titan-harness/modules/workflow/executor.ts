@@ -144,6 +144,12 @@ export interface AgentResult {
 	usage: { tokensIn: number; tokensOut: number; costUsd: number; tpsSeconds: number };
 	/** How far `usage` can be trusted for budget settlement (budget.ts UsageProvenance); absent = "complete" (or "partial" for an interrupted call). */
 	usageProvenance?: UsageProvenance;
+	/**
+	 * Workflow budgets: the child's per-turn guard refused a model turn before sending it (its worst case could not
+	 * fit what the call had left, or could not be bounded at all). The executor fails the node with a hard,
+	 * non-retryable budget refusal.
+	 */
+	budgetRefusal?: { reason: string; dimension?: "usd" | "tokens"; remaining?: number; needed?: number };
 	error?: string;
 	toolCalls: number;
 	model?: string;
@@ -788,7 +794,28 @@ export async function executeWorkflow(loaded: LoadedWorkflow, deps: WorkflowRunt
 				safely(`${node.id}: agent.end record`, () => log("agent.end", { nodeId: node.id, agentId, ok: false, error: asString(error), aborted }, agentId));
 				throw aborted ? new AbortError(callSignal.reason) : error;
 			}
-			settleBudget(actualOf(result, "complete"), { ok: result.ok });
+			settleBudget(actualOf(result, "complete"), { ok: result.ok, ...(result.budgetRefusal ? { budgetRefusal: result.budgetRefusal } : {}) });
+			if (reservation && result.budgetRefusal) {
+				// The child's guard refused a model turn before sending it: a hard refusal, like one before dispatch.
+				const turn = result.budgetRefusal;
+				const dimension = turn.dimension ?? (reservation.scope.limits("usd") ? "usd" : "tokens");
+				const refusal: BudgetRefusal = {
+					scope: `${reservation.scope.label} (model turn)`,
+					dimension,
+					limit: dimension === "usd" ? reservation.amount.usdMicros : reservation.amount.tokens,
+					remaining: Math.max(0, turn.remaining ?? 0),
+					needed: Math.max(0, turn.needed ?? 0),
+					transient: false,
+				};
+				const error = new BudgetExceededError(refusal, turn.reason);
+				attemptState.budgetError ??= error;
+				attemptState.abort(error);
+				safely(`${node.id}: budget.refused record`, () => log("budget.refused", { nodeId: node.id, role: req.role, label: req.label, ...refusal, turn: true, reason: turn.reason, error: error.message }, agentId));
+				safely(`${node.id}: agent record`, () => store.upsertAgent(runDir, { agentId, state: "failed" }));
+				safely(`${node.id}: agent.end record`, () => log("agent.end", { nodeId: node.id, agentId, ok: false, error: error.message, aborted: false }, agentId));
+				safely(`${node.id}: budget refusal notice`, () => deps.notify(`${node.id}: ${error.message}`, "error"));
+				throw error;
+			}
 			const usage = result.usage ?? { tokensIn: 0, tokensOut: 0, costUsd: 0, tpsSeconds: 0 };
 			store.upsertAgent(runDir, {
 				agentId,

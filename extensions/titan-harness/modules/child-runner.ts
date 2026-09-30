@@ -14,6 +14,32 @@ import { performance } from "node:perf_hooks";
 import { briefArg, runOk, type AgentRun } from "./runtime.ts";
 import { childToolsFor, readStackSettings, STACK_CHILD_ENV, subagentCapHint } from "./stack-config.ts";
 import { DynamicSemaphore } from "./concurrency.ts";
+import { BUDGET_REFUSED_EXIT, turnBudgetEnv } from "./turn-budget.ts";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+
+const MODULE_DIR: string = typeof __dirname !== "undefined" && __dirname ? __dirname : path.dirname(fileURLToPath(import.meta.url));
+/** The child-side per-turn budget guard (extensions/titan-budget-guard.ts), loaded into every budgeted child with --extension. */
+export const BUDGET_GUARD_EXTENSION = path.resolve(MODULE_DIR, "..", "..", "titan-budget-guard.ts");
+
+/** What a budgeted child's guard wrote to its state file (turn-budget.ts TurnBudgetGuard.snapshot). */
+export interface BudgetGuardState {
+	state: "armed" | "turn" | "refused";
+	spent?: { usdMicros: number; tokens: number };
+	left?: { usdMicros?: number; tokens?: number };
+	turns?: number;
+	refusal?: { reason: string; dimension?: "usd" | "tokens"; remaining?: number; needed?: number };
+}
+
+export function readBudgetGuardState(statePath: string | undefined): BudgetGuardState | undefined {
+	if (!statePath) return undefined;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+		return parsed && typeof parsed === "object" && typeof parsed.state === "string" ? (parsed as BudgetGuardState) : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 const KILL_GRACE_MS = 5_000; // SIGTERM → SIGKILL escalation window
 
@@ -70,6 +96,14 @@ export function overSpendCap(run: Pick<AgentRun, "costUsd" | "tokensIn" | "token
 	return false;
 }
 
+/** True only when observed spend has PASSED `cap` in a capped dimension (the guarded-child backstop). */
+export function overSpendCapStrict(run: Pick<AgentRun, "costUsd" | "tokensIn" | "tokensOut">, cap: SpendCap | undefined): boolean {
+	if (!cap) return false;
+	if (typeof cap.usdMicros === "number" && usdMicrosOf(run.costUsd) > cap.usdMicros) return true;
+	if (typeof cap.tokens === "number" && run.tokensIn + run.tokensOut > cap.tokens) return true;
+	return false;
+}
+
 /** USD → micro-USD rounded up (budget.ts usdToMicrosCeil; duplicated to keep child-runner free of workflow imports). */
 const usdMicrosOf = (usd: number): number => Math.max(0, Math.ceil(Math.round(usd * 1e9) / 1e3));
 
@@ -109,9 +143,27 @@ export function runChild(opts: {
 	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
 	extraTools?: string[]; // extension tools appended AFTER the /stack policy (structured output v2: `submit_result` must survive subagentTools=off and --no-tools)
 	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
-	spendCap?: () => SpendCap | undefined; // workflow budgets: re-read after every usage update; spend at the cap, or one more message of the largest size seen would pass it, kills the child before its next turn (run.budgetHalted = true)
+	spendCap?: () => SpendCap | undefined; // workflow budgets: read at spawn and handed to the child's per-turn guard (titan-budget-guard.ts bounds every model turn BEFORE it is sent); re-read after every usage update as the parent-side backstop kill (run.budgetHalted = true)
 }): Promise<AgentRun> {
 	const run = opts.run;
+	// Workflow budgets: the child-side guard. The cap at spawn is what this child may spend (its reservation, held
+	// exclusively in every scope); the guard clamps each model turn's output cap so the turn's worst case fits, or
+	// refuses the turn before the request is sent. A cap that cannot be read refuses the call before spawn.
+	let guardEnv: Record<string, string> = {};
+	let guardArgs: string[] = [];
+	if (opts.spendCap) {
+		let cap: SpendCap | undefined;
+		try {
+			cap = opts.spendCap();
+		} catch {
+			cap = { usdMicros: 0, tokens: 0 };
+		}
+		if (cap && (cap.usdMicros !== undefined || cap.tokens !== undefined)) {
+			run.budgetStatePath = path.join(opts.sessionDir, `budget-guard-${randomUUID()}.json`);
+			guardEnv = turnBudgetEnv(cap, run.budgetStatePath);
+			guardArgs = ["--extension", BUDGET_GUARD_EXTENSION];
+		}
+	}
 	run.thinking = opts.thinking;
 	// Children load the host's extensions so extension-registered providers (for
 	// example antigravity/*) resolve inside them. Recursion is guarded by the
@@ -130,6 +182,7 @@ export function runChild(opts: {
 		opts.thinking,
 		"--model",
 		run.model,
+		...guardArgs,
 	];
 	// Session identity, in precedence order: fork the host > resume an earlier fork > pinned per-role id.
 	if (opts.fork) args.push("--fork", opts.fork);
@@ -154,7 +207,7 @@ export function runChild(opts: {
 	args.push(opts.prompt);
 
 	return childSlots.acquire({ priority: opts.priority, signal: opts.signal }).then(
-		(lease) => runChildWithLease(opts, args, lease),
+		(lease) => runChildWithLease(opts, args, lease, guardEnv),
 		() => {
 			// Aborted while queued behind the cap: settle without spawning.
 			run.notDispatched = true;
@@ -168,7 +221,7 @@ export function runChild(opts: {
 	);
 }
 
-function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[], lease: { release(): void }): Promise<AgentRun> {
+function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[], lease: { release(): void }, guardEnv: Record<string, string> = {}): Promise<AgentRun> {
 	const run = opts.run;
 	return new Promise<AgentRun>((resolve) => {
 		const started = Date.now();
@@ -217,10 +270,21 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				/* the watchdog never breaks a child */
 			}
 		};
-		// Workflow budgets: a child at its cap, or one message short of passing it, is killed at once (not at a tool boundary).
+		// Workflow budgets, parent-side BACKSTOP (the child's guard bounds every turn before it is sent): a child at
+		// its cap, or one message short of passing it, is killed at once (not at a tool boundary). A budgeted child
+		// that reports usage without its guard armed (the guard writes its state file at load, before any turn) is
+		// unguarded and is killed too.
 		const largestMessage = { usdMicros: 0, tokens: 0 };
+		let guardArmed = !run.budgetStatePath;
 		const checkSpend = () => {
 			if (!opts.spendCap || run.budgetHalted || closed) return;
+			if (!guardArmed) guardArmed = readBudgetGuardState(run.budgetStatePath) !== undefined;
+			if (!guardArmed) {
+				run.budgetHalted = true;
+				run.budgetUnguarded = true;
+				killChild();
+				return;
+			}
 			let cap: SpendCap | undefined;
 			try {
 				cap = opts.spendCap();
@@ -230,7 +294,9 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				killChild();
 				return;
 			}
-			if (overSpendCap(run, cap, largestMessage)) {
+			// With the guard armed every turn was bounded before it was sent, so the backstop only fires on a real
+			// overshoot (observed > cap). The look-ahead heuristic would race the guard's own refusal.
+			if (run.budgetStatePath ? overSpendCapStrict(run, cap) : overSpendCap(run, cap, largestMessage)) {
 				run.budgetHalted = true;
 				killChild();
 			}
@@ -266,7 +332,9 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				if (msg.stopReason) run.stopReason = msg.stopReason;
 				if (msg.errorMessage) run.errorMessage = msg.errorMessage;
 				if (msg.usage) {
-					run.usageSeen = true;
+					// Only a real reading counts as usage: children emit an opening message_end whose usage fields are all null.
+					const u = msg.usage;
+					if ([u.input, u.output, u.cacheRead, u.cacheWrite, u.cost?.total].some((v) => typeof v === "number" && Number.isFinite(v) && v > 0)) run.usageSeen = true;
 					const before = { usdMicros: usdMicrosOf(run.costUsd), tokens: run.tokensIn + run.tokensOut };
 					// Prompt tokens = input + cacheRead + cacheWrite (pi's own definition, see
 					// core/cache-stats.ts). cacheWrite is NOT optional accounting: on a cold
@@ -337,10 +405,21 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 				run.status = "aborted";
 				run.stopReason = "preempted";
 			}
+			// The child's guard refused a model turn (the request was never sent): a hard budget refusal.
+			const guard = readBudgetGuardState(run.budgetStatePath);
+			if (guard) run.budgetGuard = guard;
+			if (run.budgetStatePath && (guard?.state === "refused" || run.exitCode === BUDGET_REFUSED_EXIT)) {
+				run.budgetRefusal = guard?.refusal ?? { reason: `child exited ${BUDGET_REFUSED_EXIT} (budget refusal) without a readable guard state` };
+				run.status = "failed";
+				run.stopReason = "budget_refused";
+				run.errorMessage = `budget refused a model turn: ${run.budgetRefusal.reason}`;
+			}
 			if (run.budgetHalted) {
 				run.status = "aborted";
 				run.stopReason = "budget";
-				run.errorMessage = "stopped: observed spend exceeded the workflow budget's in-flight cap";
+				run.errorMessage = run.budgetUnguarded
+					? "stopped: a budgeted child reported usage without its per-turn budget guard armed"
+					: "stopped: observed spend exceeded the workflow budget's in-flight cap";
 			}
 			run.streamText = "";
 			run.streamThinking = "";
@@ -353,7 +432,7 @@ function runChildWithLease(opts: Parameters<typeof runChild>[0], args: string[],
 			detached: process.platform !== "win32", // own process group so cancellation reaches tool/bash descendants
 			stdio: ["ignore", "pipe", "pipe"],
 			// Children still make their real model API calls — this only skips startup chores.
-			env: { ...process.env, ...(opts.env ?? {}), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" },
+			env: { ...process.env, ...(opts.env ?? {}), ...guardEnv, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", [STACK_CHILD_ENV]: "1" },
 		});
 
 		// Line-buffer stdout: events arrive one JSON object per line, possibly split across chunks.

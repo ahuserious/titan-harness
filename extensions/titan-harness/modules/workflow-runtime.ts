@@ -124,8 +124,10 @@ const asThinking = (value: string | undefined): Thinking => (THINKING_ORDER.incl
  */
 export function usageProvenanceOf(run: AgentRun, threw = false): UsageProvenance {
 	if (run.notDispatched) return "not-dispatched";
+	// The child's per-turn guard refused its FIRST model turn: no request was ever sent, so nothing was spent.
+	if (run.budgetRefusal && run.budgetGuard?.turns === 0 && !run.usageSeen) return "not-dispatched";
 	if (!run.usageSeen) return "none";
-	const interrupted = threw || run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || run.exitCode !== 0;
+	const interrupted = threw || run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || !!run.budgetRefusal || run.exitCode !== 0;
 	return interrupted ? "partial" : "complete";
 }
 
@@ -137,9 +139,10 @@ export function resultOf(run: AgentRun): AgentResult {
 		text: run.text,
 		sessionRef: run.sessionRef,
 		usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds },
-		error: ok ? undefined : run.budgetHalted ? "stopped: budget in-flight cap exceeded" : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
+		error: ok ? undefined : run.budgetRefusal ? `budget refused a model turn: ${run.budgetRefusal.reason}` : run.budgetHalted ? "stopped: budget in-flight cap exceeded" : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
 		toolCalls: run.toolCalls,
 		model: run.model,
+		...(run.budgetRefusal ? { budgetRefusal: run.budgetRefusal } : {}),
 	};
 }
 

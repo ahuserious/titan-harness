@@ -29,7 +29,15 @@ Scopes form a chain: the node's scope, then the workflow's scope (`titan.budget`
 2. **Refuse or wait.** A call is refused when it would exceed a scope's `limit − spent − reserved`:
    - If settling the in-flight calls could make room (`spent + needed ≤ limit`), the call waits for them (`budget.wait`) and then retries the reservation.
    - Otherwise the refusal is hard. The node fails with `budget exceeded: <scope> remaining X, needed Y`, `retryable: false`, and a `budget.refused` event. The agent is never called.
-3. **In-flight cap.** Every budgeted call carries a live cap: min(its reservation, reservation + what the chain has left). The child runner kills the child as soon as its observed spend reaches the cap, or as soon as one more message the size of the largest it has sent would pass the cap. So a child whose messages do not grow never spends past its reservation. A watchdog never pre-empts a budgeted call.
+3. **Per-turn bound in the child (the hard cap).** Every budgeted call carries a live cap: min(its reservation, reservation + what the chain has left). `runChild` reads it at spawn, passes it to the child as `TITAN_BUDGET_USD_MICROS` / `TITAN_BUDGET_TOKENS`, and loads `extensions/titan-budget-guard.ts` with `--extension`. On Pi's `before_provider_request` hook, before every paid model turn, the guard (`modules/turn-budget.ts`) computes the turn's worst case: an input bound (the UTF-8 byte length of the serialised payload plus 1024 tokens of provider overhead, which is never below the billed input) × the model's highest input rate (input, cache read, cache write, and 2× input when the payload asks for a 1h cache TTL), plus the payload's output cap × the output rate. It clamps the output cap, and any thinking budget, so the worst case fits what the child has left. The cap is never raised. The turn is refused before the request is sent in these cases:
+   - Even 16 output tokens cannot fit.
+   - The model has no input/output pricing and a USD cap applies.
+   - The API's output-cap field is unknown.
+   - The payload cannot be serialised.
+
+   A refused turn exits the child with code 86. The parent records it as a hard, non-retryable budget refusal (`budget.refused` with `turn: true`). If the first turn was refused, no request was sent and the call settles at $0. After each turn the guard lowers the remainder by the reported usage. It charges the turn's worst case instead when a turn reports no usage, errors mid-stream, or reports tokens at $0 under a USD cap. Compaction is cancelled in a budgeted child, because summary calls do not pass through the hook. The reservation is held exclusively in every scope, so concurrent children can never spend the same remainder.
+
+   The parent keeps a kill as a backstop. It kills a budgeted child that reports usage before its guard wrote its "armed" state file, and a guarded child whose observed spend passes the cap. A watchdog never pre-empts a budgeted call.
 4. **Settle after the call.** The charge is the child's reported `usage.costUsd` and `tokensIn + tokensOut`:
    - A dimension the child did not report (missing or non-finite) is charged at the full reservation, never zero.
    - A charge above the reservation is charged in full and flagged with a `budget.overrun` event and a warning.
@@ -59,6 +67,7 @@ Every dispatched call ends in exactly one `budget.settle`. So a restarted runner
 ## Not covered
 
 - Verify runners that spend outside the agent seam (`cursor-cloud`, `kane`, `testmu`, `momentic`) are refused under a budget. The exception is when every workflow on the chain sets `titan.budget.allow_unmetered_runners: true`. Their reported `externalCostUsd` is then charged after the fact, outside the hard cap.
-- A single message that is larger than any before it can still pass the in-flight cap by that one message. Such an overrun is charged in full and flagged with `budget.overrun`.
+- The per-turn bound trusts the model's pricing in Pi's catalogue. A provider that bills more than its catalogued rates can pass the cap. The parent's backstop kills that child at the first message over the cap, and the overrun is charged in full and flagged with `budget.overrun`.
+- Across a workflow boundary, a child's per-call worst case is floored at the parent's effective per-call (its declared `per_call_*`, else the default) whenever the parent's chain limits that dimension.
 - A resumed run does not reconstruct its budget from `events.jsonl` yet.
 - The session-level `/stack budget` held-spend guard (`budgetUsd` in stack settings) is separate and still applies on top of this.

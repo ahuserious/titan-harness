@@ -106,6 +106,10 @@ export interface AgentRun {
 	compactionSeen?: boolean; // a compaction_start event appeared on the child's JSON stream
 	usageSeen?: boolean; // at least one message_end with a usage block arrived (workflow budgets: usage provenance)
 	budgetHalted?: boolean; // killed because its observed spend exceeded the workflow budget's in-flight cap; settled as aborted + stopReason "budget"
+	budgetStatePath?: string; // workflow budgets: the child's per-turn guard state file (titan-budget-guard.ts)
+	budgetGuard?: { state: string; turns?: number; spent?: { usdMicros: number; tokens: number }; refusal?: { reason: string; dimension?: "usd" | "tokens"; remaining?: number; needed?: number } }; // the guard's last state, read at settle
+	budgetRefusal?: { reason: string; dimension?: "usd" | "tokens"; remaining?: number; needed?: number }; // the guard refused a model turn before it was sent (hard, non-retryable)
+	budgetUnguarded?: boolean; // a budgeted child reported usage without its guard armed; killed (budgetHalted)
 	notDispatched?: boolean; // provably no child process was started (aborted while queued / before spawn, held-spend refusal)
 	stderr: string;
 }
