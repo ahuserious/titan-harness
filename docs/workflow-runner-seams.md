@@ -8,7 +8,7 @@
 - It takes no URL, host, port or header input. `server` must be in the startup `routes` list, and each route must be a plain slug (`^[a-z0-9][a-z0-9-]{0,62}$`). A workflow therefore cannot name a direct upstream.
 - The call fails on:
   - a redirect;
-  - a response over the size cap (1 MiB by default) or a timeout (30 s by default);
+  - a response over the size cap (1 MiB by default) or the call deadline (30 s by default). The deadline is wall-clock time for the whole call, not a socket inactivity timer, so a sidecar that trickles bytes is still cut off;
   - a JSON-RPC `error`, an `isError` result, or a response id that does not match the request.
 - A sidecar 4xx refusal (for example `MCP_TOOL_DENIED`) throws with `retryable: false`, and `mcp_tool` nodes then fail without retries. 5xx responses, timeouts and a missing socket are retryable.
 - `createWorkflowRuntime({ sidecarMcp })` wires the seam. A hosted runtime (one with `approver` set) refuses a direct `mcpTool` bridge. Passing both `mcpTool` and `sidecarMcp` is refused.
@@ -30,7 +30,7 @@
 - Allowed node types: `prompt`, `command`, `bash`, `script`, `verify` (runner `bash` or `verifier` only), `approval`, `mcp_tool`, `cancel` and `workflow`.
 - `workflow` nodes may not use `fan_out` or `isolation`, and every node's isolation is `none`.
 - `titan.budget.max_concurrent_children` is at most 2, and execution is capped at 2 parallel nodes.
-- A write-named `mcp_tool` must depend, directly or transitively, on an `approval`. The name check is a word match against write verbs, used as a static lint. The sidecar tool allowlist remains the enforcement.
+- A write-named `mcp_tool` may only run after an `approval` has succeeded. The check follows trigger rules through intermediate nodes: under `all_success` one gated dependency is enough, under `one_success` and `none_failed_min_one_success` every dependency must be gated, and a node under `all_done` is never gated (its approval may have been skipped by `when:`). The name check is a word match against write verbs. The sidecar tool allowlist limits which tools exist; it does not stand in for the human decision.
 
 ## Interrupted run
 

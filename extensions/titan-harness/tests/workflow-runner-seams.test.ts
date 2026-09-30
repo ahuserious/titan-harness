@@ -42,12 +42,13 @@ function scratch(prefix = "titan-seams-"): string {
 const allowAll: ActorPolicy = { policyId: "test-allow-all", authorize: () => true };
 
 interface SidecarCall { url: string; method: string; host?: string; body: any }
-type Reply = (call: SidecarCall) => { status?: number; body?: unknown; raw?: string; headers?: Record<string, string>; hang?: boolean };
+type Reply = (call: SidecarCall) => { status?: number; body?: unknown; raw?: string; headers?: Record<string, string>; hang?: boolean; trickleMs?: number };
 
 /** A fake unit sidecar on a unix socket: records every request, answers by `reply`. */
 async function fakeSidecar(reply: Reply = (c) => ({ body: { jsonrpc: "2.0", id: c.body.id, result: { content: [{ type: "text", text: JSON.stringify({ records: [{ id: "r1" }] }) }] } } })) {
 	const socketPath = join(scratch("titan-sock-"), "unit-a.sock");
 	const calls: SidecarCall[] = [];
+	const trickleClosed: number[] = [];
 	const server = http.createServer((req, res) => {
 		let text = "";
 		req.on("data", (c) => (text += c));
@@ -58,13 +59,20 @@ async function fakeSidecar(reply: Reply = (c) => ({ body: { jsonrpc: "2.0", id: 
 			calls.push(call);
 			const r = reply(call);
 			if (r.hang) return;
+			if (r.trickleMs) {
+				// Stays under the response cap and keeps the socket busy: one space every trickleMs, never ends.
+				res.writeHead(r.status ?? 200, { "content-type": "application/json" });
+				const tick = setInterval(() => res.write(" "), r.trickleMs);
+				res.on("close", () => { clearInterval(tick); trickleClosed.push(Date.now()); });
+				return;
+			}
 			res.writeHead(r.status ?? 200, { "content-type": "application/json", ...(r.headers ?? {}) });
 			res.end(r.raw ?? JSON.stringify(r.body));
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 	servers.push(server);
-	return { socketPath, calls };
+	return { socketPath, calls, trickleClosed };
 }
 
 function loadedOf(doc: WorkflowDoc, dir = scratch()): LoadedWorkflow {
@@ -140,6 +148,58 @@ describe("sidecar mcpTool", () => {
 		mode = "hang";
 		expect(await mcp("zoho", "t", {}).catch((e) => e)).toMatchObject({ retryable: true, message: expect.stringContaining("timed out") });
 		expect(sc.calls.map((c) => c.url)).toEqual(Array(5).fill("/mcp/zoho"));
+	});
+
+	test("the timeout bounds elapsed call time: a sidecar trickling bytes below the cap is cut at the deadline (g1 finding 2)", async () => {
+		const sc = await fakeSidecar(() => ({ trickleMs: 40 }));
+		const mcp = createSidecarMcpTool({ socketPath: sc.socketPath, routes: ["zoho"], timeoutMs: 250, responseCap: 1_048_576 });
+		const started = Date.now();
+		const err = await mcp("zoho", "search_records", {}).catch((e) => e);
+		const elapsed = Date.now() - started;
+		expect(err).toBeInstanceOf(SidecarMcpError);
+		expect(err).toMatchObject({ retryable: true, message: expect.stringContaining("timed out after 250 ms") });
+		// each 40 ms byte resets a socket inactivity timer; only a wall-clock deadline ends the call
+		expect(elapsed).toBeGreaterThanOrEqual(240);
+		expect(elapsed).toBeLessThan(1500);
+		// the request was destroyed: the sidecar sees its connection close
+		for (let i = 0; i < 50 && !sc.trickleClosed.length; i++) await Bun.sleep(10);
+		expect(sc.trickleClosed.length).toBe(1);
+	});
+
+	test("the call deadline is cleared on settlement (success, sidecar error, oversized body)", async () => {
+		const DEADLINE = 12_345; // distinctive, so only this module's deadline timer is tracked
+		let mode = "ok";
+		const sc = await fakeSidecar((c) => mode === "ok"
+			? { body: { jsonrpc: "2.0", id: c.body.id, result: { structuredContent: { ok: true } } } }
+			: mode === "error" ? { status: 403, body: { jsonrpc: "2.0", id: c.body.id, error: { code: -32602, message: "denied" } } }
+			: { raw: "x".repeat(4096) });
+		const realSet = globalThis.setTimeout;
+		const realClear = globalThis.clearTimeout;
+		const armed = new Set<unknown>();
+		let cleared = 0;
+		globalThis.setTimeout = ((fn: (...a: any[]) => void, ms?: number, ...rest: any[]) => {
+			const handle = realSet(fn, ms, ...rest);
+			if (ms === DEADLINE) armed.add(handle);
+			return handle;
+		}) as typeof setTimeout;
+		globalThis.clearTimeout = ((handle: any) => {
+			if (armed.delete(handle)) cleared++;
+			return realClear(handle);
+		}) as typeof clearTimeout;
+		try {
+			const mcp = createSidecarMcpTool({ socketPath: sc.socketPath, routes: ["zoho"], timeoutMs: DEADLINE, responseCap: 1024 });
+			expect(await mcp("zoho", "search_records", {})).toEqual({ ok: true });
+			mode = "error";
+			expect(await mcp("zoho", "update_record", {}).catch((e) => e)).toMatchObject({ retryable: false, status: 403 });
+			mode = "large";
+			expect(await mcp("zoho", "search_records", {}).catch((e) => e.message)).toContain("exceeds 1024 bytes");
+		} finally {
+			globalThis.setTimeout = realSet;
+			globalThis.clearTimeout = realClear;
+		}
+		// at least one deadline per call (the http client may arm its own timers with the same ms), and none left pending
+		expect(cleared).toBeGreaterThanOrEqual(3);
+		expect(armed.size).toBe(0);
 	});
 
 	test("an mcp_tool node reaches only the sidecar route; a refusal fails the node once, without retries", async () => {
@@ -218,6 +278,59 @@ describe("prod-v1 validator profile", () => {
 			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" }, depends_on: ["prep"] },
 		] as unknown as NodeDoc[]);
 		expect(validateProdV1(guarded)).toEqual([]);
+	});
+
+	test("a skipped approval does not guard a write: the approval must SUCCEED on every path the trigger rules allow (g1 finding 1)", () => {
+		const W = { server: "zoho", tool: "update_record" };
+		const refused = (nodes: unknown[]) => validateProdV1(wf("r", nodes as NodeDoc[]));
+		const denial = [{ nodeId: "w", message: expect.stringContaining("must succeed before it runs") }];
+		// the gate reproduction: approval skipped by when:, write runs under all_done
+		expect(refused([{ id: "gate", approval: { message: "write?" }, when: "1 == 2" }, { id: "w", mcp_tool: W, depends_on: ["gate"], trigger_rule: "all_done" }])).toEqual(denial);
+		// through an intermediate dependency: prep runs under all_done whatever the gate did
+		expect(refused([{ id: "gate", approval: { message: "write?" } }, { id: "prep", bash: "true", depends_on: ["gate"], trigger_rule: "all_done" }, { id: "w", mcp_tool: W, depends_on: ["prep"] }])).toEqual(denial);
+		// one_success / none_failed_min_one_success: an ungated sibling can satisfy the rule alone
+		for (const rule of ["one_success", "none_failed_min_one_success"]) {
+			expect(refused([{ id: "gate", approval: { message: "write?" } }, { id: "other", bash: "true" }, { id: "w", mcp_tool: W, depends_on: ["gate", "other"], trigger_rule: rule }])).toEqual(denial);
+			expect(refused([{ id: "g1", approval: { message: "a?" } }, { id: "g2", approval: { message: "b?" } }, { id: "w", mcp_tool: W, depends_on: ["g1", "g2"], trigger_rule: rule }])).toEqual([]);
+		}
+		// all_success: one gated dep is enough (every dep must succeed), including through intermediates
+		expect(refused([{ id: "gate", approval: { message: "write?" } }, { id: "other", bash: "true" }, { id: "w", mcp_tool: W, depends_on: ["gate", "other"] }])).toEqual([]);
+		expect(refused([{ id: "gate", approval: { message: "write?" } }, { id: "p1", bash: "true", depends_on: ["gate"], trigger_rule: "one_success" }, { id: "p2", bash: "true", depends_on: ["p1"] }, { id: "w", mcp_tool: W, depends_on: ["p2"] }])).toEqual([]);
+		// a when: on a gated path only ever skips, so it never weakens the guard
+		expect(refused([{ id: "gate", approval: { message: "write?" }, when: "1 == 2" }, { id: "w", mcp_tool: W, depends_on: ["gate"] }])).toEqual([]);
+		// the write itself under all_done is never gated, whatever its deps
+		expect(refused([{ id: "gate", approval: { message: "write?" } }, { id: "w", mcp_tool: W, depends_on: ["gate"], trigger_rule: "all_done" }])).toEqual(denial);
+		// a dependency that does not exist, or a cycle, is not an approval
+		expect(refused([{ id: "w", mcp_tool: W, depends_on: ["ghost"] }])).toEqual(denial);
+		expect(refused([{ id: "a", bash: "true", depends_on: ["b"] }, { id: "b", bash: "true", depends_on: ["a"] }, { id: "w", mcp_tool: W, depends_on: ["a"] }])).toEqual(denial);
+	});
+
+	test("the reproduction executes nothing under executeProdV1: zero approval requests, zero write calls", async () => {
+		const root = scratch();
+		const store = new RunStore(join(root, "runs"));
+		const { runId, dir } = store.open({ projectSlug: "p", cwd: root, workflow: { name: "skip-gate" } });
+		const approvals: string[] = [];
+		const writes: string[] = [];
+		const deps = stubDeps(store, runId, dir, root, {
+			async approval(message) { approvals.push(message); return { approved: true, response: "yes" }; },
+			async mcpTool(server, tool) { writes.push(`${server}/${tool}`); return { ok: true }; },
+		});
+		const repro = wf("skip-gate", [
+			{ id: "gate", approval: { message: "write?" }, when: "1 == 2" },
+			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" }, depends_on: ["gate"], trigger_rule: "all_done" },
+		] as unknown as NodeDoc[]);
+		expect(() => executeProdV1(loadedOf(repro), deps)).toThrow(ProfileError);
+		expect(events(dir)).toEqual([]);
+		// the allowed shape (default all_success): the skipped approval skips the write too
+		const guarded = wf("skip-gate-ok", [
+			{ id: "gate", approval: { message: "write?" }, when: "1 == 2" },
+			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" }, depends_on: ["gate"] },
+		] as unknown as NodeDoc[]);
+		const r = await executeProdV1(loadedOf(guarded), deps);
+		expect(r.nodes.gate?.status).toBe("skipped");
+		expect(r.nodes.w?.status).toBe("skipped");
+		expect(approvals).toEqual([]);
+		expect(writes).toEqual([]);
 	});
 
 	test("executeProdV1 refuses a non-prod-v1 workflow before any run work, and caps parallelism at 2", async () => {

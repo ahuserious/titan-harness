@@ -10,15 +10,17 @@
  *       fixed route `/mcp/<server>` on a unix-domain socket (sidecar CONTRACT.md). There is no
  *       URL, host, port or header input: the server name must be in the startup route list and
  *       match a plain slug, so a workflow can never name a direct upstream. No redirects are
- *       followed (a 3xx fails), the response is capped, calls time out, and a JSON-RPC error or
+ *       followed (a 3xx fails), the response is capped, each call has a wall-clock deadline (not
+ *       just a socket inactivity timer), and a JSON-RPC error or
  *       `isError` result throws. A sidecar refusal (4xx) is deterministic: the error carries
  *       retryable:false so the node is not re-run.
  *
  *   validateProdV1(doc)
  *       the `prod-v1` validator profile (DESIGN §6.2): node types prompt, command, bash, script,
  *       verify (runner bash|verifier), approval, mcp_tool, cancel, workflow; no fan_out and no
- *       worktree isolation; titan.budget.max_concurrent_children ≤ 2; a write-named mcp_tool must
- *       depend (transitively) on an approval node.
+ *       worktree isolation; titan.budget.max_concurrent_children ≤ 2; a write-named mcp_tool may
+ *       only run after an approval node SUCCEEDED (trigger rules followed through intermediate
+ *       nodes; a skipped approval under all_done does not count).
  *
  *   createRunnerRunWorkflow(host)
  *       runWorkflow recursive IN THE RUNNER: the child is loaded by the runner's own loader,
@@ -113,9 +115,17 @@ export function createSidecarMcpTool(opts: SidecarMcpOptions): NonNullable<Workf
 function postUnix(socketPath: string, route: string, body: string, timeoutMs: number, cap: number): Promise<{ status: number; text: string }> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
+		// A wall-clock deadline for the whole call (connect → last byte). The socket `timeout`
+		// below is only an inactivity timer: a sidecar that trickles bytes would reset it forever.
+		let deadline: ReturnType<typeof setTimeout> | undefined;
+		const settle = () => {
+			settled = true;
+			if (deadline !== undefined) clearTimeout(deadline);
+			deadline = undefined;
+		};
 		const fail = (error: Error) => {
 			if (settled) return;
-			settled = true;
+			settle();
 			reject(error);
 		};
 		const req = http.request(
@@ -124,25 +134,30 @@ function postUnix(socketPath: string, route: string, body: string, timeoutMs: nu
 				const chunks: Buffer[] = [];
 				let size = 0;
 				res.on("data", (chunk: Buffer) => {
+					if (settled) return;
 					size += chunk.length;
 					if (size > cap) {
-						req.destroy();
 						fail(new SidecarMcpError(`mcp_tool: sidecar response exceeds ${cap} bytes`, false, res.statusCode));
+						req.destroy();
 						return;
 					}
 					chunks.push(chunk);
 				});
 				res.on("end", () => {
 					if (settled) return;
-					settled = true;
+					settle();
 					resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") });
 				});
 				res.on("error", (error) => fail(new SidecarMcpError(`mcp_tool: sidecar response failed: ${error.message}`, true)));
 			},
 		);
-		req.on("timeout", () => {
-			req.destroy();
+		deadline = setTimeout(() => {
 			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true));
+			req.destroy();
+		}, timeoutMs);
+		req.on("timeout", () => {
+			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true));
+			req.destroy();
 		});
 		req.on("error", (error) => fail(new SidecarMcpError(`mcp_tool: sidecar request failed: ${error.message}`, true)));
 		req.end(body);
@@ -178,19 +193,32 @@ export function validateProdV1(doc: WorkflowDoc): ProfileIssue[] {
 	const byId = new Map(nodes.map((n) => [n.id, n]));
 	const cap = doc?.titan?.budget?.max_concurrent_children;
 	if (cap !== undefined && !(Number.isInteger(cap) && cap >= 1 && cap <= PROD_V1_MAX_PARALLEL)) issues.push({ message: `titan.budget.max_concurrent_children must be 1..${PROD_V1_MAX_PARALLEL} under prod-v1; found ${JSON.stringify(cap)}` });
-	const approvalAncestor = (node: NodeDoc): boolean => {
-		const seen = new Set<string>();
-		const stack = [...(node.depends_on ?? [])];
-		while (stack.length) {
-			const id = stack.pop()!;
-			if (seen.has(id)) continue;
-			seen.add(id);
-			const dep = byId.get(id);
-			if (!dep) continue;
-			if (nodeType(dep) === "approval") return true;
-			stack.push(...(dep.depends_on ?? []));
-		}
+	// gated(n): "n succeeded ⇒ some approval node succeeded" (a human approved) under the
+	// scheduler's trigger rules (scheduler.ts readiness). An approval's success is itself a human
+	// approval; any other node succeeds only if it ran, so gated(n) = mustRunAfterApproval(n).
+	// mustRunAfterApproval(n), the node may only start once an approval succeeded:
+	//   all_success                          any dep gated (every dep must have succeeded)
+	//   one_success / none_failed_min_one_success   every dep gated (which dep succeeded is unknown)
+	//   all_done (or an unknown rule)        never (every dep may be skipped or failed, e.g. an
+	//                                        approval skipped by `when:`)
+	// `when:` only ever skips, so it never weakens the guarantee. A missing dep or a cycle is not gated.
+	const gatedMemo = new Map<string, boolean>();
+	const mustRunAfterApproval = (node: NodeDoc): boolean => {
+		const deps = Array.isArray(node.depends_on) ? node.depends_on : [];
+		if (!deps.length) return false;
+		const rule = node.trigger_rule ?? "all_success";
+		if (rule === "all_success") return deps.some(gated);
+		if (rule === "one_success" || rule === "none_failed_min_one_success") return deps.every(gated);
 		return false;
+	};
+	const gated = (id: string): boolean => {
+		const memo = gatedMemo.get(id);
+		if (memo !== undefined) return memo;
+		gatedMemo.set(id, false); // cycle guard: in progress counts as not gated
+		const dep = byId.get(id);
+		const value = !!dep && (nodeType(dep) === "approval" || mustRunAfterApproval(dep));
+		gatedMemo.set(id, value);
+		return value;
 	};
 	for (const node of nodes) {
 		const type = nodeType(node);
@@ -205,8 +233,8 @@ export function validateProdV1(doc: WorkflowDoc): ProfileIssue[] {
 			if (record.workflow?.fan_out !== undefined) issues.push({ nodeId: node.id, message: `workflow.fan_out is not allowed under prod-v1 (no dynamic fan-out)` });
 			if (record.workflow?.isolation !== undefined) issues.push({ nodeId: node.id, message: `workflow.isolation is not allowed under prod-v1` });
 		}
-		if (type === "mcp_tool" && typeof record.mcp_tool?.tool === "string" && isWriteNamedTool(record.mcp_tool.tool) && !approvalAncestor(node)) {
-			issues.push({ nodeId: node.id, message: `write-capable mcp_tool ${record.mcp_tool.tool} must depend on an approval node under prod-v1` });
+		if (type === "mcp_tool" && typeof record.mcp_tool?.tool === "string" && isWriteNamedTool(record.mcp_tool.tool) && !mustRunAfterApproval(node)) {
+			issues.push({ nodeId: node.id, message: `write-capable mcp_tool ${record.mcp_tool.tool} must depend on an approval node that must succeed before it runs under prod-v1 (every path through all_success, or all deps of one_success/none_failed_min_one_success; never all_done)` });
 		}
 	}
 	return issues;
