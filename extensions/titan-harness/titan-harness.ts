@@ -72,11 +72,11 @@ import { readHarnessDefaults, registerTerraformCommand } from "./modules/cmd-ter
 import { registerLocalDevVerifyCommand } from "./modules/cmd-local-dev-verify.ts";
 import { ontologyStage } from "./modules/infranodus.ts";
 import { loadWorkflow } from "./modules/workflow/loader.ts";
-import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult } from "./modules/workflow/executor.ts";
+import { executeWorkflow, type ResolvedRole, type RunResult as WorkflowRunResult, type RunWorkflowOptions } from "./modules/workflow/executor.ts";
 import type { NodeDoc, SlotRole } from "./modules/workflow/schema.ts";
 import type { ValidateContext } from "./modules/workflow/validator.ts";
 import { normalizeThinking } from "./modules/thinking.ts";
-import { piInvocation, runChild } from "./modules/child-runner.ts";
+import { piInvocation, runChild, watchdogPreemptionAllowed } from "./modules/child-runner.ts";
 import {
 	cloneStack,
 	expandFanout,
@@ -2161,7 +2161,7 @@ export default function (pi: ExtensionAPI) {
 				recordRun(run);
 				renderFooterWidget();
 			},
-			runWorkflow: async (name: string, inputs: Record<string, unknown>): Promise<WorkflowRunResult> => {
+			runWorkflow: async (name: string, inputs: Record<string, unknown>, runOpts?: RunWorkflowOptions): Promise<WorkflowRunResult> => {
 				const child = loadWorkflow(name, ctx.cwd, workflowValidateContext(ctx));
 				const opened = runStore().open({
 					projectSlug: RunStore.projectSlug(ctx.cwd),
@@ -2171,7 +2171,7 @@ export default function (pi: ExtensionAPI) {
 					parentRunId: parentRunId ?? runId,
 					status: "running",
 				});
-				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs });
+				const result = await executeWorkflow(child, makeWorkflowRuntime(ctx, child, opened.runId, opened.dir, runId), { inputs, parentBudget: runOpts?.parentBudget, signal: runOpts?.signal });
 				try {
 					runStore().updateRun(opened.dir, { status: result.status === "completed" ? "completed" : result.status === "cancelled" ? "aborted" : "failed", endedAt: new Date().toISOString() });
 				} catch {}
@@ -2299,6 +2299,7 @@ export default function (pi: ExtensionAPI) {
 		const s = readStackSettings();
 		if (s.budgetUsd !== null && sessionSpendUsd() > s.budgetUsd) {
 			opts.run.status = "failed";
+			opts.run.notDispatched = true; // nothing spawned: a workflow budget settles this call at 0
 			opts.run.errorMessage = `held-spend: this session's ledger ($${sessionSpendUsd().toFixed(2)}) is over budgetUsd ($${s.budgetUsd}); raise it with /stack budget`;
 			opts.run.startedAt = Date.now();
 			opts.run.endedAt = opts.run.startedAt;
@@ -2308,7 +2309,8 @@ export default function (pi: ExtensionAPI) {
 			} catch {}
 			return opts.run;
 		}
-		const wd = s.watchdog.enabled ? getWatchdog() : undefined;
+		// A budgeted workflow call is never pre-empted: the inspector and the re-dispatch would spend outside its reservation.
+		const wd = s.watchdog.enabled && watchdogPreemptionAllowed(opts) ? getWatchdog() : undefined;
 		const agentId = opts.run.slot?.id ?? opts.run.role.toLowerCase();
 		const window = contextWindowOf(opts.run.model);
 		const first = await runChild({
