@@ -1,7 +1,60 @@
 # titan-harness
 
-Dan's Pi package. One install replaces `pi-titan-harness-v2` plus the loose
-`~/.pi/agent/extensions/ctx-picker.ts`.
+A [Pi](https://pi.dev) package for multi-agent work: 2-5 configured model slots that plan, build, review and fuse together, and `/workflow`, a YAML DAG engine with a hash-chained run store, verification tiers, approvals and a watchdog. One install replaces `pi-titan-harness-v2` plus the loose `~/.pi/agent/extensions/ctx-picker.ts`.
+
+Install: [INSTALL.md](INSTALL.md) (written so an agent can follow it step by step).
+
+## Architecture
+
+```mermaid
+flowchart LR
+  user[Operator in Pi] --> host["titan-harness extension<br/>(host: commands, shapes, levels)"]
+  host --> slots["Model slots<br/>architect · builders · auditors · verifiers"]
+  host --> wf["modules/workflow<br/>loader, validator, scheduler, executor"]
+  wf --> nodes["Nodes: agent · command · bash · script · approval"]
+  slots --> children["pi --mode json -p children<br/>(recursion-guarded)"]
+  nodes --> children
+  host --> store[("Run store<br/>run.json, hash-chained events,<br/>ledger, provenance, evidence")]
+  wf --> store
+  store --> mon["/workflow-monitor, sidebar,<br/>scripts/verify-ledger.mjs"]
+  host --> wd["Watchdog<br/>stalemate, compaction, pre-emption"]
+```
+
+- `extensions/titan-harness/`: the host extension (`titan-harness.ts`), `modules/` (workflow engine, run store, watchdog, monitor, doctor, MCP client), `prompts/`, `tests/`.
+- `extensions/{ctx-picker,stack-settings,titan-child-hooks}.ts`: context presets, the `/stack` menu, and the narrow child-mode hooks.
+- `skills/`, `mcp/`, `personas/`: the skill pack, MCP catalog and persona library.
+- `scripts/`: ledger verifier, monitor, workflow viewer/TUI, MCP bridge and patch helpers.
+
+## Hosted and team use
+
+The package works on a single machine, and it is also designed to be embedded in a team's hosted agent platform. There, a web front end handles sign-in and approvals, each person or job gets an isolated workspace, and a trusted runner outside those workspaces drives titan workflows wherever side effects must be enforced: CRM or database writes, paid lookups, publishing, and release gates.
+
+Work on the package usually splits into a few functional lanes, which can proceed in parallel:
+
+| Lane | Touches |
+|---|---|
+| Runner seams | `modules/workflow/*`: typed inputs, bound web approvals, `mcpTool`, `runWorkflow`, budget enforcement |
+| Workflow authoring | `.titan/workflows/`, `/create-workflow`, the `titan-workflow-authoring` skill |
+| Observability | run store, ledger, `/workflow-monitor`, `scripts/verify-ledger.mjs` |
+| Skills and connectors | `skills/`, `mcp/`, `/titan-doctor` |
+
+The workflow engine (`modules/workflow/*`) has no Pi import, so a hosted runner can drive it **outside the agent containers**: the runner owns the run store and approvals, executes agent and script nodes in an isolated workspace through a narrow endpoint, treats everything returned as untrusted, and re-checks release gates itself. Two rules apply there: every agent node should set `allowed_tools` (otherwise it falls back to full tools), and budgets are declarative until the runner enforces them. Seams for typed inputs, bound web approvals, `mcpTool` and `runWorkflow` are arriving as PRs.
+
+## Run and test
+
+```bash
+bun test extensions/titan-harness/tests   # or: npm test (runs the same bun command)
+bun scripts/titan-workflow-view.ts        # npm run workflow:view
+bun scripts/titan-workflow-tui.ts         # npm run workflow:tui
+node scripts/verify-ledger.mjs "$RUN_DIR"  # verify a run's hash chains without the harness (RUN_DIR = an existing run directory)
+just                                      # list the Pi launch recipes (titan-stack, fusion, ...)
+```
+
+## Contributing and status
+
+Changes arrive as pull requests; the maintainer reviews and merges. For a local run, status lives in the run store (`/workflow status`, `/workflow-monitor`). Teams that host the engine surface run health on their own staff portal's harness status page; nothing in this repository depends on that deployment.
+
+The sections below are the full command and feature reference, newest first.
 
 ## 0.9.2
 
@@ -137,7 +190,7 @@ values. Workflow `bash:` nodes can call it. `/titan-doctor` prints the three fla
 line — `mcp2cli · titan ✓ <path> · python (uvx) ✓|○ · rust ✓|○` — alongside the Python
 `uvx mcp2cli` and the Rust one the Grok plugin uses (`skills/mcp-cli-bridges`).
 
-**Still Dan's call (the PRD's open questions, defaults chosen):** the sidebar hotkey stays
+**Still the maintainer's call (the PRD's open questions, defaults chosen):** the sidebar hotkey stays
 Ctrl+W with Alt+W and Ctrl+Shift+W as twins (Ctrl+W is "delete word" in many editors); MCP
 toggles write the user catalog by default with `--project` for the project file; dormancy dims
 phase lines at 10 min idle and the sidebar auto-closes 10 min after a terminal state.

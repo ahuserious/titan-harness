@@ -16,7 +16,8 @@
  * MAX_SCHEMA_RETRIES times with the errors appended, resuming the same session when the
  * child reported one, and the node fails after that.
  *
- * Tools: `allowed_tools` (empty list → "none", the factory maps it to --no-tools), else
+ * Tools: `allowed_tools` (empty list → "none", the factory maps it to --no-tools; an explicit
+ * list is FINAL — AgentRequest.toolsFinal — so the /stack child policy never widens it), else
  * the role's tools from the shape, else FULL_TOOLS; `denied_tools` removed; role
  * "architect" is ALWAYS read-only — anything outside READONLY_TOOLS (write, edit, bash,
  * and unknown/MCP tool names, which P3 cannot classify) is dropped, and a request that
@@ -140,6 +141,7 @@ export function buildAgentRequest(ctx: NodeContext, prompt: string, opts: AgentC
 		systemPrompt: node.system_prompt ?? resolved.systemPrompt,
 		appendSystemPrompts: [...(resolved.appendSystemPrompts ?? []), ...listOf(node.append_system_prompt), ...(persona ? [personaAppend(persona)] : [])],
 		tools: resolveTools(node, role, resolved.tools),
+		...(Array.isArray(node.allowed_tools) ? { toolsFinal: true } : {}),
 		context: opts.freshSession ? "fresh" : resolveContext(ctx, opts),
 		hooks: node.hooks,
 		outputSchema: opts.outputSchema,
