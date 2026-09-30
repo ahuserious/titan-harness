@@ -10,8 +10,18 @@
  *                        + max output tokens × the model's highest output rate
  *
  * The input bound is the UTF-8 byte length of the serialised provider payload plus a fixed
- * provider overhead: a byte-level tokenizer never produces more tokens than bytes, and images
- * travel as base64 (far more bytes than image tokens), so the bound is ≥ the billed input.
+ * provider overhead. It is an upper bound ONLY for a text-only request whose whole billed input
+ * is inside the payload: a byte-level BPE / byte-fallback tokenizer never emits more tokens
+ * than the bytes it covers, and every message's JSON framing (`{"role":"…","content":…}`,
+ * ≥ 20 bytes) out-sizes the provider's per-message framing tokens. So before the bound is used,
+ * unboundedInput() REFUSES every request shape whose billed input is not the serialised text:
+ * media (images, documents/PDFs, audio, video, files — billed by pixels/pages/seconds, not
+ * bytes), references to content held elsewhere (image/file URLs, file ids, Gemini fileData /
+ * inlineData / cachedContent, Responses previous_response_id / conversation / stored prompts),
+ * server-side tools that fetch or run content inside one request (web search/fetch, code
+ * execution, file search, computer use, MCP servers), multi-candidate sampling (n /
+ * candidateCount > 1) and premium pricing modifiers the catalogue does not price (service
+ * tiers, fast mode, data-residency surcharges, predicted outputs, audio output).
  * The output cap in the payload is CLAMPED (never raised) so the worst case fits what is left;
  * when even MIN_OUTPUT_TOKENS cannot fit, or the turn cannot be bounded at all (no model, no
  * pricing under a USD cap, an API whose output-cap field is unknown), the turn is REFUSED:
@@ -107,7 +117,92 @@ export function worstRates(model: PricedModel | undefined, longCacheWrites = tru
 	return { input, output };
 }
 
-/** UTF-8 byte length of the serialised payload + provider overhead: an upper bound on billed input tokens. */
+/** Content-part types billed by something other than their serialised bytes (pixels, pages, seconds, fetched content). */
+const MEDIA_PART_TYPES = new Set([
+	"image", "image_url", "input_image", "image_file", "document", "file", "input_file", "input_audio", "audio", "video", "input_video",
+	"container_upload", "server_tool_use", "web_search_tool_result", "web_fetch_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result",
+]);
+/** Keys that carry media or point at content the payload does not contain. */
+const REFERENCE_KEYS = new Set([
+	"image_url", "file_id", "file_url", "file_data", "fileUri", "file_uri", "fileData", "inlineData", "inline_data", "input_audio", "video_url", "audio_url",
+]);
+/** Keys of a media block (Bedrock Converse) — only when the value looks like media ({ format | source | data | url }). */
+const MEDIA_BLOCK_KEYS = new Set(["image", "document", "video", "audio"]);
+/** Top-level request keys that pull in context or pricing the payload does not bound. */
+const UNBOUNDED_TOP_KEYS = [
+	"previous_response_id", "conversation", "prompt", "cachedContent", "cached_content", "mcp_servers", "container",
+	"web_search_options", "prediction", "audio", "speed", "inference_geo", "best_of",
+];
+const STANDARD_SERVICE_TIERS = new Set(["auto", "default", "standard", "standard_only"]);
+/** Tool-entry keys of a plain client-side function tool (every other entry shape is a server/built-in tool). */
+const FUNCTION_TOOL_KEYS = new Set(["functionDeclarations", "function_declarations", "toolSpec", "cachePoint", "function"]);
+
+/**
+ * Why this request's billed input cannot be bounded by its serialised size (undefined when it can).
+ * Deliberately fail-closed: an unrecognised part type carrying non-text content, or a tool that is
+ * not a plain function tool, refuses the turn rather than being guessed at.
+ */
+export function unboundedInput(payload: Record<string, any>): string | undefined {
+	for (const key of UNBOUNDED_TOP_KEYS) {
+		if (payload[key] !== undefined && payload[key] !== null && payload[key] !== false) return `request field "${key}" adds input or pricing outside the payload`;
+	}
+	if (payload.service_tier !== undefined && !STANDARD_SERVICE_TIERS.has(String(payload.service_tier))) return `service_tier "${payload.service_tier}" is priced outside the catalogue`;
+	if (Array.isArray(payload.modalities) && payload.modalities.some((m: unknown) => m !== "text")) return "non-text output modalities are priced outside the catalogue";
+	for (const holder of [payload, payload.config, payload.generationConfig, payload.options]) {
+		if (!isObj(holder)) continue;
+		for (const key of ["n", "candidateCount", "candidate_count"]) if (holder[key] !== undefined && holder[key] !== null && holder[key] !== 1) return `${key}=${holder[key]}: more than one sampled candidate per turn`;
+		if (holder.cachedContent !== undefined) return "request field \"cachedContent\" adds input outside the payload";
+		if (holder.mediaResolution !== undefined || holder.media_resolution !== undefined) return "media resolution settings imply media input";
+	}
+	// Tools: only plain client-side function tools (their definitions are in the payload and billed as text).
+	const toolLists = [payload.tools, payload.config?.tools, payload.toolConfig?.tools, payload.options?.tools].filter(Array.isArray) as unknown[][];
+	for (const list of toolLists) {
+		for (const tool of list) {
+			if (!isObj(tool)) return "a tool entry is not an object";
+			if (tool.type !== undefined) {
+				if (tool.type !== "function" && tool.type !== "custom") return `server/built-in tool "${tool.type}" fetches or runs content inside the request`;
+				continue;
+			}
+			if (typeof tool.name === "string") continue; // Anthropic custom tool (no type)
+			const keys = Object.keys(tool);
+			const bad = keys.find((k) => !FUNCTION_TOOL_KEYS.has(k));
+			if (bad || keys.length === 0) return `tool entry "${bad ?? "{}"}" is not a plain function tool`;
+		}
+	}
+	// Message content: walk everything except tool definitions (JSON schemas legitimately use "type").
+	const stack: unknown[] = [];
+	for (const [key, value] of Object.entries(payload)) if (key !== "tools" && key !== "toolConfig" && key !== "tool_choice") stack.push(value);
+	if (isObj(payload.config)) for (const [key, value] of Object.entries(payload.config)) if (key !== "tools" && key !== "toolConfig" && key !== "responseSchema" && key !== "responseJsonSchema") stack.push(value);
+	let visited = 0;
+	while (stack.length) {
+		const node = stack.pop();
+		if (++visited > 1_000_000) return "payload too deep to inspect";
+		if (Array.isArray(node)) {
+			for (const v of node) stack.push(v);
+			continue;
+		}
+		if (!isObj(node)) continue;
+		if (typeof node.type === "string" && MEDIA_PART_TYPES.has(node.type)) {
+			// A document whose source is plain text is billed as that text.
+			const src = node.source;
+			if (!(node.type === "document" && isObj(src) && (src.type === "text" || src.type === "content"))) return `content part "${node.type}" is billed by its media, not its serialised size`;
+		}
+		if (isObj(node.source) && node.source.type !== undefined && node.source.type !== "text" && node.source.type !== "content") return `content source "${node.source.type}" is billed by its media, not its serialised size`;
+		for (const [key, value] of Object.entries(node)) {
+			if (REFERENCE_KEYS.has(key) && value !== undefined && value !== null) return `content field "${key}" carries media or a reference to content outside the payload`;
+			// Bedrock Converse media blocks: { image | document | video | audio: { format, source } }.
+			if (MEDIA_BLOCK_KEYS.has(key) && isObj(value) && (value.source !== undefined || value.format !== undefined || value.data !== undefined || value.url !== undefined)) return `content block "${key}" is billed by its media, not its serialised size`;
+			if (key === "tools" && node !== payload) continue;
+			if (value && typeof value === "object") stack.push(value);
+		}
+	}
+	return undefined;
+}
+
+/**
+ * UTF-8 byte length of the serialised payload + provider overhead. An upper bound on billed input
+ * tokens only once unboundedInput() has found nothing (planTurn checks it first).
+ */
 export function inputTokenBound(payload: unknown): number | undefined {
 	let json: string | undefined;
 	try {
@@ -241,6 +336,8 @@ export function planTurn(model: PricedModel | undefined, payload: unknown, remai
 	const slot = model.api ? CAP_SLOTS[model.api] : undefined;
 	if (!slot) return { ok: false, reason: `api ${model.api ?? "?"} has no known output-cap field: the turn cannot be bounded` };
 	if (!isObj(payload)) return { ok: false, reason: "provider payload is not an object: the turn cannot be bounded" };
+	const unbounded = unboundedInput(payload);
+	if (unbounded) return { ok: false, reason: `the turn's input cannot be bounded before dispatch: ${unbounded}`, dimension: usdCapped ? "usd" : "tokens", remaining: usdCapped ? remaining.usdMicros : remaining.tokens };
 	const inputBound = inputTokenBound(payload);
 	if (inputBound === undefined) return { ok: false, reason: "provider payload is not serialisable: the turn cannot be bounded" };
 	// A 1h cache write bills 2× input (pi-ai calculateCost); only possible when the payload asks for a 1h TTL.
@@ -323,24 +420,29 @@ export class TurnBudgetGuard {
 		return plan;
 	}
 
-	/** An assistant message ended: charge its reported usage, or the worst case when it reported none or did not finish. */
+	/**
+	 * An assistant message ended: charge its reported usage. Completeness is judged PER DIMENSION: tokens count as
+	 * reported only when input, output, cacheRead and cacheWrite are all finite and ≥ 0 and sum above 0; USD only
+	 * when cost.total is finite and > 0 (a $0 cost under a USD cap is an unpriced turn). A dimension that was not
+	 * reported is charged at the turn's planned worst case, and an interrupted turn at max(reported, worst).
+	 */
 	afterTurn(usage: ReportedUsage | undefined, stopReason?: string): void {
 		const worst = this.pending;
 		this.pending = undefined;
-		const tokens = usage ? [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].reduce<number>((a, v) => a + (finiteNonNeg(v) ? v : 0), 0) : 0;
+		const parts = usage ? [usage.input, usage.output, usage.cacheRead, usage.cacheWrite] : [];
+		const tokenSum = parts.reduce<number>((a, v) => a + (finiteNonNeg(v) ? v : 0), 0);
+		const tokensKnown = !!usage && parts.every(finiteNonNeg) && tokenSum > 0;
 		const costUsd = usage?.cost?.total;
-		const reported = { usdMicros: finiteNonNeg(costUsd) ? Math.ceil(Math.round(costUsd * 1e9) / 1e3) : 0, tokens: Math.ceil(tokens) };
-		const hasUsage = !!usage && (tokens > 0 || reported.usdMicros > 0);
+		const usdKnown = finitePos(costUsd);
+		const reported = { usdMicros: usdKnown ? Math.ceil(Math.round(costUsd * 1e9) / 1e3) : 0, tokens: tokensKnown ? Math.ceil(tokenSum) : 0 };
 		if (!worst) {
-			if (hasUsage) this.charge(reported);
+			// No planned turn to fall back on (a message_end with no request seen): charge whatever was reported.
+			this.charge({ usdMicros: usdKnown ? reported.usdMicros : 0, tokens: finiteNonNeg(tokenSum) ? Math.ceil(tokenSum) : 0 });
 			return;
 		}
 		const interrupted = stopReason === "error" || stopReason === "aborted";
-		// Tokens with a $0 cost under a USD cap (a provider that did not price the turn): charge the USD worst case.
-		if (hasUsage && reported.usdMicros === 0 && this.start.usdMicros !== undefined) reported.usdMicros = worst.usdMicros;
-		if (!hasUsage) this.charge(worst);
-		else if (interrupted) this.charge({ usdMicros: Math.max(reported.usdMicros, worst.usdMicros), tokens: Math.max(reported.tokens, worst.tokens) });
-		else this.charge(reported);
+		const pick = (known: boolean, got: number, planned: number): number => (!known ? planned : interrupted ? Math.max(got, planned) : got);
+		this.charge({ usdMicros: this.start.usdMicros === undefined && !usdKnown ? 0 : pick(usdKnown, reported.usdMicros, worst.usdMicros), tokens: pick(tokensKnown, reported.tokens, worst.tokens) });
 	}
 
 	private charge(amount: { usdMicros: number; tokens: number }): void {
@@ -352,7 +454,8 @@ export class TurnBudgetGuard {
 	}
 
 	snapshot(state: "armed" | "turn" | "refused"): Record<string, unknown> {
-		return { v: 1, state, start: this.start, left: this.left, spent: this.spent, turns: this.turns, ...(this.refusal ? { refusal: this.refusal } : {}) };
+		// `pending` = the worst case of a turn that was sent but whose end has not been seen (the parent settles it conservatively).
+		return { v: 1, state, start: this.start, left: this.left, spent: this.spent, turns: this.turns, ...(this.pending ? { pending: this.pending } : {}), ...(this.refusal ? { refusal: this.refusal } : {}) };
 	}
 }
 

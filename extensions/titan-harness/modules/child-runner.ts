@@ -25,7 +25,10 @@ export const BUDGET_GUARD_EXTENSION = path.resolve(MODULE_DIR, "..", "..", "tita
 /** What a budgeted child's guard wrote to its state file (turn-budget.ts TurnBudgetGuard.snapshot). */
 export interface BudgetGuardState {
 	state: "armed" | "turn" | "refused";
+	start?: { usdMicros?: number; tokens?: number };
 	spent?: { usdMicros: number; tokens: number };
+	/** The worst case of a turn that was sent but whose end the guard never saw. */
+	pending?: { usdMicros: number; tokens: number };
 	left?: { usdMicros?: number; tokens?: number };
 	turns?: number;
 	refusal?: { reason: string; dimension?: "usd" | "tokens"; remaining?: number; needed?: number };
@@ -102,6 +105,20 @@ export function overSpendCapStrict(run: Pick<AgentRun, "costUsd" | "tokensIn" | 
 	if (typeof cap.usdMicros === "number" && usdMicrosOf(run.costUsd) > cap.usdMicros) return true;
 	if (typeof cap.tokens === "number" && run.tokensIn + run.tokensOut > cap.tokens) return true;
 	return false;
+}
+
+/**
+ * What the child's guard charged in each dimension it bounded (spent + the worst case of a turn whose end it never
+ * saw). The guard charges a turn's planned worst case for every dimension the turn did not report, so this is ≥ the
+ * spend the parent observed from the same events: settlement takes the larger (workflow-runtime.ts resultOf).
+ */
+export function guardCharged(guard: BudgetGuardState | undefined): { usdMicros?: number; tokens?: number } | undefined {
+	if (!guard || !guard.spent) return undefined;
+	const out: { usdMicros?: number; tokens?: number } = {};
+	const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+	if (guard.start?.usdMicros !== undefined) out.usdMicros = n(guard.spent.usdMicros) + n(guard.pending?.usdMicros);
+	if (guard.start?.tokens !== undefined) out.tokens = n(guard.spent.tokens) + n(guard.pending?.tokens);
+	return out;
 }
 
 /** USD → micro-USD rounded up (budget.ts usdToMicrosCeil; duplicated to keep child-runner free of workflow imports). */

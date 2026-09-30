@@ -344,7 +344,7 @@ describe("executor: no budget declared → behaviour unchanged", () => {
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { overSpendCap, runChild, watchdogPreemptionAllowed } from "../modules/child-runner.ts";
 import { newRun } from "../modules/runtime.ts";
-import { createAgentRunner, usageProvenanceOf } from "../modules/workflow-runtime.ts";
+import { createAgentRunner, resultOf, usageProvenanceOf } from "../modules/workflow-runtime.ts";
 import { RUNNERS } from "../modules/workflow/runners/index.ts";
 
 const settleOf = (h: Harness, nodeId?: string) => data(h, "budget.settle").filter((d) => !nodeId || d.nodeId === nodeId);
@@ -955,7 +955,7 @@ describe("repair 2: worst-case admission across the chain (blocker 1)", () => {
 
 import { existsSync } from "node:fs";
 import { BUDGET_GUARD_EXTENSION } from "../modules/child-runner.ts";
-import { BUDGET_REFUSED_EXIT, MIN_OUTPUT_TOKENS, PROVIDER_OVERHEAD_TOKENS, TurnBudgetGuard, planTurn, turnBudgetEnv, turnBudgetFromEnv, worstRates } from "../modules/turn-budget.ts";
+import { BUDGET_REFUSED_EXIT, MIN_OUTPUT_TOKENS, PROVIDER_OVERHEAD_TOKENS, TurnBudgetGuard, planTurn, turnBudgetEnv, turnBudgetFromEnv, unboundedInput, worstRates } from "../modules/turn-budget.ts";
 import { registerBudgetGuard } from "../../titan-budget-guard.ts";
 import { effectivePerCall } from "../modules/workflow/budget.ts";
 
@@ -967,9 +967,9 @@ const PRICED = { api: "anthropic-messages", provider: "stub", id: "priced", maxT
  * budgeted child) and drives an ADVERSARIAL provider: every turn it bills the full serialised payload as input
  * and min(wanted, the payload's max_tokens) as output. Each request actually "sent" is appended to `ledger`.
  */
-function guardedPi(dir: string, model: Record<string, unknown>, wants: number[], promptChars = 200): { script: string; ledger: string } {
-  const script = join(dir, "guarded-pi.ts");
-  const ledger = join(dir, "sent.jsonl");
+function guardedPi(dir: string, model: Record<string, unknown>, wants: number[], promptChars = 200, opts: { report?: Array<"full" | "none" | "cost-only">; content?: unknown; name?: string } = {}): { script: string; ledger: string } {
+  const script = join(dir, `${opts.name ?? "guarded-pi"}.ts`);
+  const ledger = join(dir, `${opts.name ?? "sent"}.jsonl`);
   writeFileSync(script, `
     import { appendFileSync } from "node:fs";
     const args = process.argv.slice(2);
@@ -982,14 +982,19 @@ function guardedPi(dir: string, model: Record<string, unknown>, wants: number[],
     const out = (o: unknown) => process.stdout.write(JSON.stringify(o) + "\\n");
     out({ type: "session", id: "s1" });
     let history = "x".repeat(${promptChars});
+    const reports = ${JSON.stringify(opts.report ?? [])};
+    const content = ${JSON.stringify(opts.content ?? null)};
+    let turn = 0;
     for (const want of wants) {
-      let payload: any = { model: model.id, max_tokens: model.maxTokens, stream: true, messages: [{ role: "user", content: history }] };
+      const report = reports[turn++] ?? "full";
+      let payload: any = { model: model.id, max_tokens: model.maxTokens, stream: true, messages: [{ role: "user", content: content ?? history }] };
       for (const h of handlers.before_provider_request ?? []) { const r = await h({ type: "before_provider_request", payload }, { model }); if (r !== undefined) payload = r; }
       const input = Buffer.byteLength(JSON.stringify(payload));
       const output = Math.min(want, payload.max_tokens ?? Infinity);
       const cost = (input * model.cost.input + output * model.cost.output) / 1e6;
       appendFileSync(${JSON.stringify(ledger)}, JSON.stringify({ maxTokens: payload.max_tokens, input, output, cost }) + "\\n");
-      const message = { role: "assistant", content: [{ type: "text", text: "m" }], usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: cost } }, stopReason: "stop" };
+      const usage = report === "none" ? undefined : report === "cost-only" ? { cost: { total: cost } } : { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: cost } };
+      const message = { role: "assistant", content: [{ type: "text", text: "m" }], usage, stopReason: "stop" };
       for (const h of handlers.message_end ?? []) await h({ type: "message_end", message });
       out({ type: "message_end", message });
       history += "y".repeat(Math.min(output, 2000));
@@ -1286,5 +1291,191 @@ describe("repair 3 (Fable r2 N3): across a workflow boundary a child's per_call 
     expect(effectivePerCall(sub2.child("n"), "usd")).toBe(1000); // the parent limits nothing: no floor
     const own = new BudgetScope("wf", { usdMicros: 1_000_000 }, undefined, { kind: "workflow", perCall: { usdMicros: 1000 } });
     expect(effectivePerCall(own.child("n"), "usd")).toBe(1000);
+  });
+});
+
+// ═══ Repair 4 (Astra wf-r1 blockers 1-3) ═══════════════════════════════════
+
+describe("repair 4 (Astra r1 #1): input the serialised payload does not bound is refused before dispatch", () => {
+  const TINY_B64 = "iVBORw0KGgo="; // a few bytes of base64 that could decode to a 1-px PNG — or be a header for a huge image the provider tiles
+  const shapes: Array<[string, string, Record<string, unknown>]> = [
+    ["Anthropic base64 image", "anthropic-messages", { max_tokens: 1000, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: TINY_B64 } }] }] }],
+    ["Anthropic image by URL", "anthropic-messages", { max_tokens: 1000, messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://x/big.png" } }] }] }],
+    ["Anthropic PDF document", "anthropic-messages", { max_tokens: 1000, messages: [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: TINY_B64 } }] }] }],
+    ["Anthropic file reference", "anthropic-messages", { max_tokens: 1000, messages: [{ role: "user", content: [{ type: "document", source: { type: "file", file_id: "file_1" } }] }] }],
+    ["Anthropic web search server tool", "anthropic-messages", { max_tokens: 1000, tools: [{ type: "web_search_20250305", name: "web_search" }], messages: [{ role: "user", content: "hi" }] }],
+    ["Anthropic MCP servers", "anthropic-messages", { max_tokens: 1000, mcp_servers: [{ url: "https://m" }], messages: [{ role: "user", content: "hi" }] }],
+    ["Anthropic fast mode", "anthropic-messages", { max_tokens: 1000, speed: "fast", messages: [{ role: "user", content: "hi" }] }],
+    ["Chat Completions image_url", "openai-completions", { max_completion_tokens: 1000, messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://x/a.png" } }] }] }],
+    ["Chat Completions input_audio", "openai-completions", { max_completion_tokens: 1000, messages: [{ role: "user", content: [{ type: "input_audio", input_audio: { data: TINY_B64, format: "wav" } }] }] }],
+    ["Chat Completions n=4", "openai-completions", { max_completion_tokens: 1000, n: 4, messages: [{ role: "user", content: "hi" }] }],
+    ["Chat Completions audio output", "openai-completions", { max_completion_tokens: 1000, modalities: ["text", "audio"], messages: [{ role: "user", content: "hi" }] }],
+    ["Chat Completions predicted output", "openai-completions", { max_completion_tokens: 1000, prediction: { type: "content", content: "x" }, messages: [{ role: "user", content: "hi" }] }],
+    ["Responses input_image", "openai-responses", { max_output_tokens: 1000, input: [{ role: "user", content: [{ type: "input_image", image_url: "https://x/a.png" }] }] }],
+    ["Responses input_file", "openai-responses", { max_output_tokens: 1000, input: [{ role: "user", content: [{ type: "input_file", file_id: "file_1" }] }] }],
+    ["Responses previous_response_id", "openai-responses", { max_output_tokens: 1000, previous_response_id: "resp_1", input: [{ role: "user", content: "hi" }] }],
+    ["Responses file_search tool", "openai-responses", { max_output_tokens: 1000, tools: [{ type: "file_search", vector_store_ids: ["v"] }], input: "hi" }],
+    ["Responses priority tier", "openai-responses", { max_output_tokens: 1000, service_tier: "priority", input: "hi" }],
+    ["Gemini inlineData", "google-generative-ai", { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: TINY_B64 } }] }], config: { maxOutputTokens: 1000 } }],
+    ["Gemini fileData", "google-generative-ai", { contents: [{ role: "user", parts: [{ fileData: { fileUri: "gs://b/v.mp4" } }] }], config: { maxOutputTokens: 1000 } }],
+    ["Gemini cachedContent", "google-generative-ai", { contents: [], config: { maxOutputTokens: 1000, cachedContent: "cachedContents/1" } }],
+    ["Gemini googleSearch tool", "google-generative-ai", { contents: [], config: { maxOutputTokens: 1000, tools: [{ googleSearch: {} }] } }],
+    ["Gemini candidateCount 3", "google-generative-ai", { contents: [], config: { maxOutputTokens: 1000, candidateCount: 3 } }],
+    ["Bedrock image block", "bedrock-converse-stream", { messages: [{ role: "user", content: [{ image: { format: "png", source: { bytes: TINY_B64 } } }] }], inferenceConfig: { maxTokens: 1000 } }],
+    ["pi-messages image part", "pi-messages", { messages: [{ role: "user", content: [{ type: "image", data: TINY_B64, mimeType: "image/png" }] }], options: { maxTokens: 1000 } }],
+  ];
+  for (const [label, api, payload] of shapes) {
+    test(`${label}: billed input can exceed serialised bytes + ${PROVIDER_OVERHEAD_TOKENS} → refused (USD and token caps)`, () => {
+      // The counterexample: e.g. a 1568×1568 image bills ~(1568²/750) ≈ 3,280 tokens from a URL / base64 far shorter than that.
+      const serialisedBound = Buffer.byteLength(JSON.stringify(payload)) + PROVIDER_OVERHEAD_TOKENS;
+      expect(serialisedBound).toBeLessThan(3280);
+      expect(unboundedInput(payload)).toBeString();
+      expect(planTurn({ ...PRICED, api }, payload, { usdMicros: 1_000_000 })).toMatchObject({ ok: false, dimension: "usd" });
+      expect(planTurn({ ...PRICED, api }, payload, { tokens: 1_000_000 })).toMatchObject({ ok: false, dimension: "tokens" });
+    });
+  }
+
+  test("text-only requests with function tools, cache_control, thinking and text documents are still bounded", () => {
+    const payloads: Array<[string, Record<string, unknown>]> = [
+      ["anthropic-messages", { max_tokens: 1000, system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }], tools: [{ name: "read", description: "d", input_schema: { type: "object", properties: { image: { type: "string" } } } }], messages: [{ role: "user", content: [{ type: "text", text: "hi" }, { type: "tool_result", tool_use_id: "t", content: "ok" }] }, { role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "plain" } }] }] }],
+      ["openai-completions", { max_completion_tokens: 1000, n: 1, tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }], messages: [{ role: "user", content: "hi" }] }],
+      ["openai-responses", { max_output_tokens: 1000, service_tier: "auto", tools: [{ type: "function", name: "f", parameters: {} }], input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] }],
+      ["google-generative-ai", { contents: [{ role: "user", parts: [{ text: "hi" }] }], config: { maxOutputTokens: 1000, tools: [{ functionDeclarations: [{ name: "f" }] }], responseSchema: { type: "object" } } }],
+      ["bedrock-converse-stream", { messages: [{ role: "user", content: [{ text: "hi" }] }], inferenceConfig: { maxTokens: 1000 }, toolConfig: { tools: [{ toolSpec: { name: "f" } }] } }],
+    ];
+    for (const [api, payload] of payloads) {
+      expect([api, unboundedInput(payload)]).toEqual([api, undefined]);
+      expect(planTurn({ ...PRICED, api }, payload, { usdMicros: 1_000_000 }).ok).toBe(true);
+    }
+  });
+
+  test("a real child whose prompt carries an image is refused before the request is sent (exit 86, nothing billed)", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, [100], 200, { content: [{ type: "image", source: { type: "url", url: "https://x/huge.png" } }] });
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ usdMicros: 1_000_000 }) }));
+    expect(sentOf(ledger)).toEqual([]);
+    expect(r.exitCode).toBe(BUDGET_REFUSED_EXIT);
+    expect(r.budgetRefusal!.reason).toContain("cannot be bounded");
+  });
+});
+
+describe("repair 4 (Astra r1 #3): usage completeness is judged per dimension", () => {
+  test("cost-only usage under a token cap charges the planned token worst case every turn: repeated turns cannot pass the cap", () => {
+    const guard = new TurnBudgetGuard({ tokens: 20_000 });
+    let billed = 0;
+    for (let i = 0; i < 50; i++) {
+      const plan = guard.beforeRequest(PRICED, { max_tokens: 32_000, messages: [{ role: "user", content: "q".repeat(200) }] });
+      if (!plan.ok) break;
+      const input = Buffer.byteLength(JSON.stringify(plan.payload));
+      const output = (plan.payload as any).max_tokens;
+      billed += input + output; // the adversary uses every token it was allowed
+      guard.afterTurn({ cost: { total: 0.01 } }, "stop");
+      expect(guard.spent.tokens).toBeGreaterThanOrEqual(billed);
+    }
+    expect(billed).toBeLessThanOrEqual(20_000);
+    expect(guard.refusal).toMatchObject({ dimension: "tokens" });
+  });
+
+  test("missing or non-finite token components keep the planned token worst case; a complete report charges exactly", () => {
+    const partials: Array<Record<string, unknown>> = [
+      { input: 10, cost: { total: 0.001 } },
+      { input: 10, output: 5, cacheRead: 0, cacheWrite: Number.NaN, cost: { total: 0.001 } },
+      { input: Number.POSITIVE_INFINITY, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+      { input: -1, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+      { input: null, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+    ];
+    for (const usage of partials) {
+      const g = new TurnBudgetGuard({ tokens: 100_000, usdMicros: 10_000_000 });
+      const plan = g.beforeRequest(PRICED, { max_tokens: 500, messages: [] });
+      if (!plan.ok) throw new Error(plan.reason);
+      g.afterTurn(usage as any, "stop");
+      expect([usage, g.spent.tokens]).toEqual([usage, plan.worst.tokens]);
+      expect(g.spent.usdMicros).toBe(1000); // cost was reported: USD charges the report
+    }
+    const g = new TurnBudgetGuard({ tokens: 100_000 });
+    g.beforeRequest(PRICED, { max_tokens: 500, messages: [] });
+    g.afterTurn({ input: 40, output: 7, cacheRead: 2, cacheWrite: 1, cost: { total: 0 } }, "stop");
+    expect(g.spent.tokens).toBe(50);
+  });
+
+  test("tokens reported with no (or a non-finite) cost under a USD cap: USD keeps the planned worst case", () => {
+    for (const cost of [undefined, { total: Number.NaN }, { total: 0 }]) {
+      const g = new TurnBudgetGuard({ usdMicros: 1_000_000 });
+      const plan = g.beforeRequest(PRICED, { max_tokens: 500, messages: [] });
+      if (!plan.ok) throw new Error(plan.reason);
+      g.afterTurn({ input: 10, output: 10, cacheRead: 0, cacheWrite: 0, cost } as any, "stop");
+      expect(g.spent.usdMicros).toBe(plan.worst.usdMicros);
+    }
+  });
+
+  test("a real child reporting cost only under a 20,000-token cap never uses more than 20,000 tokens", async () => {
+    const dir = scratch();
+    const { script, ledger } = guardedPi(dir, PRICED, Array.from({ length: 30 }, () => 50_000), 200, { report: Array.from({ length: 30 }, () => "cost-only" as const) });
+    const r = newRun("BUILDER", "stub/priced");
+    await withFakePi(script, () => runChild({ run: r, prompt: "x", tools: "none", thinking: "off", sessionDir: dir, cwd: dir, timeoutMs: 20_000, spendCap: () => ({ tokens: 20_000 }) }));
+    const sent = sentOf(ledger);
+    expect(sent.length).toBeGreaterThanOrEqual(1);
+    expect(sent.reduce((a, s) => a + s.input + s.output, 0)).toBeLessThanOrEqual(20_000);
+    expect(r.budgetRefusal).toMatchObject({ dimension: "tokens" });
+    // The parent saw 0 tokens; the settled usage carries the guard's conservative token charge.
+    expect(r.tokensIn + r.tokensOut).toBe(0);
+    const settled = resultOf(r).usage;
+    expect(settled.tokensIn + settled.tokensOut).toBeGreaterThanOrEqual(sent.reduce((a, s) => a + s.input + s.output, 0));
+  });
+});
+
+describe("repair 4 (Astra r1 #2): the guard's conservative charges reach parent settlement", () => {
+  test("mixed reported / missing usage, successful exit: settled at the guard's charge, and a later child cannot take the released remainder ($1.50 limit)", async () => {
+    const dir = scratch();
+    // Child a: turn 1 reports ~$0.10; turn 2 reports NOTHING but bills everything the guard allowed. Exits 0.
+    const a = guardedPi(dir, PRICED, [1000, 100_000], 200, { report: ["full", "none"], name: "child-a" });
+    const b = guardedPi(dir, PRICED, [100_000, 100_000], 200, { name: "child-b" });
+    const h = harness();
+    const runner = createAgentRunner({ sessionsDir: join(h.runDir, "sessions"), cwd: h.deps.cwd, runChild });
+    h.deps.agent = (async (req: AgentRequest) => {
+      const saved = process.argv[1];
+      process.argv[1] = req.nodeId === "a" ? a.script : b.script;
+      try {
+        return await runner(req as any);
+      } finally {
+        process.argv[1] = saved;
+      }
+    }) as any;
+    const r = await run(h, [{ id: "a", prompt: "x", retry: { max_attempts: 1 } } as NodeDoc, { id: "b", prompt: "y", depends_on: ["a"], retry: { max_attempts: 1 } } as NodeDoc], { titan: { budget: { usd: 1.5, per_call_usd: 1 } } });
+    const sentA = sentOf(a.ledger);
+    const sentB = sentOf(b.ledger);
+    expect(sentA).toHaveLength(2);
+    expect(r.nodes.a.status).toBe("success");
+    const settleA = settleOf(h, "a")[0];
+    // What the parent observed from a alone (~$0.10) is NOT what it settles at: the unreported turn is charged too.
+    expect(settleA.chargedUsdMicros).toBeGreaterThanOrEqual(Math.ceil(sum(sentA) * 1e6));
+    expect(settleA.chargedUsdMicros).toBeGreaterThan(Math.ceil(sentA[0].cost * 1e6) + 500_000);
+    // Combined real spend of both children stays under the $1.50 workflow limit.
+    expect(sum(sentA) + sum(sentB)).toBeLessThanOrEqual(1.5);
+    expect(r.budget!.spentUsdMicros as number).toBeLessThanOrEqual(1_500_000);
+    expect(r.budget).toMatchObject({ overrunUsdMicros: 0 });
+  });
+
+  test("resultOf: a budgeted run settles at max(observed, guard spent + pending) per bounded dimension; an unreadable guard state is partial", () => {
+    const r = newRun("BUILDER", "stub/priced");
+    r.status = "done";
+    r.exitCode = 0;
+    r.text = "ok";
+    r.usageSeen = true;
+    r.costUsd = 0.1;
+    r.tokensIn = 100;
+    r.tokensOut = 50;
+    r.budgetStatePath = "/nonexistent";
+    r.budgetGuard = { state: "turn", turns: 3, start: { usdMicros: 1_000_000, tokens: 50_000 }, spent: { usdMicros: 700_000, tokens: 9000 }, pending: { usdMicros: 200_000, tokens: 1000 } };
+    const u = resultOf(r).usage;
+    expect(u.costUsd).toBeCloseTo(0.9, 9);
+    expect(u.tokensIn + u.tokensOut).toBe(10_000);
+    expect(usageProvenanceOf(r)).toBe("complete");
+    // Only bounded dimensions are raised; observed spend above the guard's charge is kept.
+    r.budgetGuard = { state: "turn", turns: 1, start: { usdMicros: 1_000_000 }, spent: { usdMicros: 10, tokens: 1 } };
+    expect(resultOf(r).usage).toMatchObject({ costUsd: 0.1, tokensIn: 100, tokensOut: 50 });
+    r.budgetGuard = undefined;
+    expect(usageProvenanceOf(r)).toBe("partial");
   });
 });

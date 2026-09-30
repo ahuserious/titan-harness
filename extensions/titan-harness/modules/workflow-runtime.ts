@@ -36,7 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { hooksEnv, SUBMIT_RESULT_INSTRUCTION, SUBMIT_RESULT_TOOL, schemaEnv } from "./child-hooks.ts";
-import type { runChild as RunChild } from "./child-runner.ts";
+import { guardCharged, type runChild as RunChild } from "./child-runner.ts";
 import type { ModelSlot, Thinking } from "./model-stack.ts";
 import type { RunStore } from "./run-store.ts";
 import { type AgentRun, newRun, type Role, runError, runOk } from "./runtime.ts";
@@ -127,8 +127,25 @@ export function usageProvenanceOf(run: AgentRun, threw = false): UsageProvenance
 	// The child's per-turn guard refused its FIRST model turn: no request was ever sent, so nothing was spent.
 	if (run.budgetRefusal && run.budgetGuard?.turns === 0 && !run.usageSeen) return "not-dispatched";
 	if (!run.usageSeen) return "none";
+	// A budgeted child whose guard state could not be read at settle: its conservative charges are unknown.
+	if (run.budgetStatePath && !run.budgetGuard?.spent) return "partial";
 	const interrupted = threw || run.status === "aborted" || run.status === "timeout" || run.preempted || run.budgetHalted || !!run.budgetRefusal || run.exitCode !== 0;
 	return interrupted ? "partial" : "complete";
+}
+
+/**
+ * The usage a budgeted run settles at: what the parent observed, raised to what the child's per-turn guard charged in
+ * each dimension it bounded. The guard charges a turn's planned worst case for every dimension that turn did not
+ * report (and for a turn whose end it never saw), so a child that reported some turns and not others is never
+ * settled at the reported subset alone — that would release budget the child actually spent.
+ */
+export function settledUsage(run: AgentRun): AgentResult["usage"] {
+	const usage = { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds };
+	const charged = guardCharged(run.budgetGuard as any);
+	if (!charged) return usage;
+	if (charged.usdMicros !== undefined && charged.usdMicros > Math.ceil(Math.round(usage.costUsd * 1e9) / 1e3)) usage.costUsd = charged.usdMicros / 1e6;
+	if (charged.tokens !== undefined && charged.tokens > usage.tokensIn + usage.tokensOut) usage.tokensIn += charged.tokens - (usage.tokensIn + usage.tokensOut);
+	return usage;
 }
 
 /** The AgentResult a settled AgentRun means. */
@@ -138,7 +155,7 @@ export function resultOf(run: AgentRun): AgentResult {
 		ok,
 		text: run.text,
 		sessionRef: run.sessionRef,
-		usage: { tokensIn: run.tokensIn, tokensOut: run.tokensOut, costUsd: run.costUsd, tpsSeconds: run.tpsSeconds },
+		usage: settledUsage(run),
 		error: ok ? undefined : run.budgetRefusal ? `budget refused a model turn: ${run.budgetRefusal.reason}` : run.budgetHalted ? "stopped: budget in-flight cap exceeded" : run.status === "aborted" ? "aborted" : run.status === "timeout" ? "timed out" : runError(run),
 		toolCalls: run.toolCalls,
 		model: run.model,
