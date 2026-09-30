@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { briefArg, runOk, type AgentRun } from "./runtime.ts";
-import { childToolsFor, readStackSettings, STACK_CHILD_ENV, subagentCapHint } from "./stack-config.ts";
+import { childToolsFor, readStackSettings, STACK_CHILD_ENV, SUBAGENT_TOOL, type StackSettings, subagentCapHint } from "./stack-config.ts";
 import { DynamicSemaphore } from "./concurrency.ts";
 
 const KILL_GRACE_MS = 5_000; // SIGTERM → SIGKILL escalation window
@@ -52,9 +52,9 @@ export function piInvocation(args: string[]): { command: string; args: string[] 
  * extension tools and `--no-tools` disables extension tools too, so a node that must reach
  * `submit_result` (structured output v2) names it here and it survives subagentTools=off.
  */
-export function effectiveChildTools(requested: string | "none", extraTools?: string[]): string | "none" {
+export function effectiveChildTools(requested: string | "none", extraTools?: string[], opts: { final?: boolean; settings?: StackSettings } = {}): string | "none" {
 	const extra = [...new Set((extraTools ?? []).map((t) => t.trim()).filter(Boolean))];
-	const policy = childToolsFor(requested);
+	const policy = childToolsFor(requested, opts);
 	if (policy === "none") return extra.length ? extra.join(",") : "none";
 	return [...new Set([...policy.split(","), ...extra])].join(",");
 }
@@ -76,6 +76,8 @@ export function runChild(opts: {
 	priority?: boolean; // reviewers/inspectors bypass the concurrency cap so they never wait behind the children they review
 	env?: Record<string, string>; // extra child environment (workflow nodes: ARTIFACTS_DIR, TITAN_NODE_*); never overrides the child marker
 	extraTools?: string[]; // extension tools appended AFTER the /stack policy (structured output v2: `submit_result` must survive subagentTools=off and --no-tools)
+	toolsFinal?: boolean; // `tools` is an explicit author list (workflow allowed_tools): never widened by childSubagents/childExa; tools-off still narrows it
+	resolvedTools?: string | "none"; // the already-resolved effective list (effectiveChildTools over tools + extraTools); used verbatim so the recorded list IS the spawned list
 	onUsage?: (run: AgentRun) => "continue" | "halt"; // watchdog pre-emption: consulted after every usage update and child compaction event; "halt" kills the child at its next tool_execution_end (run.preempted = true)
 }): Promise<AgentRun> {
 	const run = opts.run;
@@ -109,13 +111,14 @@ export function runChild(opts: {
 	for (const append of opts.appendSystemPrompts ?? []) {
 		if (append.trim()) args.push("--append-system-prompt", append);
 	}
-	// Tier-3 delegation contract for this child: the /stack subagent fan-out cap and the
-	// "subagents never spawn subagents" rule travel as an appended system prompt.
-	const capHint = subagentCapHint(readStackSettings());
-	if (capHint) args.push("--append-system-prompt", capHint);
 	// /stack "subagent tools" OFF forces every child to run tool-less, whatever the
 	// command asked for; ON keeps the command's own read-only/full-tools contract.
-	const effectiveTools = effectiveChildTools(opts.tools, opts.extraTools);
+	const effectiveTools = opts.resolvedTools ?? effectiveChildTools(opts.tools, opts.extraTools, { final: opts.toolsFinal });
+	// Tier-3 delegation contract: the /stack subagent fan-out cap and the "subagents never
+	// spawn subagents" rule travel as an appended system prompt, stated only to a child
+	// that actually holds the subagent tool (an explicit allowed_tools without it gets none).
+	const capHint = effectiveTools !== "none" && effectiveTools.split(",").includes(SUBAGENT_TOOL) ? subagentCapHint(readStackSettings()) : "";
+	if (capHint) args.push("--append-system-prompt", capHint);
 	if (effectiveTools === "none") args.push("--no-tools");
 	else args.push("--tools", effectiveTools);
 	args.push(opts.prompt);
