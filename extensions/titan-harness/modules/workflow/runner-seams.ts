@@ -13,14 +13,18 @@
  *       followed (a 3xx fails), the response is capped, each call has a wall-clock deadline (not
  *       just a socket inactivity timer), and a JSON-RPC error or
  *       `isError` result throws. A sidecar refusal (4xx) is deterministic: the error carries
- *       retryable:false so the node is not re-run.
+ *       retryable:false so the node is not re-run. A tool that is not on the read-only allowlist
+ *       (isReadOnlyTool) is never retried once the request may have reached the sidecar: a
+ *       timeout, a transport error after connect or a 5xx leaves the write's outcome unknown, so
+ *       the error carries retryable:false (one approval, at most one write).
  *
  *   validateProdV1(doc)
  *       the `prod-v1` validator profile (DESIGN §6.2): node types prompt, command, bash, script,
  *       verify (runner bash|verifier), approval, mcp_tool, cancel, workflow; no fan_out and no
- *       worktree isolation; titan.budget.max_concurrent_children ≤ 2; a write-named mcp_tool may
- *       only run after an approval node SUCCEEDED (trigger rules followed through intermediate
- *       nodes; a skipped approval under all_done does not count).
+ *       worktree isolation; titan.budget.max_concurrent_children ≤ 2; an mcp_tool whose name is not
+ *       on the read-only allowlist may only run after an approval node SUCCEEDED (trigger rules
+ *       followed through intermediate nodes; a skipped approval under all_done does not count),
+ *       and runs single-attempt (no retry.max_attempts > 1, no on_fail retry; pinned to 1 at run).
  *
  *   createRunnerRunWorkflow(host)
  *       runWorkflow recursive IN THE RUNNER: the child is loaded by the runner's own loader,
@@ -30,7 +34,8 @@
  *       ancestor's remainder), maxParallel 2, and gets the same recursive seam for its own
  *       `workflow:` nodes. Cycles and depth > MAX_WORKFLOW_DEPTH are refused before any run opens.
  *
- *   executeProdV1(loaded, deps, opts)   refuse a non-prod-v1 workflow, else executeWorkflow at ≤ 2.
+ *   executeProdV1(loaded, deps, opts)   refuse a non-prod-v1 workflow, else executeWorkflow at ≤ 2
+ *                                        with every non-read-only mcp_tool pinned to one attempt.
  *
  * Nothing here imports pi. The runner passes its loader and its deps factory in.
  */
@@ -58,13 +63,20 @@ export interface SidecarMcpOptions {
 	responseCap?: number;
 }
 
-/** An error from the sidecar path; `retryable: false` for a deterministic refusal. */
+/**
+ * An error from the sidecar path; `retryable: false` for a deterministic refusal, and for a
+ * non-read-only tool whose request may have reached the sidecar. `maybeSent` (set by postUnix):
+ * the failure came after the request may have been delivered, not while connecting.
+ */
 export class SidecarMcpError extends Error {
-	constructor(message: string, readonly retryable: boolean, readonly status?: number, readonly code?: string) {
+	constructor(message: string, readonly retryable: boolean, readonly status?: number, readonly code?: string, readonly maybeSent = false) {
 		super(message);
 		this.name = "SidecarMcpError";
 	}
 }
+
+/** Connect-phase errors: they prove no byte of the request reached a listening sidecar. */
+const NOT_SENT_CODES: ReadonlySet<string> = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ENOTSOCK", "EPERM", "ENOTDIR"]);
 
 export function createSidecarMcpTool(opts: SidecarMcpOptions): NonNullable<WorkflowRuntimeDeps["mcpTool"]> {
 	if (typeof opts.socketPath !== "string" || !path.isAbsolute(opts.socketPath)) throw new Error("sidecar mcpTool: socketPath must be an absolute unix socket path");
@@ -88,20 +100,35 @@ export function createSidecarMcpTool(opts: SidecarMcpOptions): NonNullable<Workf
 		if (!stat.isSocket()) throw new SidecarMcpError("mcp_tool: sidecar socketPath is not a unix socket", false);
 		const id = nextId++;
 		const body = JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: args ?? {} } });
-		const { status, text } = await postUnix(socketPath, `/mcp/${server}`, body, timeoutMs, cap);
+		// Once the request may have reached the sidecar, a transient failure leaves a write's outcome
+		// unknown (the upstream may already have committed it): only a read-only tool may be re-run.
+		const readOnly = isReadOnlyTool(tool);
+		const unknownOutcome = readOnly ? "" : "; the write may have been applied, so it is not retried";
+		let reply: { status: number; text: string };
+		try {
+			reply = await postUnix(socketPath, `/mcp/${server}`, body, timeoutMs, cap);
+		} catch (error) {
+			if (error instanceof SidecarMcpError && error.retryable && error.maybeSent && !readOnly) {
+				throw new SidecarMcpError(`${error.message} (${server}/${tool})${unknownOutcome}`, false, error.status, error.code, true);
+			}
+			throw error;
+		}
+		const { status, text } = reply;
+		const transient = status >= 500 || status === 0;
+		const outcomeNote = transient ? unknownOutcome : "";
 		if (status >= 300 && status < 400) throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar answered a redirect (${status}); refused`, false, status);
 		let parsed: any;
 		try {
 			parsed = JSON.parse(text);
 		} catch {
-			throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar returned invalid JSON (HTTP ${status})`, status >= 500, status);
+			throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar returned invalid JSON (HTTP ${status})${outcomeNote}`, transient && readOnly, status);
 		}
 		if (parsed && typeof parsed === "object" && parsed.error) {
 			const code = typeof parsed.error?.data?.code === "string" ? parsed.error.data.code : typeof parsed.error?.code === "string" ? parsed.error.code : undefined;
 			const message = typeof parsed.error?.message === "string" ? parsed.error.message : "error";
-			throw new SidecarMcpError(`mcp_tool ${server}/${tool}: ${code ?? `HTTP ${status}`}: ${message}`, status >= 500 || status === 0, status, code);
+			throw new SidecarMcpError(`mcp_tool ${server}/${tool}: ${code ?? `HTTP ${status}`}: ${message}${outcomeNote}`, transient && readOnly, status, code);
 		}
-		if (status < 200 || status >= 300) throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar HTTP ${status}`, status >= 500, status);
+		if (status < 200 || status >= 300) throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar HTTP ${status}${outcomeNote}`, transient && readOnly, status);
 		if (!parsed || typeof parsed !== "object" || parsed.id !== id || !parsed.result || typeof parsed.result !== "object") throw new SidecarMcpError(`mcp_tool ${server}/${tool}: sidecar returned no JSON-RPC result for id ${id}`, false, status);
 		const result = { content: parsed.result.content, isError: parsed.result.isError === true, structured: parsed.result.structuredContent };
 		if (result.isError) {
@@ -148,18 +175,23 @@ function postUnix(socketPath: string, route: string, body: string, timeoutMs: nu
 					settle();
 					resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") });
 				});
-				res.on("error", (error) => fail(new SidecarMcpError(`mcp_tool: sidecar response failed: ${error.message}`, true)));
+				res.on("error", (error) => fail(new SidecarMcpError(`mcp_tool: sidecar response failed: ${error.message}`, true, res.statusCode, undefined, true)));
 			},
 		);
+		// A timeout or a transport error may come after the sidecar received the body (maybeSent);
+		// only a connect-phase error (NOT_SENT_CODES) proves nothing was delivered.
 		deadline = setTimeout(() => {
-			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true));
+			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true, undefined, undefined, true));
 			req.destroy();
 		}, timeoutMs);
 		req.on("timeout", () => {
-			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true));
+			fail(new SidecarMcpError(`mcp_tool: sidecar timed out after ${timeoutMs} ms`, true, undefined, undefined, true));
 			req.destroy();
 		});
-		req.on("error", (error) => fail(new SidecarMcpError(`mcp_tool: sidecar request failed: ${error.message}`, true)));
+		req.on("error", (error) => {
+			const code = (error as NodeJS.ErrnoException).code;
+			fail(new SidecarMcpError(`mcp_tool: sidecar request failed: ${error.message}`, true, undefined, undefined, !(typeof code === "string" && NOT_SENT_CODES.has(code))));
+		});
 		req.end(body);
 	});
 }
@@ -170,15 +202,46 @@ export const PROD_V1_NODE_TYPES: ReadonlySet<NodeType> = new Set<NodeType>(["pro
 export const PROD_V1_VERIFY_RUNNERS: ReadonlySet<string> = new Set(["bash", "verifier"]);
 export const PROD_V1_MAX_PARALLEL = 2;
 export const MAX_WORKFLOW_DEPTH = 4;
-const WRITE_VERBS = new Set(["create", "update", "delete", "upsert", "insert", "write", "send", "post", "put", "patch", "merge", "remove", "add", "set", "convert", "promote", "publish", "trash", "untrash", "mark", "unmark", "label", "unlabel", "apply", "delink", "link", "assign", "move", "import", "reveal", "run", "submit", "cancel", "archive", "restore"]);
+/** Read verbs: a tool is read-only only if a word of its name is one of these (and nothing below vetoes it). */
+export const READ_ONLY_VERBS: ReadonlySet<string> = new Set(["get", "list", "search", "read", "query", "count", "describe", "fetch", "find", "lookup", "view", "show", "inspect", "retrieve", "browse", "stat", "exists"]);
+/** Effect verbs: any of them as a word of the name vetoes the allowlist (`get_or_create_contact`, `search_and_update`). */
+const EFFECT_VERBS: ReadonlySet<string> = new Set([
+	"create", "update", "delete", "upsert", "insert", "write", "send", "post", "put", "patch", "merge", "remove", "add", "set", "convert", "promote", "publish", "trash", "untrash", "mark", "unmark",
+	"label", "unlabel", "apply", "delink", "link", "unlink", "assign", "move", "import", "reveal", "run", "submit", "cancel", "archive", "restore", "edit", "modify", "save", "execute", "exec",
+	"refund", "charge", "transfer", "pay", "payout", "approve", "reject", "close", "upload", "rename", "drop", "share", "invite", "grant", "revoke", "void", "capture", "deploy", "invoke", "trigger",
+	"kill", "reset", "purge", "destroy", "wipe", "erase", "commit", "push", "sync", "enable", "disable", "subscribe", "unsubscribe", "buy", "sell", "withdraw", "deposit", "notify", "forward",
+	"replace", "append", "attach", "detach", "untag", "invalidate", "rollback", "revert", "migrate", "provision", "terminate", "suspend", "resume", "enroll", "dispatch", "finalize", "accept",
+]);
+/** Effect roots that also veto from inside a word, for run-together names (`bulkupdate`, `getandsend`). */
+const EFFECT_ROOTS: readonly string[] = [
+	"create", "update", "delete", "upsert", "insert", "write", "send", "remove", "merge", "patch", "publish", "refund", "charge", "transfer", "modify", "execute", "upload", "rename", "destroy",
+	"purge", "archive", "restore", "submit", "approve", "revoke", "grant", "invite", "withdraw", "deposit", "trigger", "deploy",
+];
+/** Words that join two actions in one name: the second action is unknown, so the allowlist does not apply. */
+const JOIN_WORDS: ReadonlySet<string> = new Set(["and", "or", "then", "also"]);
 
-/** True when any word of the tool name is a write verb (search_records → false, update_record → true). */
-export function isWriteNamedTool(tool: string): boolean {
+/** The lower-case words of a tool name (camelCase and acronyms split; any non-alphanumeric separates). */
+function toolWords(tool: string): string[] {
 	return tool
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
 		.toLowerCase()
 		.split(/[^a-z0-9]+/)
-		.some((word) => WRITE_VERBS.has(word));
+		.filter(Boolean);
+}
+
+/**
+ * The prod-v1 read-only allowlist. True only for a name that reads as a pure read: some word is
+ * a read verb (search_records, get_record, list_lists, web_search_exa), no word is an effect verb
+ * or a join word, and no word contains an effect root. Everything else — refund_payment,
+ * transfer_funds, bulkupdate, a name with no verb at all — is NOT read-only: under prod-v1 it
+ * needs a succeeded approval and runs single-attempt. A false negative only costs an approval.
+ */
+export function isReadOnlyTool(tool: unknown): boolean {
+	if (typeof tool !== "string") return false;
+	const words = toolWords(tool);
+	if (!words.some((word) => READ_ONLY_VERBS.has(word))) return false;
+	return !words.some((word) => JOIN_WORDS.has(word) || EFFECT_VERBS.has(word) || (!READ_ONLY_VERBS.has(word) && EFFECT_ROOTS.some((root) => word.includes(root))));
 }
 
 export interface ProfileIssue {
@@ -233,8 +296,15 @@ export function validateProdV1(doc: WorkflowDoc): ProfileIssue[] {
 			if (record.workflow?.fan_out !== undefined) issues.push({ nodeId: node.id, message: `workflow.fan_out is not allowed under prod-v1 (no dynamic fan-out)` });
 			if (record.workflow?.isolation !== undefined) issues.push({ nodeId: node.id, message: `workflow.isolation is not allowed under prod-v1` });
 		}
-		if (type === "mcp_tool" && typeof record.mcp_tool?.tool === "string" && isWriteNamedTool(record.mcp_tool.tool) && !mustRunAfterApproval(node)) {
-			issues.push({ nodeId: node.id, message: `write-capable mcp_tool ${record.mcp_tool.tool} must depend on an approval node that must succeed before it runs under prod-v1 (every path through all_success, or all deps of one_success/none_failed_min_one_success; never all_done)` });
+		if (type === "mcp_tool" && !isReadOnlyTool(record.mcp_tool?.tool)) {
+			const tool = JSON.stringify(record.mcp_tool?.tool);
+			if (!mustRunAfterApproval(node)) {
+				issues.push({ nodeId: node.id, message: `mcp_tool ${tool} is not on the read-only allowlist, so it must depend on an approval node that must succeed before it runs under prod-v1 (every path through all_success, or all deps of one_success/none_failed_min_one_success; never all_done)` });
+			}
+			// One approval, at most one call: a retry after an unknown outcome could apply the write twice.
+			if ((node.retry?.max_attempts ?? 1) > 1 || node.on_fail?.action === "retry") {
+				issues.push({ nodeId: node.id, message: `mcp_tool ${tool} is not on the read-only allowlist, so it runs single-attempt under prod-v1 (no retry.max_attempts > 1, no on_fail retry)` });
+			}
 		}
 	}
 	return issues;
@@ -252,10 +322,25 @@ export function assertProdV1(loaded: Pick<LoadedWorkflow, "name" | "normalized">
 	if (issues.length) throw new ProfileError(loaded.name, issues);
 }
 
+/**
+ * The workflow as prod-v1 executes it: every mcp_tool that is not read-only gets
+ * retry.max_attempts 1, so the executor's default of 2 attempts can never re-send an approved
+ * write (the validator already refuses an explicit retry on such a node).
+ */
+export function pinProdV1Attempts(loaded: LoadedWorkflow): LoadedWorkflow {
+	const doc = loaded.normalized ?? loaded.doc;
+	if (!doc || !Array.isArray(doc.nodes)) return loaded;
+	const nodes = doc.nodes.map((node) => {
+		if (nodeType(node) !== "mcp_tool" || isReadOnlyTool((node as unknown as Record<string, any>).mcp_tool?.tool)) return node;
+		return { ...node, retry: { ...(node.retry ?? {}), max_attempts: 1 } } as NodeDoc;
+	});
+	return { ...loaded, normalized: { ...doc, nodes } };
+}
+
 /** Refuse a non-prod-v1 workflow; otherwise execute it with at most PROD_V1_MAX_PARALLEL nodes at once. */
 export function executeProdV1(loaded: LoadedWorkflow, deps: WorkflowRuntimeDeps, opts: ExecuteOptions = {}): Promise<RunResult> {
 	assertProdV1(loaded);
-	return executeWorkflow(loaded, deps, { ...opts, maxParallel: Math.min(opts.maxParallel ?? PROD_V1_MAX_PARALLEL, PROD_V1_MAX_PARALLEL) });
+	return executeWorkflow(pinProdV1Attempts(loaded), deps, { ...opts, maxParallel: Math.min(opts.maxParallel ?? PROD_V1_MAX_PARALLEL, PROD_V1_MAX_PARALLEL) });
 }
 
 // ═══ runWorkflow, recursive in the runner ══════════════════════════════════════
@@ -293,6 +378,6 @@ export function createRunnerRunWorkflow(host: RunnerWorkflowHost, parent: { runI
 		const opened = host.store.open({ projectSlug: host.projectSlug, cwd: host.cwd, command: "workflow", workflow: { name: child.name, sha256: child.sha256 }, parentRunId: parent.runId, status: "running" });
 		const runWorkflow = createRunnerRunWorkflow(host, { runId: opened.runId, chain: [...parent.chain, child.name] });
 		const deps = host.makeDeps({ loaded: child, runId: opened.runId, runDir: opened.dir, runWorkflow });
-		return executeWorkflow(child, deps, { inputs, parentBudget: opts?.parentBudget, signal: opts?.signal, maxParallel: PROD_V1_MAX_PARALLEL });
+		return executeWorkflow(pinProdV1Attempts(child), deps, { inputs, parentBudget: opts?.parentBudget, signal: opts?.signal, maxParallel: PROD_V1_MAX_PARALLEL });
 	};
 }

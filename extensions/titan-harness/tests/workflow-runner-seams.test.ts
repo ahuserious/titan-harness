@@ -19,7 +19,7 @@ import {
 	createRunnerRunWorkflow,
 	createSidecarMcpTool,
 	executeProdV1,
-	isWriteNamedTool,
+	isReadOnlyTool,
 	validateProdV1,
 } from "../modules/workflow/runner-seams.ts";
 import type { NodeDoc, WorkflowDoc } from "../modules/workflow/schema.ts";
@@ -42,7 +42,7 @@ function scratch(prefix = "titan-seams-"): string {
 const allowAll: ActorPolicy = { policyId: "test-allow-all", authorize: () => true };
 
 interface SidecarCall { url: string; method: string; host?: string; body: any }
-type Reply = (call: SidecarCall) => { status?: number; body?: unknown; raw?: string; headers?: Record<string, string>; hang?: boolean; trickleMs?: number };
+type Reply = (call: SidecarCall) => { status?: number; body?: unknown; raw?: string; headers?: Record<string, string>; hang?: boolean; trickleMs?: number; delayMs?: number; destroy?: boolean };
 
 /** A fake unit sidecar on a unix socket: records every request, answers by `reply`. */
 async function fakeSidecar(reply: Reply = (c) => ({ body: { jsonrpc: "2.0", id: c.body.id, result: { content: [{ type: "text", text: JSON.stringify({ records: [{ id: "r1" }] }) }] } } })) {
@@ -59,6 +59,8 @@ async function fakeSidecar(reply: Reply = (c) => ({ body: { jsonrpc: "2.0", id: 
 			calls.push(call);
 			const r = reply(call);
 			if (r.hang) return;
+			// the body was received (the upstream may have committed it), then the connection drops
+			if (r.destroy) return void req.socket.destroy();
 			if (r.trickleMs) {
 				// Stays under the response cap and keeps the socket busy: one space every trickleMs, never ends.
 				res.writeHead(r.status ?? 200, { "content-type": "application/json" });
@@ -66,8 +68,14 @@ async function fakeSidecar(reply: Reply = (c) => ({ body: { jsonrpc: "2.0", id: 
 				res.on("close", () => { clearInterval(tick); trickleClosed.push(Date.now()); });
 				return;
 			}
-			res.writeHead(r.status ?? 200, { "content-type": "application/json", ...(r.headers ?? {}) });
-			res.end(r.raw ?? JSON.stringify(r.body));
+			const answer = () => {
+				if (res.destroyed) return;
+				res.writeHead(r.status ?? 200, { "content-type": "application/json", ...(r.headers ?? {}) });
+				res.end(r.raw ?? JSON.stringify(r.body));
+			};
+			// a slow ack: the request is accepted at once, the answer comes after delayMs
+			if (r.delayMs) setTimeout(answer, r.delayMs);
+			else answer();
 		});
 	});
 	await new Promise<void>((resolve) => server.listen(socketPath, resolve));
@@ -146,7 +154,7 @@ describe("sidecar mcpTool", () => {
 		mode = "large";
 		expect(await mcp("zoho", "t", {}).catch((e) => e.message)).toContain("exceeds 1024 bytes");
 		mode = "hang";
-		expect(await mcp("zoho", "t", {}).catch((e) => e)).toMatchObject({ retryable: true, message: expect.stringContaining("timed out") });
+		expect(await mcp("zoho", "search_records", {}).catch((e) => e)).toMatchObject({ retryable: true, message: expect.stringContaining("timed out") });
 		expect(sc.calls.map((c) => c.url)).toEqual(Array(5).fill("/mcp/zoho"));
 	});
 
@@ -239,6 +247,104 @@ describe("sidecar mcpTool", () => {
 	});
 });
 
+// ═══ One approval, at most one write (g2 finding 1) ════════════════════════════
+
+/** A runtime on the fake sidecar whose approvals all succeed (the human said yes). */
+function approvedSidecarRuntime(socketPath: string, doc: WorkflowDoc, timeoutMs: number) {
+	const root = scratch();
+	const store = new RunStore(join(root, "runs"));
+	const cwd = join(root, "cwd");
+	mkdirSync(cwd);
+	const { runId, dir } = store.open({ projectSlug: "p", cwd, workflow: { name: doc.name } });
+	const approvals: string[] = [];
+	const deps = createWorkflowRuntime({ cwd, runId, runDir: dir, loaded: loadedOf(doc), store, settings: DEFAULT_STACK_SETTINGS,
+		runChild: async () => { throw new Error("no agents here"); }, resolveRole: () => ({ model: "fake/m", thinking: "low", callsign: "w", appendSystemPrompts: [], tools: "read" }),
+		sidecarMcp: { socketPath, routes: ["zoho"], timeoutMs } });
+	deps.approval = async (message) => { approvals.push(message); return { approved: true, response: "yes" }; };
+	return { deps, approvals, dir };
+}
+const okResult = (c: SidecarCall) => ({ body: { jsonrpc: "2.0", id: c.body.id, result: { structuredContent: { ok: true } } } });
+const writesSeen = (calls: SidecarCall[], tool = "update_record") => calls.filter((c) => c.body?.params?.name === tool).length;
+
+describe("one approval, at most one write", () => {
+	test("a slow-ack sidecar sees exactly one write: the timed-out approved write is not retried (seam alone, default executor retries)", async () => {
+		// the sidecar accepts the request (the upstream commits it) and acknowledges after the deadline
+		const sc = await fakeSidecar((c) => ({ ...okResult(c), delayMs: 400 }));
+		const doc = wf("slow-ack", [
+			{ id: "gate", approval: { message: "update?" } },
+			// executor default is 2 attempts; delay 0 so a wrong retry would show at once
+			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record", args: { id: "r1" } }, depends_on: ["gate"], retry: { delay_ms: 0 } },
+		] as unknown as NodeDoc[]);
+		const { deps, approvals } = approvedSidecarRuntime(sc.socketPath, doc, 150);
+		const result = await executeWorkflow(loadedOf(doc), deps);
+		expect(approvals).toEqual(["update?"]);
+		expect(result.nodes.w).toMatchObject({ status: "failed", attempts: 1, error: expect.stringContaining("not retried") });
+		await Bun.sleep(500); // past the slow ack: nothing else arrives
+		expect(writesSeen(sc.calls)).toBe(1);
+	});
+
+	test("the same slow-ack write under executeProdV1 (write nodes pinned to one attempt): exactly one write", async () => {
+		const sc = await fakeSidecar((c) => ({ ...okResult(c), delayMs: 400 }));
+		const doc = wf("slow-ack-prod", [
+			{ id: "gate", approval: { message: "refund?" } },
+			{ id: "w", mcp_tool: { server: "zoho", tool: "refund_payment", args: { id: "p1" } }, depends_on: ["gate"] },
+		] as unknown as NodeDoc[]);
+		const { deps, approvals } = approvedSidecarRuntime(sc.socketPath, doc, 150);
+		const result = await executeProdV1(loadedOf(doc), deps);
+		expect(approvals).toEqual(["refund?"]);
+		expect(result.nodes.w).toMatchObject({ status: "failed", attempts: 1 });
+		await Bun.sleep(500);
+		expect(writesSeen(sc.calls, "refund_payment")).toBe(1);
+	});
+
+	test("after the body is sent, a timeout, a dropped connection, a 5xx or a 5xx without JSON is retryable:false for a write and stays retryable for a read", async () => {
+		let mode = "slow";
+		const sc = await fakeSidecar((c) => {
+			if (mode === "slow") return { ...okResult(c), delayMs: 400 };
+			if (mode === "drop") return { destroy: true };
+			if (mode === "5xx") return { status: 503, body: { jsonrpc: "2.0", id: c.body.id, error: { code: -32003, message: "upstream", data: { code: "UPSTREAM_ERROR" } } } };
+			if (mode === "5xx-status") return { status: 502, body: { jsonrpc: "2.0", id: c.body.id, result: { content: [] } } };
+			return { status: 500, raw: "<html>bad gateway</html>" };
+		});
+		const mcp = createSidecarMcpTool({ socketPath: sc.socketPath, routes: ["zoho"], timeoutMs: 150 });
+		for (const m of ["slow", "drop", "5xx", "5xx-status", "5xx-html"]) {
+			mode = m;
+			const write = await mcp("zoho", "transfer_funds", { amount: 1 }).catch((e) => e);
+			expect(write).toBeInstanceOf(SidecarMcpError);
+			expect({ mode: m, retryable: write.retryable, unknown: write.message.includes("not retried") }).toEqual({ mode: m, retryable: false, unknown: true });
+			const read = await mcp("zoho", "search_records", {}).catch((e) => e);
+			expect(read).toBeInstanceOf(SidecarMcpError);
+			expect({ mode: m, retryable: read.retryable }).toEqual({ mode: m, retryable: true });
+		}
+		// nothing was sent to a missing socket, so even a write may be retried there
+		const gone = createSidecarMcpTool({ socketPath: join(scratch(), "missing.sock"), routes: ["zoho"] });
+		expect(await gone("zoho", "update_record", {}).catch((e) => e)).toMatchObject({ retryable: true });
+		await Bun.sleep(450);
+		expect(writesSeen(sc.calls, "transfer_funds")).toBe(5);
+	});
+
+	test("executeProdV1 runs a non-read-only mcp_tool once even when the bridge says the failure is retryable; a read-only one keeps its retries", async () => {
+		const root = scratch();
+		const store = new RunStore(join(root, "runs"));
+		const { runId, dir } = store.open({ projectSlug: "p", cwd: root, workflow: { name: "pin" } });
+		const calls: string[] = [];
+		const deps = stubDeps(store, runId, dir, root, {
+			async approval() { return { approved: true, response: "yes" }; },
+			async mcpTool(_server, tool) { calls.push(tool); throw new Error(`${tool}: transient`); },
+		});
+		const doc = wf("pin", [
+			{ id: "gate", approval: { message: "go?" } },
+			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" }, depends_on: ["gate"], retry: { delay_ms: 0 } },
+			{ id: "r", mcp_tool: { server: "zoho", tool: "search_records" }, retry: { delay_ms: 0 } },
+		] as unknown as NodeDoc[]);
+		const r = await executeProdV1(loadedOf(doc), deps);
+		expect(r.nodes.w).toMatchObject({ status: "failed", attempts: 1 });
+		expect(r.nodes.r).toMatchObject({ status: "failed", attempts: 2 });
+		expect(calls.filter((t) => t === "update_record")).toEqual(["update_record"]);
+		expect(calls.filter((t) => t === "search_records")).toEqual(["search_records", "search_records"]);
+	});
+});
+
 // ═══ prod-v1 profile ═══════════════════════════════════════════════════════════
 
 describe("prod-v1 validator profile", () => {
@@ -269,8 +375,8 @@ describe("prod-v1 validator profile", () => {
 	});
 
 	test("a write-named mcp_tool must depend (transitively) on an approval", () => {
-		expect(["update_record", "createRecords", "upsert", "send_email", "delete-thing", "zoho_add_tags"].every(isWriteNamedTool)).toBe(true);
-		expect(["search_records", "get_record", "executeCOQLQuery", "list_lists", "web_search_exa"].some(isWriteNamedTool)).toBe(false);
+		expect(["update_record", "createRecords", "upsert", "send_email", "delete-thing", "zoho_add_tags"].some(isReadOnlyTool)).toBe(false);
+		expect(["search_records", "get_record", "list_lists", "web_search_exa"].every(isReadOnlyTool)).toBe(true);
 		const unguarded = wf("u", [{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" } }] as unknown as NodeDoc[]);
 		expect(validateProdV1(unguarded)).toEqual([{ nodeId: "w", message: expect.stringContaining("must depend on an approval") }]);
 		const guarded = wf("g", [
@@ -278,6 +384,39 @@ describe("prod-v1 validator profile", () => {
 			{ id: "w", mcp_tool: { server: "zoho", tool: "update_record" }, depends_on: ["prep"] },
 		] as unknown as NodeDoc[]);
 		expect(validateProdV1(guarded)).toEqual([]);
+	});
+
+	test("approval is required for every mcp_tool not on the read-only allowlist (g2 finding 2)", () => {
+		// the g2 misses, money verbs and run-together names are all not read-only
+		const needApproval = ["refund_payment", "transfer_funds", "bulkupdate", "BulkUpdateRecords", "edit_record", "modify_deal", "save_draft", "execute_query", "executeCOQLQuery", "charge_card",
+			"pay_invoice", "approve_request", "close_deal", "upload_file", "rename_file", "drop_table", "share_doc", "invite_user", "records", "zoho", "do_thing", "get_or_create_contact",
+			"searchAndUpdate", "list_then_delete", "getandsend", "fetch_and_archive", "lookup_refund", "query.transfer"];
+		expect(needApproval.filter(isReadOnlyTool)).toEqual([]);
+		const readOnly = ["search_records", "get_record", "list_lists", "web_search_exa", "read_file", "query_leads", "count_records", "describe_module", "getRecords", "searchRecords", "fetch_page",
+			"find_contacts", "listUsers", "get_deal_stage", "lookup_company"];
+		expect(readOnly.filter((t) => !isReadOnlyTool(t))).toEqual([]);
+		expect([undefined, null, 3, ""].some((t) => isReadOnlyTool(t))).toBe(false);
+		const denial = (id = "w") => [{ nodeId: id, message: expect.stringContaining("not on the read-only allowlist") }];
+		for (const tool of ["refund_payment", "transfer_funds", "bulkupdate"]) {
+			expect(validateProdV1(wf("u", [{ id: "w", mcp_tool: { server: "zoho", tool } }] as unknown as NodeDoc[]))).toEqual(denial());
+			expect(validateProdV1(wf("g", [{ id: "gate", approval: { message: `${tool}?` } }, { id: "w", mcp_tool: { server: "zoho", tool }, depends_on: ["gate"] }] as unknown as NodeDoc[]))).toEqual([]);
+		}
+		// a tool name that is missing or not a string is not read-only either
+		expect(validateProdV1(wf("n", [{ id: "w", mcp_tool: { server: "zoho" } }] as unknown as NodeDoc[]))).toEqual(denial());
+		// a read-only tool needs no approval
+		expect(validateProdV1(wf("r", [{ id: "r", mcp_tool: { server: "zoho", tool: "search_records" } }] as unknown as NodeDoc[]))).toEqual([]);
+	});
+
+	test("a non-read-only mcp_tool is single-attempt under prod-v1: an explicit retry is refused (g2 finding 1)", () => {
+		const gate = { id: "gate", approval: { message: "go?" } };
+		const node = (extra: Record<string, unknown>) => validateProdV1(wf("s", [gate, { id: "w", mcp_tool: { server: "zoho", tool: "send_email" }, depends_on: ["gate"], ...extra }] as unknown as NodeDoc[]));
+		const single = [{ nodeId: "w", message: expect.stringContaining("runs single-attempt") }];
+		expect(node({ retry: { max_attempts: 3 } })).toEqual(single);
+		expect(node({ on_fail: { action: "retry", max: 2 } })).toEqual(single);
+		expect(node({ retry: { max_attempts: 1, delay_ms: 0 } })).toEqual([]);
+		expect(node({})).toEqual([]);
+		// a read-only tool may retry
+		expect(validateProdV1(wf("r", [{ id: "r", mcp_tool: { server: "zoho", tool: "search_records" }, retry: { max_attempts: 3 } }] as unknown as NodeDoc[]))).toEqual([]);
 	});
 
 	test("a skipped approval does not guard a write: the approval must SUCCEED on every path the trigger rules allow (g1 finding 1)", () => {

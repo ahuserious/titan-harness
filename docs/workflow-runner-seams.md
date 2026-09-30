@@ -10,7 +10,10 @@
   - a redirect;
   - a response over the size cap (1 MiB by default) or the call deadline (30 s by default). The deadline is wall-clock time for the whole call, not a socket inactivity timer, so a sidecar that trickles bytes is still cut off;
   - a JSON-RPC `error`, an `isError` result, or a response id that does not match the request.
-- A sidecar 4xx refusal (for example `MCP_TOOL_DENIED`) throws with `retryable: false`, and `mcp_tool` nodes then fail without retries. 5xx responses, timeouts and a missing socket are retryable.
+- A sidecar 4xx refusal (for example `MCP_TOOL_DENIED`) throws with `retryable: false`, and `mcp_tool` nodes then fail without retries.
+- Retries depend on whether the request may have reached the sidecar and whether the tool is read-only (`isReadOnlyTool`, the allowlist described under `prod-v1` below):
+  - A missing socket, or a connect error such as `ECONNREFUSED`, means nothing was sent. That error is retryable for every tool.
+  - A timeout, a transport error after connecting, or a 5xx is retryable only for a read-only tool. For any other tool the error carries `retryable: false`, because the upstream may already have committed the write. One approval therefore leads to at most one write.
 - `createWorkflowRuntime({ sidecarMcp })` wires the seam. A hosted runtime (one with `approver` set) refuses a direct `mcpTool` bridge. Passing both `mcpTool` and `sidecarMcp` is refused.
 
 ## Seam 4: `runWorkflow`, recursive in the runner
@@ -30,7 +33,17 @@
 - Allowed node types: `prompt`, `command`, `bash`, `script`, `verify` (runner `bash` or `verifier` only), `approval`, `mcp_tool`, `cancel` and `workflow`.
 - `workflow` nodes may not use `fan_out` or `isolation`, and every node's isolation is `none`.
 - `titan.budget.max_concurrent_children` is at most 2, and execution is capped at 2 parallel nodes.
-- A write-named `mcp_tool` may only run after an `approval` has succeeded. The check follows trigger rules through intermediate nodes: under `all_success` one gated dependency is enough, under `one_success` and `none_failed_min_one_success` every dependency must be gated, and a node under `all_done` is never gated (its approval may have been skipped by `when:`). The name check is a word match against write verbs. The sidecar tool allowlist limits which tools exist; it does not stand in for the human decision.
+- Every `mcp_tool` needs a succeeded `approval` unless its tool name is on the read-only allowlist. A name is read-only only if all three hold:
+  - one of its words is a read verb (`get`, `list`, `search`, `read`, `query`, `count`, `describe`, `fetch`, `find`, `lookup`, `view`, `show`, `inspect`, `retrieve`, `browse`, `stat`, `exists`);
+  - none of its words is an effect verb (for example `create`, `update`, `send`, `execute`, `refund`, `transfer`) or a joining word (`and`, `or`, `then`, `also`);
+  - no word contains an effect root, which catches run-together names such as `bulkupdate`.
+- Any other name needs approval, including a name with no verb at all. Examples are `refund_payment`, `transfer_funds`, `bulkupdate`, `get_or_create_contact` and `executeCOQLQuery`. A tool wrongly classed as not read-only only costs an approval.
+- The approval check follows trigger rules through intermediate nodes:
+  - under `all_success`, one gated dependency is enough;
+  - under `one_success` and `none_failed_min_one_success`, every dependency must be gated;
+  - a node under `all_done` is never gated, because its approval may have been skipped by `when:`.
+- The sidecar tool allowlist limits which tools exist. It does not stand in for the human decision.
+- An `mcp_tool` that is not read-only runs once. The validator refuses `retry.max_attempts` above 1 and `on_fail: retry` on it. `executeProdV1` and the runner's `runWorkflow` also pin it to one attempt, overriding the executor's default of 2. A read-only tool keeps its retries.
 
 ## Interrupted run
 
