@@ -12,7 +12,8 @@
  * registered with ctx.trackBudgetWork so the parent's summary waits for it: a child — or a fan-out of children
  * together — can never spend more than this node's, this workflow's and every ancestor's
  * remainder, whatever the child declares. A child run that failed on a hard budget refusal
- * (RunResult.budgetRefused) fails this node with retryable:false.
+ * (RunResult.budgetRefused), or one the seam refused before opening a run (RunResult.notStarted),
+ * fails this node with retryable:false.
  */
 import type { NodeHandler, RunResult } from "../executor.ts";
 import type { TriggerRule } from "../schema.ts";
@@ -54,7 +55,9 @@ export const runWorkflowNode: NodeHandler = async (ctx) => {
 		if (child.status === "completed") return { status: "success", output: child.returns, text, meta: { childRunId: child.runId } };
 		// A child that failed on a hard budget refusal is never re-run: a retry would spend its early nodes again and be refused anyway.
 		const refused = child.budgetRefused;
-		return { status: "failed", output: undefined, text, error: `child workflow ${spec.name} ${child.status}${child.error ? `: ${child.error}` : ""}`, meta: { childRunId: child.runId, ...(refused ? { budget: refused } : {}) }, ...(refused ? { retryable: false } : {}) };
+		// A child the seam refused before opening a run (runner-seams.ts: not found, not prod-v1, recursion, depth) is deterministic too.
+		const final = refused || child.notStarted;
+		return { status: "failed", output: undefined, text, error: `child workflow ${spec.name} ${child.status}${child.error ? `: ${child.error}` : ""}`, meta: { childRunId: child.runId, ...(refused ? { budget: refused } : {}), ...(child.notStarted ? { notStarted: child.notStarted } : {}) }, ...(final ? { retryable: false } : {}) };
 	}
 	const source = resolveReference(spec.fan_out.source, ctx.substitution());
 	if (!source.found || source.rest || !Array.isArray(source.value)) {

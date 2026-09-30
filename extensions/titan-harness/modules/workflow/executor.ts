@@ -253,6 +253,8 @@ export interface RunResult {
 	budget?: Record<string, unknown>;
 	/** Set when a node failed on a hard budget refusal (here or in a child run): the caller must not retry. */
 	budgetRefused?: BudgetRefusal;
+	/** Set by a runWorkflow seam that refused the child before opening a run (not found, profile, recursion, depth): a retry cannot change it. */
+	notStarted?: string;
 	/** Set when the run froze for re-authoring (run.json status "reauthored"). */
 	frozen?: { kind: EscalationKind; nodeId: string; report: string; reviewedNodeId?: string; verdict?: Verdict };
 }

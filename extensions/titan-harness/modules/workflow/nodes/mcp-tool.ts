@@ -4,7 +4,8 @@
  * substituted deeply: a string that is exactly one reference (`"$classify.output"`)
  * becomes the referenced VALUE (object, array, number…), any other string substitutes in
  * raw mode. The tool's return value is the node output (its JSON is the artifact). A
- * runtime without an MCP bridge fails the node without retries.
+ * runtime without an MCP bridge fails the node without retries, and so does a bridge error
+ * that says it is deterministic (`retryable: false`, e.g. a sidecar route or tool refusal).
  */
 import type { NodeContext, NodeHandler } from "../executor.ts";
 import { resolveReference } from "../substitute.ts";
@@ -32,7 +33,15 @@ export const runMcpToolNode: NodeHandler = async (ctx) => {
 		return { status: "failed", output: undefined, error: `mcp_tool ${spec.server}/${spec.tool}: no MCP bridge in this runtime (deps.mcpTool is absent)`, retryable: false };
 	}
 	const args = substituteArgs(spec.args ?? {}, ctx) as Record<string, unknown>;
-	const result = await ctx.deps.mcpTool(spec.server, spec.tool, args);
+	let result: unknown;
+	try {
+		result = await ctx.deps.mcpTool(spec.server, spec.tool, args);
+	} catch (error) {
+		if (error && typeof error === "object" && (error as { retryable?: unknown }).retryable === false) {
+			return { status: "failed", output: undefined, error: error instanceof Error ? error.message : String(error), retryable: false, meta: { server: spec.server, tool: spec.tool } };
+		}
+		throw error;
+	}
 	const text = typeof result === "string" ? result : `${JSON.stringify(result, null, 2) ?? ""}\n`;
 	return { status: "success", output: result, text, meta: { server: spec.server, tool: spec.tool } };
 };
